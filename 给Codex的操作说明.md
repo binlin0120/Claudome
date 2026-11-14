@@ -7,7 +7,7 @@
 | 用户情况 | 你要先读的文件 |
 | --- | --- |
 | Windows 新建完整虚拟电脑 | [完整教程](docs/完整教程.md)，再用下方 Windows 任务 |
-| Mac | [Mac 部署流程](skills/claude-environment-deploy/references/Mac部署流程.md)，用文末的 Mac 任务，按第 2 节先查离线原版及有资格的国内正版下载 |
+| Mac | [Mac 部署流程](skills/claude-environment-deploy/references/Mac部署流程.md)，用文末的 Mac 任务。第 2 节「Mac 下载前必须检查来源和实际文件速度」为必做步骤，完成后才完整下载。 |
 | 已有环境，补系统设置或网络 | [旧版用户补齐任务](已部署用户_补齐配置任务.txt)，先盘点现状再按缺口继续 |
 | 已有自建 VPS，换成自建出口或排查慢 | [完整教程第 6.1 节](docs/完整教程.md#61-用自建-vps-做最终出口) 和 [自建 VPS 排查操作参考](docs/自建VPS排查操作参考.md) |
 
