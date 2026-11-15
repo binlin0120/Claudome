@@ -18,7 +18,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($file in Get-ChildItem skills,tests -Recurse -Filter '*.ps1') {
+          foreach ($file in Get-ChildItem skills,tests,tools -Recurse -File | Where-Object { $_.Extension -in '.ps1','.psm1' }) {
             $tokens = $null
             $parseErrors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors)
@@ -33,7 +33,7 @@ jobs:
           $stage = Join-Path 'D:\Codex' "ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $stage) { throw 'Test staging directory already exists' }
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item -LiteralPath 'tests','skills' -Destination $stage -Recurse
+          Copy-Item -LiteralPath 'tests','skills','tools' -Destination $stage -Recurse
           foreach ($name in 'Test-ScriptBehavior.ps1','Test-GuestNetworkBehavior.ps1','Test-HostPathBehavior.ps1') {
             $output = & pwsh -NoProfile -NonInteractive -File (Join-Path $stage "tests/$name") 2>&1 | Out-String
             $code = $LASTEXITCODE
@@ -44,3 +44,7 @@ jobs:
             $report = $output.Substring($offset) | ConvertFrom-Json
             if ($null -eq $report.failed -or $report.failed -ne 0) { throw "Offline test cases failed: $name" }
           }
+          & pwsh -NoProfile -NonInteractive -File (Join-Path $stage 'tests/Test-V11Session.ps1') -OutputRoot $stage
+          if ($LASTEXITCODE -ne 0) { throw 'V11 session tests failed' }
+          $v11 = Get-Content -LiteralPath (Join-Path $stage 'V11-session-test-results.json') -Raw | ConvertFrom-Json
+          if ($null -eq $v11.failed -or $v11.failed -ne 0) { throw 'V11 session test cases failed' }

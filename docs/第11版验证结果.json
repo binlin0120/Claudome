@@ -1,0 +1,217 @@
+﻿{
+  "version": 11,
+  "date": "2026-11-15",
+  "runtime": "Windows PowerShell 5.1.28000.2113",
+  "newTests": {
+    "version": 11,
+    "testType": "Windows local runtime and simulated guest inputs; no real VM/network deployment",
+    "completedUtc": "2026-11-15T10:59:33.7064795Z",
+    "passed": 40,
+    "failed": 0,
+    "tests": [
+      {
+        "name": "default_locked",
+        "status": "PASS"
+      },
+      {
+        "name": "password_special_characters_are_data",
+        "status": "PASS"
+      },
+      {
+        "name": "duplicate_field_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "unknown_field_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid_ipv4_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "execution_place_required",
+        "status": "PASS"
+      },
+      {
+        "name": "blank_vm_name_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "input_expressions_are_not_executed",
+        "status": "PASS"
+      },
+      {
+        "name": "encrypted_import_and_source_clear",
+        "status": "PASS"
+      },
+      {
+        "name": "private_acl_restricted",
+        "status": "PASS"
+      },
+      {
+        "name": "explicit_start_required",
+        "status": "PASS"
+      },
+      {
+        "name": "open_single_task",
+        "status": "PASS"
+      },
+      {
+        "name": "duplicate_open_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "script_containment",
+        "status": "PASS"
+      },
+      {
+        "name": "junction_escape_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "guestlocal_job_fields_and_redaction",
+        "status": "PASS"
+      },
+      {
+        "name": "unapproved_field_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "failed_script_does_not_echo_exception_secret",
+        "status": "PASS"
+      },
+      {
+        "name": "timeout_stops_and_cleans_job",
+        "status": "PASS"
+      },
+      {
+        "name": "hyperv_parameters_and_output_mock_only",
+        "status": "PASS"
+      },
+      {
+        "name": "hyperv_start_requires_guest_credentials",
+        "status": "PASS"
+      },
+      {
+        "name": "password_whitespace_preserved",
+        "status": "PASS"
+      },
+      {
+        "name": "machine_binding",
+        "status": "PASS"
+      },
+      {
+        "name": "lock_removes_credentials",
+        "status": "PASS"
+      },
+      {
+        "name": "locked_runner_denies_execution",
+        "status": "PASS"
+      },
+      {
+        "name": "locked_task_needs_new_user_material",
+        "status": "PASS"
+      },
+      {
+        "name": "lock_idempotent",
+        "status": "PASS"
+      },
+      {
+        "name": "corrupt_state_fails_closed",
+        "status": "PASS"
+      },
+      {
+        "name": "lock_accepts_mac_instruction_state",
+        "status": "PASS"
+      },
+      {
+        "name": "lock_recovers_corrupt_state_safely",
+        "status": "PASS"
+      },
+      {
+        "name": "customer_template_uses_chinese_bracket_labels",
+        "status": "PASS"
+      },
+      {
+        "name": "all_chinese_labels_map_to_existing_fields",
+        "status": "PASS"
+      },
+      {
+        "name": "fullwidth_and_ascii_colons_accepted",
+        "status": "PASS"
+      },
+      {
+        "name": "malformed_chinese_bracket_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "brackets_equals_and_password_spaces_preserved",
+        "status": "PASS"
+      },
+      {
+        "name": "mixed_format_duplicate_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "chinese_duplicate_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "unknown_chinese_label_rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "chinese_execution_location_normalized",
+        "status": "PASS"
+      },
+      {
+        "name": "chinese_import_execute_and_lock_roundtrip",
+        "status": "PASS"
+      }
+    ]
+  },
+  "legacyRegression": [
+    {
+      "script": "Test-ScriptBehavior.ps1",
+      "total": 62,
+      "failed": 0,
+      "coverage": "mocked calls; no live VM or external request"
+    },
+    {
+      "script": "Test-GuestNetworkBehavior.ps1",
+      "total": 75,
+      "failed": 0,
+      "coverage": "mocked calls; no live VM or external request"
+    },
+    {
+      "script": "Test-HostPathBehavior.ps1",
+      "total": 17,
+      "failed": 0,
+      "coverage": "mocked calls; no live VM or external request"
+    }
+  ],
+  "powershellSyntax": {
+    "files": 12,
+    "failed": 0
+  },
+  "originalScriptsPreserved": [
+    "skills/claude-environment-deploy/scripts/New-ClaudeVM.ps1",
+    "skills/claude-environment-deploy/scripts/Read-ClaudeCoreApi.ps1",
+    "skills/claude-environment-deploy/scripts/Test-ClaudeEgress.ps1",
+    "skills/claude-environment-deploy/scripts/Test-ClaudeGuestNetwork.ps1",
+    "skills/claude-environment-deploy/scripts/Test-ClaudeHostPath.ps1",
+    "skills/claude-environment-deploy/scripts/Test-ClaudePrerequisites.ps1"
+  ],
+  "liveAcceptance": {
+    "realCustomerVM": "not tested",
+    "actualHyperVCommandChannel": "not tested; parameter binding mocked only",
+    "proxySubscriptionAndExitDNS": "not tested",
+    "coreStopRestoreReboot": "not tested",
+    "realAppAccountLogin": "not tested",
+    "MacExecution": "not tested; static source review only"
+  },
+  "totalAutomatedCases": 194,
+  "failedAutomatedCases": 0,
+  "revision": "Chinese bracket input labels"
+}

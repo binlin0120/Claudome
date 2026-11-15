@@ -1,5 +1,7 @@
+V11 补充：不要重建现有虚拟机或清空原账号。先读 docs/第11版使用方法.md，用本地资料助手准备这次真正需要的资料，由本人开启本次配置。仅补已确认缺口，逐项验收后结束并回读 Locked；本包模式不覆盖工具平台限制。
+
 请在原部署基础上补齐，不重建、不清空、不退出账号。
-先确认可读本次完整配置修正版10目录，阅读 README.md、skills/claude-environment-deploy/SKILL.md，及 references 内的《来宾Windows语言与时间》《Clash与来宾网络配置》《来宾网络一致性检查》《主机与来宾链路复核》《AdsPower配置与验收》。Mac 另读《Mac部署流程》。不要只凭旧聊天和旧版资料继续。
+先确认可读本次完整配置修正版11目录，阅读 README.md、skills/claude-environment-deploy/SKILL.md，及 references 内的《来宾Windows语言与时间》《Clash与来宾网络配置》《来宾网络一致性检查》《主机与来宾链路复核》《AdsPower配置与验收》。Mac 另读《Mac部署流程》。不要只凭旧聊天和旧版资料继续。
 还要读取并执行 references 中的《来宾Windows语言与时间》和《Clash与来宾网络配置》。
 由你配好来宾系统语言、国家或地区、区域及日期时间格式、时区和准确校时，并回读结果；Windows 国家或地区与区域格式以最终出口节点地区为准，系统时区以节点所在城市对应时区为准。显示语言和输入法保留本人选择；不要只让我自己调。
 由你在 Windows 来宾安装或复用官方匹配架构的 Clash Verge Rev，导入已选服务，

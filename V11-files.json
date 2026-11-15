@@ -1,0 +1,269 @@
+{
+  "version": 11,
+  "revision": "中文标签修订及开源仓库合并",
+  "date": "2026-11-15",
+  "defaultMode": "Locked",
+  "files": [
+    {
+      "path": ".gitignore",
+      "bytes": 434,
+      "sha256": "133306c2aac4bae31a55cc2a07e01d742bdae74795edda8052de34ed39175f51"
+    },
+    {
+      "path": "00_准备部署资料.cmd",
+      "bytes": 325,
+      "sha256": "cd0d52a602ddf6bea735e697afb8ec6a23254b814fa92867dc6aa619e917bf03"
+    },
+    {
+      "path": "01_开始本次配置.cmd",
+      "bytes": 323,
+      "sha256": "6835f7cf1a42b489a0282efeb6abf73bb965f982d45ef828cca87e2f77cff4b5"
+    },
+    {
+      "path": "01_用户须知.md",
+      "bytes": 7246,
+      "sha256": "cd75d6f4ff5ad0efd09932f950326ef802793c1f38ec416befefd0c80bf784a2"
+    },
+    {
+      "path": "01_用户须知.txt",
+      "bytes": 7110,
+      "sha256": "4a9a0f344b771848b8fc28ec515ec327780a5ea80089cb447b02a79682ec29a4"
+    },
+    {
+      "path": "02_结束配置并锁定.cmd",
+      "bytes": 322,
+      "sha256": "d2646cff1426b2930ac39c89729d87b4eb80971872c4ef32179e7b34f35d5d7c"
+    },
+    {
+      "path": "02_采购清单与工具入口.md",
+      "bytes": 11597,
+      "sha256": "b09ccbfab99b4536448f15f4a29a01074ab556c765fad0a677d58e8be0fabcec"
+    },
+    {
+      "path": "02_采购清单与工具入口.txt",
+      "bytes": 11803,
+      "sha256": "e90bce7fe56455795e0e4ed9ecf3bb8cd2f7261a200b1f306ec43016c2d5005c"
+    },
+    {
+      "path": "03_查看配置状态.cmd",
+      "bytes": 324,
+      "sha256": "07771e8ecea3a1358f6b94cbc97fc344be41e41a6f42678ba38f9fd2ceae93b0"
+    },
+    {
+      "path": "AGENTS.md",
+      "bytes": 2128,
+      "sha256": "6f3d9a2d3abd17d2fb7e0926134280e707b84c3d11221eb23080615627b68c70"
+    },
+    {
+      "path": "CLAUDE.md",
+      "bytes": 2128,
+      "sha256": "6f3d9a2d3abd17d2fb7e0926134280e707b84c3d11221eb23080615627b68c70"
+    },
+    {
+      "path": "docs/Mac兼容性与来源.md",
+      "bytes": 11713,
+      "sha256": "5ff24fbec8b3a1366b465e18aa088124a43721d4efd8e26dab7d694560e2f049"
+    },
+    {
+      "path": "docs/完整教程.md",
+      "bytes": 45596,
+      "sha256": "96960e80589df3dd89d677589e2a3f46c1798327425fe2afb4913c88a8972b9d"
+    },
+    {
+      "path": "docs/来源与开源复用.md",
+      "bytes": 14351,
+      "sha256": "08fff7dc442463d3f5eabafb3c2c05a82abef521e9e9af0715b0e01368ac9464"
+    },
+    {
+      "path": "docs/第11版使用方法.md",
+      "bytes": 12108,
+      "sha256": "7c4dc77dd7b74997dd1b31c349e762f4eb4c9f00aee21f8a46291a0f77c8324a"
+    },
+    {
+      "path": "docs/第11版验证结果.json",
+      "bytes": 5692,
+      "sha256": "8a8457fd0c9e37c93f04373089ab33a0594d818464460c305a333478dd076bcf"
+    },
+    {
+      "path": "docs/第11版验证记录.md",
+      "bytes": 3692,
+      "sha256": "bc947c475dd7e9039f036bf614f1a0ae185670ef0fcca605aab8ff605a89664c"
+    },
+    {
+      "path": "docs/脚本模拟检查结果.json",
+      "bytes": 66013,
+      "sha256": "c75cc53c4f602e82d36b972d11e87080801ae4ef814cc358374b0cef093ff181"
+    },
+    {
+      "path": "docs/自建VPS排查操作参考.md",
+      "bytes": 6119,
+      "sha256": "c96e2550dfbbc82fb6c23ea268ba3bba1f732fb88a6372fc31c4c8304d32ed71"
+    },
+    {
+      "path": "docs/验证记录.md",
+      "bytes": 23336,
+      "sha256": "6ae35720bc825e13ebc1995307c9e09b3e1c41ddbaffbc4050eb00151c4ffdee"
+    },
+    {
+      "path": "README.md",
+      "bytes": 30569,
+      "sha256": "d2d087af171bc0a1992448fc384639c7855a7a2264ae5801c3421aed6820a254"
+    },
+    {
+      "path": "skills/claude-environment-deploy/references/AdsPower配置与验收.md",
+      "bytes": 19889,
+      "sha256": "e972e85d9e9f0c7741d10fb28e55381c63b0b1f01d635dfdbd3afc050de04d04"
+    },
+    {
+      "path": "skills/claude-environment-deploy/references/Clash与来宾网络配置.md",
+      "bytes": 39900,
+      "sha256": "07331344a6c9c13ff144dcc05e409f8d5ef9c7447fd123ac3891f92e9ee90156"
+    },
+    {
+      "path": "skills/claude-environment-deploy/references/Mac部署流程.md",
+      "bytes": 28626,
+      "sha256": "6608bcc68c05bba6c02ba123498878557e6208dff921e467a5bd0f8ee73a8378"
+    },
+    {
+      "path": "skills/claude-environment-deploy/references/主机与来宾链路复核.md",
+      "bytes": 8288,
+      "sha256": "dd4242c23d2286491353db9fc45c598659ee4d23d0560751f494260a2598d1e2"
+    },
+    {
+      "path": "skills/claude-environment-deploy/references/使用前检测与可选防护.md",
+      "bytes": 6209,
+      "sha256": "f97414e5c97035fa49174b5d0ebc900d4c0a007ae2890cc0535e1e950d0c811a"
+    },
+    {
+      "path": "skills/claude-environment-deploy/references/来宾Windows语言与时间.md",
+      "bytes": 17999,
+      "sha256": "05fa511fda8d61de752d10afc894300bde1305eaff4f1aded9cd9da6cf85f61e"
+    },
+    {
+      "path": "skills/claude-environment-deploy/references/来宾网络一致性检查.md",
+      "bytes": 11546,
+      "sha256": "6a7802343abfb9eba5ea957dc21a72702272ae26b3ba583c77a848e34d4993b3"
+    },
+    {
+      "path": "skills/claude-environment-deploy/references/适用电脑与操作前检查.md",
+      "bytes": 10819,
+      "sha256": "e9e4be9f68586b929420e576577825c0b36966d97f087a3576ea5a548d7afc23"
+    },
+    {
+      "path": "skills/claude-environment-deploy/references/部署流程.md",
+      "bytes": 26998,
+      "sha256": "39a3a727db527dfe5eaacc1d12babf50bb8c505a5183991fa8bb072d18cc9ef2"
+    },
+    {
+      "path": "skills/claude-environment-deploy/scripts/New-ClaudeVM.ps1",
+      "bytes": 5007,
+      "sha256": "5950809f0f72c2c70cb5a0b019e335144127cd337801b4a2dd786b8376cf8bd7"
+    },
+    {
+      "path": "skills/claude-environment-deploy/scripts/Read-ClaudeCoreApi.ps1",
+      "bytes": 5578,
+      "sha256": "ad0cb8457f14ec2815ea7cb755cb3a68da7bf4ea7edb744b5a190b9c387ea724"
+    },
+    {
+      "path": "skills/claude-environment-deploy/scripts/Test-ClaudeEgress.ps1",
+      "bytes": 10689,
+      "sha256": "fb8884e5c1402852b020bde488b2d8986cbf346130ffd402c7d7ea37964a3bb0"
+    },
+    {
+      "path": "skills/claude-environment-deploy/scripts/Test-ClaudeGuestNetwork.ps1",
+      "bytes": 31427,
+      "sha256": "306b9439e06cf81c66061812c801996a16fa12507d2b4627cdb336aac1073be4"
+    },
+    {
+      "path": "skills/claude-environment-deploy/scripts/Test-ClaudeHostPath.ps1",
+      "bytes": 7495,
+      "sha256": "9606c0697c649fffb85d55218afbed3456ef8d26a133d32d07cee3f01c391d1f"
+    },
+    {
+      "path": "skills/claude-environment-deploy/scripts/Test-ClaudePrerequisites.ps1",
+      "bytes": 3765,
+      "sha256": "4a616a67e6ae77fb70b7e5266271312c77d000ccdc96b73734fd2711502b39b2"
+    },
+    {
+      "path": "skills/claude-environment-deploy/SKILL.md",
+      "bytes": 23852,
+      "sha256": "0d0849c210ecf55f7bd7459f95f0bba01153be3dc8c3b78bfc5e5d7fd3d51cc2"
+    },
+    {
+      "path": "tests/Test-GuestNetworkBehavior.ps1",
+      "bytes": 31690,
+      "sha256": "47c413dd3265a679062b8d3d9fd0decbe6719835dd84cf5293941f7f2fc11524"
+    },
+    {
+      "path": "tests/Test-HostPathBehavior.ps1",
+      "bytes": 4928,
+      "sha256": "95be61b4011b3a44c7cc62339fc183cd8b4179388a081e7df0b458a9bc41741f"
+    },
+    {
+      "path": "tests/Test-ScriptBehavior.ps1",
+      "bytes": 21278,
+      "sha256": "7e4473eac255d0e1e5526177d0966f0e369e36685222f584d781a92d0a08255e"
+    },
+    {
+      "path": "tests/Test-V11Session.ps1",
+      "bytes": 14063,
+      "sha256": "0cd7feb36557963327d12906a19315bccda23890730fce3f6bbe8584c400e3f9"
+    },
+    {
+      "path": "tools/V11/Deployment.ps1",
+      "bytes": 3782,
+      "sha256": "e15ebbe9fccbaf476535a64eafe59025f6d0ca055689d188ea992f937157ac6f"
+    },
+    {
+      "path": "tools/V11/Deployment.psm1",
+      "bytes": 13013,
+      "sha256": "146e96e95b3172a5e2fabc139ba0c83723ffef82c24398a7dcf14eef9c4fcb59"
+    },
+    {
+      "path": "tools/V11/input-template.txt",
+      "bytes": 1442,
+      "sha256": "1aef02b01f2d4a92496cc948986df2629b5560fdf8350f40318e164ea0dd26a8"
+    },
+    {
+      "path": "tools/V11/session-mac.sh",
+      "bytes": 1545,
+      "sha256": "d31eaa3bc7b879d461eb07c2364b73082588cd83ba9914497cddfeb043b32fc9"
+    },
+    {
+      "path": "work/README.md",
+      "bytes": 697,
+      "sha256": "c8c2448c7f80dbe4d4bf61e582e2617c7cbf46ac677b0222081ca770977dc23a"
+    },
+    {
+      "path": "已部署用户_补齐配置任务.txt",
+      "bytes": 4913,
+      "sha256": "502bfe7db819ee38bde51d26bc2ec1ccbe023f49baacf90d4dd62139f95880bf"
+    },
+    {
+      "path": "第10版网络验收说明.md",
+      "bytes": 2094,
+      "sha256": "46ed4d3d4638f1f5b2254a109103d2d46e864b93dfedd8c75903d7fb8599de4b"
+    },
+    {
+      "path": "第11版修改说明.md",
+      "bytes": 1497,
+      "sha256": "2a6dad96d283c8cf88e25fd26414f500bd305e93bcc22a35aadec22d2d64fae9"
+    },
+    {
+      "path": "第9版网络优化说明.md",
+      "bytes": 2863,
+      "sha256": "34cfe1391abbc8c5caba9dcffaa3370358a9078a43dddd3a0b4a78d40267b900"
+    },
+    {
+      "path": "给Codex的操作说明.md",
+      "bytes": 10839,
+      "sha256": "72117331e4426d49c7d9cd47ba06538b761f083929c97e643621d1e2d2ef4021"
+    },
+    {
+      "path": "部署资料_空白模板.txt",
+      "bytes": 1442,
+      "sha256": "1aef02b01f2d4a92496cc948986df2629b5560fdf8350f40318e164ea0dd26a8"
+    }
+  ],
+  "scope": "V11 input package paths, excluding this manifest; hashes describe repository-adapted files"
+}

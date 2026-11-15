@@ -20,3 +20,14 @@
 *.msixbundle
 *.zip
 __pycache__/
+
+# V11 local runtime, never publish
+runtime-private/
+**/runtime-private/
+*.dpapi
+*.clixml
+*.new
+
+# Per-task code may contain local paths or configuration.
+/work/*
+!/work/README.md

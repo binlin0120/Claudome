@@ -7,3 +7,6 @@ docs/history/** -text
 *.png binary
 *.txt -text
 *.json -text
+*.psm1 -text
+*.cmd -text
+*.sh text eol=lf

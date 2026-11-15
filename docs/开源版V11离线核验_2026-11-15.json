@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-15",
+  "runtime": "PowerShell 7.6.9",
+  "testType": "isolated Windows local fixtures and mocked VM/network calls",
+  "suites": [
+    {
+      "script": "Test-ScriptBehavior.ps1",
+      "passed": 61,
+      "failed": 0
+    },
+    {
+      "script": "Test-GuestNetworkBehavior.ps1",
+      "passed": 75,
+      "failed": 0
+    },
+    {
+      "script": "Test-HostPathBehavior.ps1",
+      "passed": 17,
+      "failed": 0
+    },
+    {
+      "script": "Test-V11Session.ps1",
+      "passed": 40,
+      "failed": 0
+    }
+  ],
+  "totalPassed": 193,
+  "totalFailed": 0,
+  "syntaxFiles": 12,
+  "originalPowerShellFilesUnchanged": 9,
+  "actualVMOrAccountDeployment": false,
+  "macLiveAcceptance": "not tested",
+  "staticChecks": {
+    "passed": true,
+    "markdownFiles": 35,
+    "localLinksAndAnchors": 177,
+    "manifestHashes": 52,
+    "unchangedExistingPowerShellFiles": 9,
+    "privateRuntimeNotCreated": true,
+    "newSourceFiles": 20,
+    "errors": []
+  },
+  "packageDefaultStatus": {
+    "mode": "Locked",
+    "credentialsPresent": false,
+    "privateRuntimeCreated": false
+  }
+}
