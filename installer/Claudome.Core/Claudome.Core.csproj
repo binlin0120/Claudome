@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Claudome.Core</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Claudome</_Parameter1>
+    </AssemblyAttribute>
+    <EmbeddedResource Include="..\ClaudeSetup\Resources\catalog.json" LogicalName="ClaudeSetup.Resources.catalog.json" />
+    <EmbeddedResource Include="..\ClaudeSetup\Guest\*" LogicalName="ClaudeSetup.Guest.%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

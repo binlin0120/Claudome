@@ -1,0 +1,60 @@
+using System.IO;
+using System.Text.Json;
+
+namespace ClaudeSetup;
+
+public static class DesktopRecoveryTests
+{
+    private static void Assert(bool value,string message){if(!value)throw new Exception(message);}
+    public static async Task Run(Func<string,Func<Task>,Task> check,string root)
+    {
+        Task Sync(Action action){action();return Task.CompletedTask;}
+        const string id="11111111-1111-1111-1111-111111111111";
+        await check("console-identity-supports-vbox-versions-and-exact-executable",()=>Sync(()=>{
+            foreach(var command in new[]{"VirtualBoxVM.exe --startvm "+id+" --separate","VirtualBoxVM.exe --startvm={"+id+"}","VirtualBoxVM.exe --comment Fixture --startvm \""+id+"\""})
+                Assert(ConsoleWindowLocator.MatchesIdentity(new(1,@"C:\Oracle\VirtualBoxVM.exe",command),id,@"C:\Oracle\VirtualBoxVM.exe"),"valid VBox command rejected");
+            Assert(!ConsoleWindowLocator.MatchesIdentity(new(1,@"C:\Other\VirtualBoxVM.exe","--startvm "+id),id,@"C:\Oracle\VirtualBoxVM.exe"),"foreign executable claimed");
+            Assert(!ConsoleWindowLocator.MatchesIdentity(new(1,@"C:\Oracle\VirtualBoxVM.exe","--startvm "+id+"0"),id,@"C:\Oracle\VirtualBoxVM.exe"),"UUID prefix claimed");
+        }));
+        await check("console-identity-hyperv-name-and-vmware-config-are-bounded",()=>Sync(()=>{
+            Assert(ConsoleWindowLocator.MatchesIdentity(new(1,@"C:\Windows\System32\vmconnect.exe","vmconnect.exe localhost \"Fixture VM\""),id,@"C:\Windows\System32\vmconnect.exe","Fixture VM"),"Hyper-V quoted name rejected");
+            Assert(!ConsoleWindowLocator.MatchesIdentity(new(1,@"C:\Windows\System32\vmconnect.exe","vmconnect.exe localhost \"Fixture VM Copy\""),id,@"C:\Windows\System32\vmconnect.exe","Fixture VM"),"different Hyper-V VM claimed");
+            Assert(ConsoleWindowLocator.MatchesIdentity(new(1,@"C:\VMware\vmware.exe","vmware.exe -n \"D:\\Fixture VM\\Fixture.vmx\""),id,@"C:\VMware\vmware.exe","Fixture",@"D:\Fixture VM\Fixture.vmx"),"VMware config path rejected");
+            Assert(!ConsoleWindowLocator.MatchesIdentity(new(1,@"C:\VMware\vmware.exe","vmware.exe -n \"D:\\Fixture VM Copy\\Fixture.vmx\""),id,@"C:\VMware\vmware.exe","Fixture",@"D:\Fixture VM\Fixture.vmx"),"foreign VMware path claimed");
+            Assert(ConsoleWindowLocator.MatchesVmwareCaption("Fixture - VMware Workstation","Fixture")&&!ConsoleWindowLocator.MatchesVmwareCaption("Fixture Copy - VMware Workstation","Fixture"),"VMware tab caption accepted another VM");
+        }));
+        await check("desktop-automatic-retry-cannot-reopen-a-closed-console",()=>Sync(()=>{
+            var policy=new DesktopConnectionPolicy();policy.ObserveRunning();Assert(policy.TryLaunchFrontend(),"initial launch denied");
+            Assert(!policy.TryLaunchFrontend(),"duplicate frontend launch allowed");policy.ObserveWindow();policy.Suspend();
+            for(var i=0;i<50;i++){policy.ObserveRunning();Assert(!policy.TryLaunchFrontend()&&policy.Suspended,"periodic status reset a user close");}
+            policy.ResumeExplicitly();Assert(policy.TryLaunchFrontend(),"explicit continuation did not reset launch gate");
+        }));
+        await check("desktop-poweroff-stops-reconnect-without-creating-a-new-vm",()=>Sync(()=>{
+            var policy=new DesktopConnectionPolicy();policy.ObserveStopped();Assert(!policy.Suspended,"never-started VM treated as user close");
+            policy.ObserveRunning();policy.ObserveStopped();Assert(policy.Suspended&&!policy.TryLaunchFrontend(),"powered-off VM allowed restart");
+        }));
+        await check("checkpoint-keeps-only-the-previous-valid-task",()=>Sync(()=>{
+            var directory=Path.Combine(root,"checkpoint-pair");Paths.EnsureWorkspace(directory);
+            var state=new SessionState{VmId=id,Options=new SetupOptions{Root=directory}};state.Completed.Add("machine");state.Save();
+            state.Completed.Add("windows-started");state.Save();
+            var previous=JsonSerializer.Deserialize<SessionState>(File.ReadAllText(TaskCheckpointStore.BackupPath(state.Options.StatePath)),JsonFile.Format)!;
+            Assert(previous.Completed.Contains("machine")&&!previous.Completed.Contains("windows-started"),"previous checkpoint was not retained");
+            Assert(Directory.GetFiles(directory,"*.new").Length==0,"unfinished checkpoint leaked");
+        }));
+        await check("checkpoint-truncated-primary-recovers-last-valid-progress",()=>Sync(()=>{
+            var directory=Path.Combine(root,"checkpoint-recovery");Paths.EnsureWorkspace(directory);
+            var state=new SessionState{VmId=id,Options=new SetupOptions{Root=directory}};state.Completed.Add("machine");state.Save();state.Completed.Add("windows-started");state.Save();
+            File.WriteAllText(state.Options.StatePath,"{\"Options\":");
+            var recovered=JsonFile.Read<SessionState>(state.Options.StatePath);
+            Assert(recovered.VmId==id&&recovered.Completed.Contains("machine")&&!recovered.Completed.Contains("windows-started")&&recovered.Status.Contains("恢复"),"valid backup not recovered");
+            recovered.Save();Assert(JsonFile.Read<SessionState>(state.Options.StatePath).VmId==id,"recovered state not saved");
+        }));
+        await check("checkpoint-fallback-cannot-import-another-directory",()=>Sync(()=>{
+            var directory=Path.Combine(root,"checkpoint-foreign");Paths.EnsureWorkspace(directory);var state=new SessionState{VmId=id,Options=new SetupOptions{Root=directory}};state.Save();
+            File.WriteAllText(state.Options.StatePath,"{");
+            var foreign=new SessionState{VmId=id,Options=new SetupOptions{Root=Path.Combine(root,"different-task")}};
+            JsonFile.Write(TaskCheckpointStore.BackupPath(state.Options.StatePath),foreign);
+            try{JsonFile.Read<SessionState>(state.Options.StatePath);throw new Exception("Expected recovery identity failure");}catch(SetupException){}
+        }));
+    }
+}

@@ -31,3 +31,9 @@ runtime-private/
 # Per-task code may contain local paths or configuration.
 /work/*
 !/work/README.md
+
+# .NET installer build output
+**/bin/
+**/obj/
+/installer/artifacts/
+.vs/

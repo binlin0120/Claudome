@@ -1,0 +1,65 @@
+[
+  {
+    "Id": "vcredist",
+    "Name": "Microsoft Visual C++ x64 运行库",
+    "FileName": "vc_redist.x64.exe",
+    "Url": "https://download.visualstudio.microsoft.com/download/pr/e9604e21-4b79-4096-a4b3-1b63d4b55b4d/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe",
+    "Sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b",
+    "Size": 25635768,
+    "License": "Microsoft redistributable license; https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist"
+  },
+  {
+    "Id": "vbox",
+    "Name": "VirtualBox 7.2.22",
+    "FileName": "VirtualBox-7.2.22-175245-Win.exe",
+    "Url": "https://download.virtualbox.org/virtualbox/7.2.22/VirtualBox-7.2.22-175245-Win.exe",
+    "Sha256": "afd0ff1656cbe04ed88ce619594ae021419d97cce89fa9bdc443e9a963f1713f",
+    "Size": 178101352,
+    "License": "GPL-3.0; https://www.virtualbox.org/"
+  },
+  {
+    "Id": "pwsh",
+    "Name": "PowerShell 7.7.0",
+    "FileName": "PowerShell-7.7.0-win-x64.zip",
+    "Url": "https://github.com/PowerShell/PowerShell/releases/download/v7.7.0/PowerShell-7.7.0-win-x64.zip",
+    "Sha256": "7c74e03b20a75b59715847439d046a6214b1863ee79b187872980f139bb4a05f",
+    "Size": 115330228,
+    "License": "MIT; https://github.com/PowerShell/PowerShell"
+  },
+  {
+    "Id": "adspower",
+    "Name": "AdsPower 8.9.23",
+    "FileName": "AdsPower-Global-8.9.23-x64.exe",
+    "Url": "https://version-v2.adspower.net/software/win64-global/8.9.23/AdsPower-Global-8.9.23-x64.exe",
+    "Sha256": "d50080db8f810a78513c079541774162195ce844fa14067f5dc3dc7e4aaf0649",
+    "Size": 364817424,
+    "License": "Proprietary; downloaded by user from official source; https://www.adspower.com/"
+  },
+  {
+    "Id": "windows-media",
+    "Name": "微软 Windows 11 镜像工具",
+    "FileName": "MediaCreationTool.exe",
+    "Url": "https://download.microsoft.com/download/0a8b07d9-a3bf-47b9-b71b-8e13354cec88/MediaCreationTool.exe",
+    "Sha256": "e887dfff70baf09a8c1debfe8c304dd9f2d9652fae8b7c83b3c24554a79bbd7f",
+    "Size": 21591048,
+    "License": "Microsoft software license; https://www.microsoft.com/software-download/windows11"
+  },
+  {
+    "Id": "clash",
+    "Name": "Clash Verge Rev 2.5.10",
+    "FileName": "Clash.Verge_2.5.10_x64-setup.exe",
+    "Url": "https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.10/Clash.Verge_2.5.10_x64-setup.exe",
+    "Sha256": "929da9303b643b80ce309ab29f618e37a5562f515d1fa55ebf5b86c822504450",
+    "Size": 60045702,
+    "License": "GPL-3.0; https://github.com/clash-verge-rev/clash-verge-rev"
+  },
+  {
+    "Id": "bootstrap-core",
+    "Name": "安装网络组件 Mihomo 1.19.34",
+    "FileName": "mihomo-windows-amd64-compatible-v1.19.34.zip",
+    "Url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.34/mihomo-windows-amd64-compatible-v1.19.34.zip",
+    "Sha256": "cd6738d4648cc1a5f48049a1343b697ab510889d648f045c5c780fc1ab443a79",
+    "Size": 22417383,
+    "License": "GPL-3.0; https://github.com/MetaCubeX/mihomo/tree/v1.19.34"
+  }
+]

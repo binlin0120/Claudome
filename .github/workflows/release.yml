@@ -1,0 +1,101 @@
+name: Build and Release Claudome
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag name (e.g. v0.4.5)'
+        required: true
+        default: 'v0.4.5'
+
+permissions:
+  contents: write
+
+jobs:
+  release-win-x64:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '^1.26.0'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build, test, and publish Claudome (win-x64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python installer/build.py --test --publish
+
+      - name: Package release ZIP and SHA-256
+        id: pkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
+          $ver = $tag.TrimStart('v')
+          $pkgName = "Claudome_${ver}_win-x64"
+          $outRoot = Join-Path $env:RUNNER_TEMP 'release-pkg'
+          $stage = Join-Path $outRoot $pkgName
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+          $pub = 'installer/artifacts/Claudome-publish'
+          Copy-Item -LiteralPath (Join-Path $pub 'Claudome.exe') -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $pub 'PROJECT-LICENSE.txt') -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $pub 'Gateway-THIRD-PARTY-NOTICES.txt') -Destination $stage
+          Copy-Item -LiteralPath 'installer/快速开始.txt' -Destination $stage
+
+          $zipPath = Join-Path $outRoot "$pkgName.zip"
+          Compress-Archive -Path $stage -DestinationPath $zipPath -CompressionLevel Optimal
+
+          $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $exeHash = (Get-FileHash -LiteralPath (Join-Path $stage 'Claudome.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sumsPath = Join-Path $outRoot 'SHA256SUMS.txt'
+          @(
+            "$zipHash  $pkgName.zip"
+            "$exeHash  $pkgName/Claudome.exe"
+          ) | Set-Content -LiteralPath $sumsPath -Encoding UTF8
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "sums_path=$sumsPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip_sha256=$zipHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "exe_sha256=$exeHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.tag }}
+          name: Claudome ${{ steps.pkg.outputs.tag }} (Windows x64)
+          generate_release_notes: true
+          body: |
+            ### 下载与使用说明（Windows 10 2004+ / Windows 11 x64）
+
+            1. 点击下方 **`Claudome_*_win-x64.zip`** 下载并**完整解压**到一个本地文件夹，双击 `Claudome.exe` 启动。
+            2. 若首次打开提示「Windows 已保护你的电脑」（未购买商业代码签名），点击 **「更多信息」→「仍要运行」**。
+            3. 已有旧版任务时，在概览页选择 **「载入已有环境」** 并选中原任务目录的 `setup-state.json` 即可续装。
+
+            ### 文件校验（SHA-256）
+            - ZIP: `${{ steps.pkg.outputs.zip_sha256 }}`
+            - `Claudome.exe`: `${{ steps.pkg.outputs.exe_sha256 }}`
+
+            > 说明：当前发布为 Windows x64 版本；macOS 版本核心 `Claudome.Core` 与 Go 网关已开始跨平台拆分，Mac 桌面端尚在规划推进中。
+          files: |
+            ${{ steps.pkg.outputs.zip_path }}
+            ${{ steps.pkg.outputs.sums_path }}

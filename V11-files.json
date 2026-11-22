@@ -6,8 +6,8 @@
   "files": [
     {
       "path": ".gitignore",
-      "bytes": 434,
-      "sha256": "133306c2aac4bae31a55cc2a07e01d742bdae74795edda8052de34ed39175f51"
+      "bytes": 508,
+      "sha256": "22bcda3419b82734df9d43b64c28611c405edfb2cef052513f58f0bd3af15260"
     },
     {
       "path": "00_准备部署资料.cmd",
@@ -106,8 +106,8 @@
     },
     {
       "path": "README.md",
-      "bytes": 30569,
-      "sha256": "d2d087af171bc0a1992448fc384639c7855a7a2264ae5801c3421aed6820a254"
+      "bytes": 30882,
+      "sha256": "d802fee2311758654aa48473d65d21f574d895ee811c4761c9e71688e6937f95"
     },
     {
       "path": "skills/claude-environment-deploy/references/AdsPower配置与验收.md",
