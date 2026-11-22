@@ -301,7 +301,7 @@ public static class MacSelfTests
             Task.FromResult(file.EndsWith("pwsh.exe", StringComparison.OrdinalIgnoreCase) && pwshReady);
         public Task CopyTo(SessionState state, Secrets secrets, string local, string destination, CancellationToken token)
         {
-            var fileName = Path.GetFileName(destination);
+            var fileName = destination.Split('\\', '/').Last();
             CopiedFiles.Add(fileName);
             if (fileName.StartsWith("payload-", StringComparison.Ordinal) && fileName.EndsWith(".json", StringComparison.Ordinal))
             {
