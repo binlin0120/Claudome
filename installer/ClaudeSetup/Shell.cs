@@ -27,6 +27,9 @@ public sealed partial class SetupWindow
     private bool desktopSidebarCollapsed;
     private TextBlock? downloadFeatureInfo;
     private ProgressBar? downloadFeatureBar;
+    private Border? globalUpdateBanner;
+    private TextBlock? globalUpdateBannerText;
+    private Button? globalUpdateActionButton;
 
     private (Button Previous, Button Next) BuildShell()
     {
@@ -113,6 +116,8 @@ public sealed partial class SetupWindow
         subtitle.Margin = new Thickness(0, 7, 0, 18);
         heading.Children.Add(subtitle);
         heading.Children.Add(steps);
+        globalUpdateBanner = BuildGlobalUpdateBanner();
+        heading.Children.Add(globalUpdateBanner);
         body.Children.Add(heading);
         var scroll = new ScrollViewer { Content = main, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };shellContentScroll=scroll;
         scroll.SizeChanged+=(_,_)=>FitDesktopViewport();Grid.SetRow(scroll,1);body.Children.Add(scroll);

@@ -635,6 +635,48 @@ public sealed partial class SetupWindow : Window
         }
         return "";
     }
+    private Border BuildGlobalUpdateBanner()
+    {
+        globalUpdateBannerText = new TextBlock
+        {
+            FontSize = 12,
+            Foreground = Ink,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        globalUpdateActionButton = Action("立即原地更新", async (_, _) => await ApplyPendingOnlineUpdateAsync(), true);
+        globalUpdateActionButton.Padding = new Thickness(13, 6, 13, 6);
+        globalUpdateActionButton.Margin = new Thickness(12, 0, 6, 0);
+        var dismiss = Action("稍后再说", (_, _) =>
+        {
+            if (globalUpdateBanner is not null) globalUpdateBanner.Visibility = Visibility.Collapsed;
+        });
+        dismiss.Padding = new Thickness(11, 6, 11, 6);
+        dismiss.Margin = new Thickness(0);
+
+        var actions = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { globalUpdateActionButton, dismiss }
+        };
+        DockPanel.SetDock(actions, Dock.Right);
+        var layout = new DockPanel();
+        layout.Children.Add(actions);
+        layout.Children.Add(globalUpdateBannerText);
+        return new Border
+        {
+            Name = "GlobalUpdateBanner",
+            Background = Pale,
+            BorderBrush = Accent,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(14, 10, 14, 10),
+            Margin = new Thickness(0, 0, 0, 14),
+            Visibility = Visibility.Collapsed,
+            Child = layout
+        };
+    }
     private Border BuildUpdateCard()
     {
         var current = SelfUpdater.CurrentVersion().ToString(3);
@@ -668,17 +710,13 @@ public sealed partial class SetupWindow : Window
             pendingUpdateCheck = result;
             if (result.HasUpdate && result.Manifest is { } m)
             {
-                updateStatusText.Text = $"发现新版本 v{m.Version}（{m.ZipName}），已就绪下载校验与本地原地更新。";
-                if (applyUpdateButton is not null)
-                {
-                    applyUpdateButton.Content = $"一键更新到 v{m.Version} 并重启";
-                    applyUpdateButton.Visibility = Visibility.Visible;
-                }
+                ShowAvailableUpdateNotice(result, m);
             }
             else if (interactive)
             {
                 updateStatusText.Text = result.StatusMessage;
                 if (applyUpdateButton is not null) applyUpdateButton.Visibility = Visibility.Collapsed;
+                if (globalUpdateBanner is not null) globalUpdateBanner.Visibility = Visibility.Collapsed;
             }
         }
         catch (Exception ex) when (interactive)
@@ -691,6 +729,23 @@ public sealed partial class SetupWindow : Window
             checkingUpdates = false;
             SetUpdateButtonsEnabled(true);
         }
+    }
+    internal void ShowAvailableUpdateNotice(UpdateCheckResult result, ReleaseManifest m)
+    {
+        pendingUpdateCheck = result;
+        updateStatusText.Text = $"发现新版本 v{m.Version}（{m.ZipName}），已就绪下载校验与本地原地更新。";
+        if (applyUpdateButton is not null)
+        {
+            applyUpdateButton.Content = $"一键更新到 v{m.Version} 并重启";
+            applyUpdateButton.Visibility = Visibility.Visible;
+        }
+        if (globalUpdateBannerText is not null)
+            globalUpdateBannerText.Text = $"发现新版本 v{m.Version}（当前 v{SelfUpdater.CurrentVersion().ToString(3)}）：支持通过 SHA-256 校验后在本地原地升级，虚拟机和任务目录完全保留。";
+        if (globalUpdateActionButton is not null)
+            globalUpdateActionButton.Content = $"一键更新到 v{m.Version}";
+        if (globalUpdateBanner is not null)
+            globalUpdateBanner.Visibility = Visibility.Visible;
+        banner.Text = $"发现新版本 v{m.Version}，点击上方提示条即可直接在本地升级。";
     }
     private async Task ApplyPendingOnlineUpdateAsync()
     {

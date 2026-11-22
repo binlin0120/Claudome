@@ -594,7 +594,16 @@ public sealed partial class SetupWindow
         rows.Add(new { name = "manual-adspower-checklist-replaces-stale-socks5-handoff", passed = matchesManualChecklist });
         var hasLocalUpdaterControls = Descendants<Button>(pages[0]).Any(b => b.Content?.ToString() == "检查在线更新") &&
             Descendants<Button>(pages[0]).Any(b => b.Content?.ToString() == "从本地 ZIP 更新") &&
-            updateStatusText.Text.Contains($"v{SelfUpdater.CurrentVersion().ToString(3)}");
+            updateStatusText.Text.Contains($"v{SelfUpdater.CurrentVersion().ToString(3)}") &&
+            globalUpdateBanner?.Visibility == Visibility.Collapsed;
+        var fakeManifest = new ReleaseManifest("9.9.9", "v9.9.9", "Claudome_9.9.9_win-x64.zip", new string('a', 64), new string('b', 64), "fixture", "");
+        ShowAvailableUpdateNotice(new UpdateCheckResult(true, fakeManifest, "https://example.invalid/Claudome_9.9.9_win-x64.zip", "fixture"), fakeManifest);
+        hasLocalUpdaterControls &= globalUpdateBanner?.Visibility == Visibility.Visible &&
+            globalUpdateBannerText?.Text.Contains("v9.9.9") == true &&
+            globalUpdateActionButton?.Content?.ToString() == "一键更新到 v9.9.9";
+        if (globalUpdateBanner is not null) globalUpdateBanner.Visibility = Visibility.Collapsed;
+        if (applyUpdateButton is not null) applyUpdateButton.Visibility = Visibility.Collapsed;
+        pendingUpdateCheck = null;
         if (!hasLocalUpdaterControls) failed++;
         rows.Add(new { name = "overview-exposes-in-place-local-updater-controls", passed = hasLocalUpdaterControls });
         Directory.Delete(autoRestoreDir, true);
