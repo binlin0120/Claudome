@@ -5,11 +5,6 @@ using System.Runtime.Intrinsics.X86;
 
 namespace ClaudeSetup;
 
-public sealed record PlatformFacts(string System, string Architecture, string Edition, bool VirtualizationReady, bool VirtualizationKnown, long MemoryGb, bool VBoxInstalled, bool WorkstationInstalled, bool ParallelsInstalled = false,int Build = 22000);
-public sealed record PlatformChoice(string Id, string Name, int Rank, bool Compatible, bool Automatic, string Reason, string[] Instructions)
-{
-    public string Label => $"{Rank}. {Name} · {(Automatic && Compatible ? "自动部署" : Compatible ? "操作指引" : "条件未满足")}";
-}
 public static class Platforms
 {
     public static string ConsentText(PlatformChoice choice) => $"我已阅读组件许可，同意准备所选 {choice.Name}、创建本任务的虚拟机并配置来宾环境；外层通道所需的主机端口规则会单独确认。";

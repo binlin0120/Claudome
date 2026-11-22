@@ -20,11 +20,15 @@ public static class IsolationPolicy
         if (addresses.Length == 0 || addresses.Any(x => !IPAddress.TryParse(x, out var ip) || !PublicIPv4(ip))) throw new SetupException("隔离模式只接受经过核验的公网 IPv4 节点。主机代理、回环、局域网、链路本地及保留地址不可作为出口。");
         return addresses;
     }
-    public static void RequireSupportedPlatform(SessionState state)
+    public static void RequireSupportedPlatform(SessionState state, bool? isMacOverride = null)
     {
         // This is a provider preflight, not an authorization. Boot and Open must
         // additionally read back zero NICs or a live, host-owned gateway.
-        if (state.Options.PlatformId is "virtualbox" or "hyperv" or "workstation") return;
+        var isMac = isMacOverride ?? OperatingSystem.IsMacOS();
+        var supported = isMac
+            ? state.Options.PlatformId is "fusion" or "utm"
+            : state.Options.PlatformId is "virtualbox" or "hyperv" or "workstation";
+        if (supported) return;
         throw new HandoffException(new("所选平台没有可用的受控通道", ["请选择已实现的平台。", "不会切换到普通 NAT、桥接或主机代理来跳过边界检查。"], "isolation-platform"));
     }
 }

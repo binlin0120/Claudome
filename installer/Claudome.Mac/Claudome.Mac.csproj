@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Claudome.Mac</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Claudome.Core\Claudome.Core.csproj" />
+    <PackageReference Include="Avalonia" Version="11.2.5" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.2.5" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.5" />
+    <AvaloniaResource Include="..\ClaudeSetup\Brand\Claudome.png" Link="Assets\Claudome.png" />
+    <EmbeddedResource Include="..\artifacts\Gateway-THIRD-PARTY-NOTICES.txt" Condition="Exists('..\artifacts\Gateway-THIRD-PARTY-NOTICES.txt')" LogicalName="ClaudeSetup.Gateway-THIRD-PARTY-NOTICES.txt" />
+  </ItemGroup>
+</Project>

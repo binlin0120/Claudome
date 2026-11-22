@@ -71,6 +71,7 @@ public sealed class SetupOptions
     public string PlatformId { get; set; } = "virtualbox";
     public bool VmwareSecurityConfirmed { get; set; }
     public bool HyperVBasicConsoleConfirmed { get; set; }
+    public bool SharedClipboardEnabled { get; set; } = true;
 
     public string StatePath => Path.Combine(Root, "setup-state.json");
     public string Cache => Path.Combine(Root, "downloads");

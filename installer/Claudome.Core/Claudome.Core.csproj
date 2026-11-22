@@ -10,6 +10,9 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>Claudome</_Parameter1>
     </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Claudome.Mac</_Parameter1>
+    </AssemblyAttribute>
     <EmbeddedResource Include="..\ClaudeSetup\Resources\catalog.json" LogicalName="ClaudeSetup.Resources.catalog.json" />
     <EmbeddedResource Include="..\ClaudeSetup\Guest\*" LogicalName="ClaudeSetup.Guest.%(Filename)%(Extension)" />
   </ItemGroup>

@@ -1,0 +1,49 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="ClaudeSetup.MainWindow"
+        Title="Claudome · Mac"
+        Width="1160" Height="820"
+        MinWidth="960" MinHeight="680"
+        WindowStartupLocation="CenterScreen">
+  <Grid x:Name="RootGrid" ColumnDefinitions="232,*">
+    <!-- Left Sidebar -->
+    <Border x:Name="SidebarBorder" Grid.Column="0" BorderThickness="0,0,1,0" Padding="16,22,14,18">
+      <Grid RowDefinitions="Auto,*,Auto">
+        <StackPanel Grid.Row="0" Margin="6,0,0,18" Spacing="6">
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <Image x:Name="BrandIcon" Width="30" Height="30" Source="avares://Claudome.Mac/Assets/Claudome.png" />
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock Text="Claudome" FontSize="18" FontWeight="SemiBold" />
+              <TextBlock Text="macOS 工作台 · 双层隔离" FontSize="11" Opacity="0.7" />
+            </StackPanel>
+          </StackPanel>
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="NavPanel" Spacing="4" />
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="2" Spacing="8" Margin="0,12,0,0">
+          <Button x:Name="ThemeToggleButton" Content="◐  外观与配色" HorizontalAlignment="Stretch" Padding="12,9" />
+          <TextBlock x:Name="PlatformBadge" Text="Apple Silicon / Intel" FontSize="11" Opacity="0.7" Margin="4,0,0,0" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Main Workspace -->
+    <Grid Grid.Column="1" RowDefinitions="Auto,*,Auto" Margin="32,24,28,18">
+      <StackPanel Grid.Row="0" Spacing="4" Margin="0,0,0,16">
+        <TextBlock x:Name="HeaderTitle" Text="概览" FontSize="26" FontWeight="SemiBold" />
+        <TextBlock x:Name="HeaderSubtitle" Text="Mac 版核心已接入 Claudome.Core，支持 VMware Fusion 与 UTM。" FontSize="13" Opacity="0.72" />
+      </StackPanel>
+
+      <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+        <StackPanel x:Name="ContentHost" Spacing="14" Margin="0,0,8,8" />
+      </ScrollViewer>
+
+      <Border x:Name="StatusBanner" Grid.Row="2" BorderThickness="1" CornerRadius="10" Padding="14,10" Margin="0,10,0,0">
+        <TextBlock x:Name="BannerText" Text="就绪 · 选择任务或检测本机环境。" FontSize="12" TextWrapping="Wrap" />
+      </Border>
+    </Grid>
+  </Grid>
+</Window>
