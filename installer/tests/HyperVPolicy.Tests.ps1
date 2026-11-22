@@ -7,7 +7,7 @@ $ErrorActionPreference='Stop'
 $worker=Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($worker,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'PRODUCTION_PARSE_FAILED'}
-$names=@('Invoke-ConsolePolicyLock','Console-Owner','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm')
+$names=@('Invoke-ConsolePolicyLock','Console-Owner','Use-BasicConsolePolicy','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm')
 foreach($name in $names){$definition=$ast.FindAll({param($a)$a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq $name},$true) | Select-Object -First 1;if(-not $definition){throw 'FUNCTION_MISSING'};Invoke-Expression -Command $definition.Extent.Text}
 $script:store=@{};$script:policyEnabled=$true;$script:nicCount=0;$script:metadataEnabled=$true;$script:changes=0
 $script:o=[pscustomobject]@{WorkspaceId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';HyperVBasicConsoleConfirmed=$false}
@@ -52,6 +52,24 @@ Check 'console-multiple-environments-retain-protection' {
 }
 Check 'console-last-owner-restores-recorded-original' {
     $result=Restore-Console $second;Assert-Case ($result -eq 'restored' -and $script:policyEnabled -and -not $script:store.ContainsKey('HKLM:\SOFTWARE\Claudome\HyperVConsolePolicy'))
+}
+Check 'shared-clipboard-mode-allows-enhanced-session-without-consent-stop' {
+    $savedO=$script:o
+    try {
+        $script:policyEnabled=$false
+        $script:o=[pscustomobject]@{WorkspaceId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';HyperVBasicConsoleConfirmed=$false;SharedClipboardEnabled=$true}
+        Guard-Console $first
+        Verify-Console $first
+        Assert-Case ($script:policyEnabled)
+        $script:policyEnabled=$false
+        $blocked=$false;try{Verify-Console $first}catch{if($_.Exception.Message -eq 'HYPERV_CONSOLE_POLICY'){$blocked=$true}else{throw}}
+        Assert-Case $blocked
+        $script:policyEnabled=$true
+        Assert-Case ((Restore-Console $first) -eq 'restored' -and -not $script:policyEnabled)
+    } finally {
+        $script:o=$savedO
+        $script:policyEnabled=$true
+    }
 }
 Check 'zero-nic-rejects-any-additional-adapter' {
     $script:nicCount=0;Assert-NoNetworkAdapter $first;$script:nicCount=1;$blocked=$false;try{Assert-NoNetworkAdapter $first}catch{if($_.Exception.Message -eq 'BOUNDARY_NICS'){$blocked=$true}else{throw}}

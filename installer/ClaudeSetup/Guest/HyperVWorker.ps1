@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 param([Parameter(Mandatory)][string]$PipeName)
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
 if($PipeName -notmatch '^ClaudeSetup-[a-f0-9]{32}$'){exit 1}
@@ -53,6 +53,11 @@ function Disable-HostMetadata($Vm) {
     if(@(Get-VMIntegrationService -VM $Vm | Where-Object {$_.Id -eq $service[0].Id -and $_.Enabled}).Count){throw 'BOUNDARY_METADATA'}
 }
 function Console-Owner($Vm){return 'HKLM:\SOFTWARE\Claudome\HyperVConsolePolicy\Owners\'+[string]$Vm.Id}
+function Use-BasicConsolePolicy {
+    if([bool]$o.HyperVBasicConsoleConfirmed){return $true}
+    if($null -ne $o.PSObject.Properties['SharedClipboardEnabled']){return -not [bool]$o.SharedClipboardEnabled}
+    return $true
+}
 function Invoke-ConsolePolicyLock([scriptblock]$Action){
     $mutex=[Threading.Mutex]::new($false,'Global\Claudome-HyperVConsolePolicy');$held=$false
     try{
@@ -65,19 +70,22 @@ function Guard-Console($Vm){
     Invoke-ConsolePolicyLock {
     $root='HKLM:\SOFTWARE\Claudome\HyperVConsolePolicy';$current=[bool](Get-VMHost).EnableEnhancedSessionMode
     $original=$current;if(Test-Path -LiteralPath $root){$original=[bool](Get-ItemPropertyValue -LiteralPath $root -Name OriginalEnabled)}
-    if($original -and -not $o.HyperVBasicConsoleConfirmed){throw 'HYPERV_CONSOLE_CONSENT'}
-    if($current -and $Vm.State -ne 'Off'){throw 'HYPERV_CONSOLE_SHUTDOWN'}
+    $basic=Use-BasicConsolePolicy
+    if($basic -and $original -and -not $o.HyperVBasicConsoleConfirmed){throw 'HYPERV_CONSOLE_CONSENT'}
+    if($basic -and $current -and $Vm.State -ne 'Off'){throw 'HYPERV_CONSOLE_SHUTDOWN'}
     if(-not(Test-Path -LiteralPath $root)){New-Item -Path $root -Force | Out-Null;New-ItemProperty -LiteralPath $root -Name OriginalEnabled -PropertyType DWord -Value ([int]$current) | Out-Null}
     $owner=Console-Owner $Vm
     if(Test-Path -LiteralPath $owner){if((Get-ItemPropertyValue -LiteralPath $owner -Name WorkspaceId) -ne $o.WorkspaceId){throw 'VM_SCOPE'}}
     else{New-Item -Path $owner -Force | Out-Null;New-ItemProperty -LiteralPath $owner -Name WorkspaceId -Value ([string]$o.WorkspaceId) -PropertyType String | Out-Null}
-    if($current){Set-VMHost -EnableEnhancedSessionMode $false}
-    if((Get-VMHost).EnableEnhancedSessionMode){throw 'HYPERV_CONSOLE_POLICY'}
+    $target=(-not $basic)
+    if($current -ne $target){Set-VMHost -EnableEnhancedSessionMode $target}
+    if([bool](Get-VMHost).EnableEnhancedSessionMode -ne $target){throw 'HYPERV_CONSOLE_POLICY'}
     }
 }
 function Verify-Console($Vm){
     $owner=Console-Owner $Vm
-    if((Get-VMHost).EnableEnhancedSessionMode -or -not(Test-Path -LiteralPath $owner) -or (Get-ItemPropertyValue -LiteralPath $owner -Name WorkspaceId) -ne $o.WorkspaceId){throw 'HYPERV_CONSOLE_POLICY'}
+    $target=(-not (Use-BasicConsolePolicy))
+    if([bool](Get-VMHost).EnableEnhancedSessionMode -ne $target -or -not(Test-Path -LiteralPath $owner) -or (Get-ItemPropertyValue -LiteralPath $owner -Name WorkspaceId) -ne $o.WorkspaceId){throw 'HYPERV_CONSOLE_POLICY'}
 }
 function Restore-Console($Vm){
     Invoke-ConsolePolicyLock {
@@ -434,6 +442,23 @@ try {
                         'boundary-verify' {$vm=Target-VM $d;Verify-BusService $d $vm;$value='verified'}
                         'boundary-offline' {$vm=Target-VM $d;Guard-Console $vm;Disable-HostMetadata $vm;Assert-NoNetworkAdapter $vm;Verify-Console $vm;$value='verified'}
                         'console-restore' {$value=Restore-Console (Target-VM $d)}
+                        'set-clipboard' {
+                            $vm=Target-VM $d
+                            $want=[bool]$d.enabled
+                            if($null -eq $o.PSObject.Properties['SharedClipboardEnabled']){Add-Member -InputObject $o -MemberType NoteProperty -Name SharedClipboardEnabled -Value $want -Force}
+                            else{$o.SharedClipboardEnabled=$want}
+                            $o.HyperVBasicConsoleConfirmed=(-not $want)
+                            Invoke-ConsolePolicyLock {
+                                $root='HKLM:\SOFTWARE\Claudome\HyperVConsolePolicy';$current=[bool](Get-VMHost).EnableEnhancedSessionMode
+                                if(-not(Test-Path -LiteralPath $root)){New-Item -Path $root -Force | Out-Null;New-ItemProperty -Path $root -Name OriginalEnabled -PropertyType DWord -Value ([int]$current) | Out-Null}
+                                $owner=Console-Owner $vm
+                                if(Test-Path -LiteralPath $owner){if((Get-ItemPropertyValue -LiteralPath $owner -Name WorkspaceId) -ne $o.WorkspaceId){throw 'VM_SCOPE'}}
+                                else{New-Item -Path $owner -Force | Out-Null;New-ItemProperty -Path $owner -Name WorkspaceId -Value ([string]$o.WorkspaceId) -PropertyType String | Out-Null}
+                                if($current -ne $want){Set-VMHost -EnableEnhancedSessionMode $want}
+                                if([bool](Get-VMHost).EnableEnhancedSessionMode -ne $want){throw 'HYPERV_CONSOLE_POLICY'}
+                            }
+                            $value=if($want){'enabled'}else{'disabled'}
+                        }
                         'windows' {Install-WindowsDisk $d;$value='started'}
                         'shutdown' {
                             $vm=Target-VM $d

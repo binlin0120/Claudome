@@ -456,14 +456,30 @@ public sealed partial class SetupWindow
         if (!desktopInputControls) failed++;
         rows.Add(new { name = "desktop-exposes-text-sharing-and-keyboard-controls", passed = desktopInputControls });
         var previousVm = state.VmId;
+        var previousPlatform = state.Options.PlatformId;
         state.VmId = "11111111-1111-1111-1111-111111111111";
         UpdateNativeClipboardControl();
         var defaultClipboard = nativeClipboardButton?.Content?.ToString() == "关闭双向剪贴板" &&
             nativeClipboardStatus?.Text.Contains("自动开启") == true;
+        state.Options.PlatformId = "hyperv";
+        state.Options.SharedClipboardEnabled = true;
+        state.Options.HyperVBasicConsoleConfirmed = false;
+        UpdateNativeClipboardControl();
+        var hypervDefaultClipboard = nativeClipboardButton?.Visibility == Visibility.Visible &&
+            nativeClipboardButton?.Content?.ToString() == "关闭双向剪贴板" &&
+            nativeClipboardStatus?.Text.Contains("增强会话双向剪贴板") == true;
+        state.Options.SharedClipboardEnabled = false;
+        UpdateNativeClipboardControl();
+        var hypervOptOutClipboard = nativeClipboardButton?.Content?.ToString() == "启用双向剪贴板" &&
+            nativeClipboardStatus?.Text.Contains("已关闭") == true;
+        state.Options.SharedClipboardEnabled = true;
+        state.Options.PlatformId = previousPlatform;
         state.VmId = previousVm;
         UpdateNativeClipboardControl();
         if (!defaultClipboard) failed++;
         rows.Add(new { name = "virtualbox-desktop-shows-clipboard-on-by-default", passed = defaultClipboard });
+        if (!hypervDefaultClipboard || !hypervOptOutClipboard) failed++;
+        rows.Add(new { name = "hyperv-desktop-shows-clipboard-on-by-default-and-toggle", passed = hypervDefaultClipboard && hypervOptOutClipboard });
         var clickFocus = new[] { 0x0201, 0x0204, 0x0207, 0x020B, 0x0246 }.All(NativeConsoleHost.IsPointerPress) &&
             new[] { 0x0200, 0x0202, 0x020A, 0x0100 }.All(message => !NativeConsoleHost.IsPointerPress(message));
         if (!clickFocus) failed++;

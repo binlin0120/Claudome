@@ -122,19 +122,32 @@ public sealed partial class SetupWindow
         return new StackPanel { Children = { nativeClipboardButton, nativeClipboardStatus, manual } };
     }
 
+    private bool WantsNativeClipboard(SessionState target) => target.Options.PlatformId switch
+    {
+        "virtualbox" => VirtualBoxClipboard.WantsSharedClipboard(target),
+        "hyperv" => target.Options.SharedClipboardEnabled && !target.Options.HyperVBasicConsoleConfirmed,
+        _ => false
+    };
+
     private void UpdateNativeClipboardControl(string? status = null)
     {
         if (nativeClipboardButton is null || nativeClipboardStatus is null) return;
-        var visible = state.Options.PlatformId == "virtualbox";
+        var platformId = state.Options.PlatformId;
+        var visible = platformId is "virtualbox" or "hyperv";
         nativeClipboardButton.Visibility = nativeClipboardStatus.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (!visible) return;
-        var allowed = VirtualBoxClipboard.WantsSharedClipboard(state);
+        var allowed = WantsNativeClipboard(state);
         nativeClipboardButton.Content = allowed ? "关闭双向剪贴板" : "启用双向剪贴板";
-        nativeClipboardStatus.Text = status ?? (allowed ? "来宾工具就绪后自动开启双向剪贴板。" : "双向剪贴板已关闭。");
+        nativeClipboardStatus.Text = status ?? (platformId == "hyperv"
+            ? (allowed
+                ? "已开启 Hyper-V 增强会话双向剪贴板（来宾内已禁用磁盘和设备映射）；若窗口提示连接，点连接后即可直接复制粘贴。"
+                : "Hyper-V 双向剪贴板已关闭（基本会话模式），可使用下方按钮手动传送纯文本。")
+            : (allowed ? "来宾工具就绪后自动开启双向剪贴板。" : "双向剪贴板已关闭。"));
     }
 
     private async Task RefreshDefaultNativeClipboard()
     {
+        if (state.Options.PlatformId != "virtualbox") return;
         if (nativeClipboardReady || checkingNativeClipboard || closingDesktop || DateTime.UtcNow < nextNativeClipboardCheck ||
             consoleHost is not { IsAttached: true, IsVisible: true } host || !VirtualBoxClipboard.WantsSharedClipboard(state)) return;
 
@@ -162,9 +175,16 @@ public sealed partial class SetupWindow
 
     private async Task ToggleNativeClipboard()
     {
-        if (nativeClipboardButton is null || consoleHost?.IsAttached != true)
+        if (nativeClipboardButton is null) return;
+        var original = state;
+        if (original.Options.PlatformId != "hyperv" && consoleHost?.IsAttached != true)
         {
             UpdateNativeClipboardControl("请先连接本任务的虚拟机桌面。");
+            return;
+        }
+        if (original.Options.PlatformId == "hyperv" && string.IsNullOrEmpty(original.VmId))
+        {
+            UpdateNativeClipboardControl("请先创建或载入本任务的 Hyper-V 虚拟机。");
             return;
         }
         if (busy || connectingConsole || checkingNativeClipboard)
@@ -172,21 +192,48 @@ public sealed partial class SetupWindow
             UpdateNativeClipboardControl("请等待当前操作完成，再调整双向剪贴板。");
             return;
         }
-        var original = state;
-        var enabled = !VirtualBoxClipboard.WantsSharedClipboard(original);
-        if (enabled && MessageBox.Show(this,
+        var enabled = !WantsNativeClipboard(original);
+        if (original.Options.PlatformId == "hyperv")
+        {
+            var prompt = enabled
+                ? "启用后，将开启 Hyper-V 增强会话以支持直接复制粘贴（来宾内仍禁止磁盘、USB 与设备重定向）。注意主机会话模式会影响同机其他 Hyper-V 虚拟机，重连控制台即可生效。"
+                : "关闭后，将切回 Hyper-V 基本会话并立即禁用来宾剪贴板同步（重启或重连控制台后恢复纯基本会话）。注意主机会话模式会影响同机其他 Hyper-V 虚拟机。";
+            if (MessageBox.Show(this, prompt, enabled ? "启用 Hyper-V 双向剪贴板" : "关闭 Hyper-V 双向剪贴板",
+                MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+        }
+        else if (enabled && MessageBox.Show(this,
             "启用后，这台虚拟机与主机可互读可共享的剪贴板内容。剪贴板文件传输保持关闭。你可以随时关闭。",
             "启用双向剪贴板", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+
         nativeClipboardButton.IsEnabled = false;
         try
         {
-            await using var box = new VirtualBox(new CommandRunner());
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
-            await VirtualBoxClipboard.Change(box, original, enabled, timeout.Token);
-            if (state.VmId == original.VmId)
+            if (original.Options.PlatformId == "hyperv")
             {
-                nativeClipboardReady = enabled;
-                UpdateNativeClipboardControl(enabled ? "双向剪贴板已开启，可直接复制粘贴。" : "双向剪贴板已关闭。");
+                await using var hv = new HyperV();
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+                await hv.SetEnhancedSessionClipboard(original, enabled, timeout.Token);
+                var guestSynced = await TrySyncHyperVGuestClipboardPolicy(hv, original, enabled, timeout.Token);
+                if (state.VmId == original.VmId)
+                {
+                    state.Options.SharedClipboardEnabled = enabled;
+                    state.Options.HyperVBasicConsoleConfirmed = !enabled;
+                    state.Save();
+                    UpdateNativeClipboardControl(enabled
+                        ? (guestSynced ? "已开启 Hyper-V 双向剪贴板（来宾重定向策略已同步）。若之前以基本会话打开，请重连桌面一次。" : "已开启 Hyper-V 增强会话双向剪贴板（重连桌面即可直接复制粘贴；来宾策略将在下次部署时同步）。")
+                        : (guestSynced ? "已关闭 Hyper-V 双向剪贴板并立即停止来宾同步。" : "已关闭 Hyper-V 增强会话剪贴板（重连或重启桌面后切换为基本会话）。"));
+                }
+            }
+            else
+            {
+                await using var box = new VirtualBox(new CommandRunner());
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                await VirtualBoxClipboard.Change(box, original, enabled, timeout.Token);
+                if (state.VmId == original.VmId)
+                {
+                    nativeClipboardReady = enabled;
+                    UpdateNativeClipboardControl(enabled ? "双向剪贴板已开启，可直接复制粘贴。" : "双向剪贴板已关闭。");
+                }
             }
         }
         catch (Exception error)
@@ -194,6 +241,31 @@ public sealed partial class SetupWindow
             UpdateNativeClipboardControl(error is OperationCanceledException ? "剪贴板设置超时，请检查状态后重试。" : Redaction.SafeError(error));
         }
         finally { if (nativeClipboardButton is not null) nativeClipboardButton.IsEnabled = true; }
+    }
+
+    private async Task<bool> TrySyncHyperVGuestClipboardPolicy(HyperV hv, SessionState target, bool enabled, CancellationToken token)
+    {
+        if (!target.Completed.Contains("guest-ready")) return false;
+        var credentials = new Secrets { VmPassword = CurrentGuestPassword(), VmMicrosoftAddress = guestMicrosoftAddress };
+        if (!target.Options.HasUsableGuestPassword(credentials.VmPassword) && target.Options.Remember && SecretStore.Load(target) is { } saved)
+            credentials.VmPassword = saved.VmPassword;
+        if (!target.Options.HasUsableGuestPassword(credentials.VmPassword)) return false;
+        try
+        {
+            if (!await hv.IsRunning(target, token)) return false;
+            var clipValue = enabled ? 0 : 1;
+            var stopClip = enabled ? "" : "; Get-Process -Name rdpclip -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue";
+            var cmd = "$p='HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services';" +
+                "if(-not(Test-Path -LiteralPath $p)){New-Item -Path $p -Force|Out-Null};" +
+                $"@{{fDisableClip={clipValue};fDisableCdm=1;fDisableLPT=1;fDisableCam=1;fDisablePNPRedir=1;fDisableAudio=1;fDisableAudioCapture=1;fDisableCcm=1}}.GetEnumerator()|ForEach-Object{{New-ItemProperty -Path $p -Name $_.Key -PropertyType DWord -Value ([int]$_.Value) -Force|Out-Null}}" +
+                stopClip;
+            await hv.GuestRun(target, credentials, "powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], token, 30);
+            return true;
+        }
+        catch (Exception error) when (error is SetupException or IOException or OperationCanceledException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private async Task TransferClipboard(bool toGuest)

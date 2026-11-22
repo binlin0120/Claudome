@@ -245,7 +245,7 @@ public sealed partial class SetupWindow : Window
         pages[5].Children.Add(Card(Text("准备好后开始", 16, false), Text("安装流程：核验资源 → 安装虚拟机组件 → 安装 Windows → 配置所选网络 → 安装 AdsPower → 回读结果。遇到需要本人操作的步骤会暂停提示。"), consent, Row(Action("仅下载并核验资源", async (_, _) => await Perform(async (o, token) => await Engine().DownloadResources(o, token))), Action("开始 / 继续部署", async (_, _) => await StartInstall(), true), Action("暂停", (_, _) => { cancellation?.Cancel(); banner.Text = "已请求暂停；进行中的系统安装或来宾配置步骤会先结束。"; })), progress, progressText, log));
         pages[5].Children.Add(BuildValidationCard());
         pages[5].Children.Add(pendingPanel);
-        hyperVConsoleCard = Card(Text("Hyper-V 主机会话设置", 15, false), Text("Hyper-V 使用基本会话以关闭剪贴板和设备重定向。如曾确认关闭主机增强会话，可在所有受保护环境正常关机后恢复原值；其他 Hyper-V 虚拟机也会受影响。", 11), Row(Action("恢复主机增强会话设置", async (_, _) => {
+        hyperVConsoleCard = Card(Text("Hyper-V 主机会话设置", 15, false), Text("Hyper-V 默认允许仅限剪贴板的增强会话（来宾内已通过策略禁用磁盘、USB、音频与设备重定向）。如曾手动关闭双向剪贴板并切换为基本会话，可在所有受保护环境正常关机后恢复主机增强会话原值；其他 Hyper-V 虚拟机也会受影响。", 11), Row(Action("恢复主机增强会话设置", async (_, _) => {
             if (busy || state.Options.PlatformId != "hyperv") { Notice("请先载入原来的 Hyper-V 任务。"); return; }
             if (MessageBox.Show(this, "恢复主机增强会话设置会结束本任务的基本会话保护。请先正常关闭虚拟机。是否继续？", "恢复主机设置", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
             await Perform(async (_, token) => await Engine().RestoreHyperVConsole(state, token));
@@ -316,6 +316,7 @@ public sealed partial class SetupWindow : Window
         o.PlatformId = platform.SelectedValue?.ToString() ?? "virtualbox";
         o.VmwareSecurityConfirmed = state.Options.VmwareSecurityConfirmed;
         o.HyperVBasicConsoleConfirmed = state.Options.HyperVBasicConsoleConfirmed;
+        o.SharedClipboardEnabled = state.Options.SharedClipboardEnabled;
         o.ManualCpuConfirmed = !string.IsNullOrEmpty(state.VmId)
             ? state.Options.ManualCpuConfirmed
             : (useCustomVmConfig.IsChecked == true || o.CpuCount != SetupOptions.RecommendedCpuCount(o.PlatformId));

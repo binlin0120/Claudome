@@ -97,6 +97,10 @@ try {
     Clear-StaleClipboardState (Split-Path $PayloadPath)
     . (Join-Path (Split-Path $PayloadPath) 'BrowserAudit.ps1')
     . (Join-Path (Split-Path $PayloadPath) 'NetworkAudit.ps1')
+    if($payload.platformId -eq 'hyperv'){
+        $allowHyperVClipboard=if($null -ne $payload.PSObject.Properties['sharedClipboardEnabled']){[bool]$payload.sharedClipboardEnabled}else{$true}
+        Set-HyperVGuestRedirectionPolicy -AllowClipboard:$allowHyperVClipboard
+    }
     if(-not $browserOnly){
         Set-GuestStep '核对来宾微软 VC++ x64 运行库'
         Ensure-GuestVcRuntime

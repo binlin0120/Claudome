@@ -119,6 +119,8 @@ public sealed class HyperV : IVmBackend
     }
     public Task VerifyOffline(SessionState s, CancellationToken token) => Call(s.Options,"boundary-offline",Context(s),token);
     public Task<string> RestoreConsole(SessionState s,CancellationToken token)=>Call(s.Options,"console-restore",Context(s),token);
+    internal Task<string> SetEnhancedSessionClipboard(SessionState s, bool enabled, CancellationToken token) =>
+        Call(s.Options, "set-clipboard", new { vmId = s.VmId, enabled }, token);
     public async Task InstallWindows(SessionState s, Secrets secrets, CancellationToken token)
     {
         Machine.CheckRun(s.Options, true);

@@ -558,3 +558,14 @@ function Configure-AdsPower {
         else{Add-Pending '完成 AdsPower 登录与环境配置' @('在虚拟机中打开 AdsPower，用你自己的账号登录。','如支持本机 API，在 AdsPower 的自动化 → API 中确认已开启；需要 API Key 时填到安装助手的本机资料页。','回到助手点继续。程序会尝试新建 Claude 专用环境，并配置本地 SOCKS5 代理、WebRTC 与时区。','如需自行配置，选择助手左侧「不用 API，手动使用 AdsPower」，按当次指引检查原环境。','打开这个专用环境，先访问 https://ip.net.coffee/claude/，确认结果后再登录 Claude。') 'adspower'}
     }
 }
+function Set-HyperVGuestRedirectionPolicy([bool]$AllowClipboard) {
+    $tsPolicy='HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+    if(-not(Test-Path -LiteralPath $tsPolicy)){New-Item -Path $tsPolicy -Force | Out-Null}
+    $locked=@{fDisableClip=$(if($AllowClipboard){0}else{1});fDisableCdm=1;fDisableLPT=1;fDisableCam=1;fDisablePNPRedir=1;fDisableAudio=1;fDisableAudioCapture=1;fDisableCcm=1}
+    foreach($entry in $locked.GetEnumerator()){
+        New-ItemProperty -Path $tsPolicy -Name $entry.Key -PropertyType DWord -Value ([int]$entry.Value) -Force | Out-Null
+    }
+    if(-not $AllowClipboard){
+        Get-Process -Name 'rdpclip' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+}
