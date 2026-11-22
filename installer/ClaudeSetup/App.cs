@@ -86,8 +86,9 @@ public sealed partial class SetupWindow : Window
     private readonly CheckBox manualAdsPower = Check("手动使用 AdsPower（无需本机 API）");
     private readonly CheckBox remember = Check("在本机加密记住必要资料（不勾选则仅本次使用）"), showPassword = Check("显示虚拟机密码"), license = Check("我已核对所选 Windows 的许可与来宾使用授权"), consent = Check("我已阅读组件许可，并确认所选虚拟机方案的安装与配置范围"), outage = Check("对本次新建来宾执行短暂的代理停止与恢复测试"), useCustomVmConfig = Check("使用我填写的自定义资源配置（不自动启用 VirtualBox 防卡死降核）");
     private readonly TextBlock cpuNemWarning = new() { FontSize = 11, TextWrapping = TextWrapping.Wrap, LineHeight = 18, Margin = new Thickness(0, 2, 0, 8), Visibility = Visibility.Collapsed };
-    private readonly TextBlock updateStatusText = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Foreground = Muted, Margin = new Thickness(0, 0, 0, 10) };
+    private readonly TextBlock updateStatusText = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Foreground = Muted, Margin = new Thickness(0, 0, 0, 8) };
     private readonly ProgressBar updateProgressBar = new() { Minimum = 0, Maximum = 100, Height = 6, Margin = new Thickness(0, 0, 0, 10), Visibility = Visibility.Collapsed, Foreground = Accent };
+    private Border? overviewUpdateCard;
     private Button? checkUpdateButton, applyUpdateButton, localZipUpdateButton;
     private UpdateCheckResult? pendingUpdateCheck;
     private bool checkingUpdates;
@@ -179,7 +180,6 @@ public sealed partial class SetupWindow : Window
         RefreshPlatforms();
         pages[0].Children.Add(Card(Field("选择虚拟机方案（按这台电脑的推荐度排序）", platform), platformReason, Text("推荐度综合系统版本、架构、硬件虚拟化与已有软件；自动部署能力单独标明。Mac 在项目中另有 Fusion / Parallels / UTM 流程，此 Windows 程序不在 Mac 上运行。", 11)));
         pages[0].Children.Add(Card(Text("这次会做什么", 16, false), Text("创建独立的 Windows 虚拟机，准备网络代理与 AdsPower 环境。你可以继续使用已有订阅，自行选择节点。"), Text("客户无需安装 Codex。安装到哪些目录、哪些步骤需要管理员确认，都会在开始前说明。已有虚拟机不会被覆盖。"), Text("当前为开发试用版：Windows 10 与内嵌控制台尚需干净机器端到端验收，程序会如实显示待处理项。", 12), Row(Action("查看组件来源与许可", (_, _) => ShowLicenses()))));
-        pages[0].Children.Add(BuildUpdateCard());
         pages[1].Children.Add(Card(Text("已有虚拟机？", 16, false), Text("先查看当前电脑已注册的环境，再决定新建还是载入原任务。", 12), Row(Action("扫描本机已有虚拟机", async (_, _) => await ScanMachines()), Action("载入已有安装任务", (_, _) => LoadTask())), inventoryPanel));
         cpuNemWarning.Foreground = Accent;
         pages[1].Children.Add(Card(Field("数据与虚拟磁盘目录", root, "建议至少预留 95 GB；可选择本地磁盘，无需强制使用 D 盘。"), Row(Action("选择文件夹", (_, _) => { if(!string.IsNullOrEmpty(state.VmId)){Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。");return;}var d = new OpenFolderDialog(); if (d.ShowDialog() == true) root.Text = d.FolderName; })), Field("虚拟机名称", vmName, "使用英文字母、数字、短横线或下划线。"), Field("来宾内存（MB）", memory), Field("虚拟 CPU 数量", cpu, "开启虚拟化安全（Hyper-V 兼容模式）的电脑上 VirtualBox 默认推荐 1 核以彻底避免多核跨核中断死锁；若你自行修改核数或勾选下方自定义开关，程序将按你选择的配置运行，不自动启用防卡死降核。"), useCustomVmConfig, cpuNemWarning, Field("虚拟磁盘最大容量（GB）", disk),creationNote));
@@ -679,17 +679,24 @@ public sealed partial class SetupWindow : Window
     }
     private Border BuildUpdateCard()
     {
-        var current = SelfUpdater.CurrentVersion().ToString(3);
-        updateStatusText.Text = $"当前版本：Claudome v{current}。支持联网检查 GitHub 最新版（通过 SHA-256 校验后在本地原地替换重启），也支持直接导入收到的 .zip 压缩包原地升级，不改动任务目录和虚拟机。";
-        checkUpdateButton = Action("检查在线更新", async (_, _) => await CheckForUpdatesAsync(interactive: true));
-        applyUpdateButton = Action("一键更新并重启", async (_, _) => await ApplyPendingOnlineUpdateAsync(), true);
-        applyUpdateButton.Visibility = Visibility.Collapsed;
-        localZipUpdateButton = Action("从本地 ZIP 更新", async (_, _) => await ApplyLocalZipUpdateAsync());
-        return Card(
-            Text("版本与本地更新", 16, false),
-            updateStatusText,
-            updateProgressBar,
-            Row(applyUpdateButton, checkUpdateButton, localZipUpdateButton));
+        if (overviewUpdateCard is null)
+        {
+            var current = SelfUpdater.CurrentVersion().ToString(3);
+            updateStatusText.Text = $"当前版本：Claudome v{current}。支持联网检查最新版（SHA-256 校验后本地原地替换重启），也支持直接选取收到的 .zip 压缩包原地升级，不改动任务与虚拟机。";
+            checkUpdateButton = Action("检查在线更新", async (_, _) => await CheckForUpdatesAsync(interactive: true));
+            applyUpdateButton = Action("一键更新并重启", async (_, _) => await ApplyPendingOnlineUpdateAsync(), true);
+            applyUpdateButton.Visibility = Visibility.Collapsed;
+            localZipUpdateButton = Action("从本地 ZIP 更新", async (_, _) => await ApplyLocalZipUpdateAsync());
+            overviewUpdateCard = Card(
+                Text("版本与本地更新", 15, false),
+                updateStatusText,
+                updateProgressBar,
+                Row(applyUpdateButton, checkUpdateButton, localZipUpdateButton));
+            overviewUpdateCard.Padding = new Thickness(20, 16, 20, 14);
+            overviewUpdateCard.Margin = new Thickness(0, 0, 5, 8);
+        }
+        if (overviewUpdateCard.Parent is Panel prior) prior.Children.Remove(overviewUpdateCard);
+        return overviewUpdateCard;
     }
     private void SetUpdateButtonsEnabled(bool enabled)
     {

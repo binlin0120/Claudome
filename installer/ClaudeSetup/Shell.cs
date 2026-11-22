@@ -84,6 +84,7 @@ public sealed partial class SetupWindow
             var button = Action("", (_, _) => { if (!busy || index==7) Navigate(index); }); button.Content = row; button.HorizontalContentAlignment = HorizontalAlignment.Left; button.Padding = new Thickness(14, 13, 10, 13); button.Margin = new Thickness(0, 0, 0, 6); button.BorderThickness = new Thickness(0); navigationButtons.Add(button); navigation.Children.Add(button);
         }
         var sideBottom = new StackPanel(); sidebarFooter = sideBottom; Grid.SetRow(sideBottom, 2); sideGrid.Children.Add(sideBottom);
+        sideBottom.Children.Add(Action("⟳  检查与本地更新", async (_, _) => { Navigate(0); await CheckForUpdatesAsync(interactive: true); }));
         sideBottom.Children.Add(Action("◐  外观与配色", (_, _) => AppearanceDialog()));
         var groupPanel = new StackPanel(); groupPanel.Children.Add(Text("一起交流", 11));
         var group = Action("交流群  1129410798", (_, _) => { Clipboard.SetText("1129410798"); banner.Text = "群号已复制"; }); group.FontSize = 11; group.Background = Pale; group.Foreground = Accent; group.BorderThickness = new Thickness(0); groupPanel.Children.Add(group);
@@ -232,17 +233,21 @@ public sealed partial class SetupWindow
         heroLeft.Children.Add(Row(Action(state.SetupFinished ? "进入虚拟机" : string.IsNullOrEmpty(state.VmId) ? "开始安装  →" : "继续安装  →",
             async (_, _) => { if (state.SetupFinished) await EnterOriginalWorkspace(); else Go(page); }, true), Action("载入已有环境", (_, _) => LoadTask())));
         var hero = new Grid(); hero.ColumnDefinitions.Add(new ColumnDefinition()); hero.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) }); hero.Children.Add(heroLeft);
-        var illustration = new Grid { Width = 180, Height = 145, VerticalAlignment = VerticalAlignment.Center };
-        illustration.Children.Add(new Border { Background = Surface, BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(13), Width = 172, Height = 113, Margin = new Thickness(0, 0, 0, 24) });
-        illustration.Children.Add(new Border { Background = Canvas, CornerRadius = new CornerRadius(7), Width = 148, Height = 78, Margin = new Thickness(0, 0, 0, 33), Child = new TextBlock { Text = "\uE7F4", FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 36, Foreground = Accent, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } });
-        illustration.Children.Add(new Border { Background = Accent, Width = 66, Height = 7, CornerRadius = new CornerRadius(3), VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 15) }); Grid.SetColumn(illustration, 1); hero.Children.Add(illustration);
-        main.Children.Add(new Border { Background = Pale, CornerRadius = new CornerRadius(16), Padding = new Thickness(28, 24, 25, 24), Margin = new Thickness(0, 0, 5, 20), Child = hero });
+        var illustration = new Grid { Width = 172, Height = 120, VerticalAlignment = VerticalAlignment.Center };
+        illustration.Children.Add(new Border { Background = Surface, BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(13), Width = 164, Height = 96, Margin = new Thickness(0, 0, 0, 18) });
+        illustration.Children.Add(new Border { Background = Canvas, CornerRadius = new CornerRadius(7), Width = 140, Height = 66, Margin = new Thickness(0, 0, 0, 26), Child = new TextBlock { Text = "\uE7F4", FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 32, Foreground = Accent, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } });
+        illustration.Children.Add(new Border { Background = Accent, Width = 62, Height = 6, CornerRadius = new CornerRadius(3), VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 10) }); Grid.SetColumn(illustration, 1); hero.Children.Add(illustration);
+        main.Children.Add(new Border { Background = Pale, CornerRadius = new CornerRadius(16), Padding = new Thickness(26, 18, 24, 16), Margin = new Thickness(0, 0, 5, 12), Child = hero });
         var host = Machine.Read();
-        var stats = new UniformGrid { Columns = 3, Margin = new Thickness(0, 0, 0, 3) };
+        var stats = new UniformGrid { Columns = 3, Margin = new Thickness(0, 0, 0, 0) };
         stats.Children.Add(Stat("虚拟环境", string.IsNullOrEmpty(state.VmId) ? "尚未创建" : "已创建", string.IsNullOrEmpty(state.VmId) ? "安装好后会出现在这里" : state.Options.VmName));
         stats.Children.Add(Stat("可用内存", $"{host.FreeMemory / 1073741824d:F1} GB", $"共 {host.TotalMemory / 1073741824d:F1} GB"));
         stats.Children.Add(Stat("网络节点", string.IsNullOrEmpty(state.Options.NodeName) ? "由你选择" : "已选择", string.IsNullOrEmpty(state.Options.NodeName) ? "支持已有订阅与手动配置" : state.Options.NodeName)); main.Children.Add(stats);
-        main.Children.Add(Card(Text("接下来", 15, false), Text(string.IsNullOrEmpty(state.VmId) ? "选择安装位置和 Windows 镜像，连接已有节点。其余步骤跟着右侧的安装向导完成。" : state.Stage, 12), Row(Action("查看我的虚拟机", (_, _) => Navigate(2)), Action("管理网络节点", (_, _) => Navigate(3)))));
+        var nextCard = Card(Text("接下来", 15, false), Text(string.IsNullOrEmpty(state.VmId) ? "选择安装位置和 Windows 镜像，连接已有节点。其余步骤跟着右侧的安装向导完成。" : state.Stage, 12), Row(Action("查看我的虚拟机", (_, _) => Navigate(2)), Action("管理网络节点", (_, _) => Navigate(3))));
+        nextCard.Padding = new Thickness(20, 16, 20, 14);
+        nextCard.Margin = new Thickness(0, 0, 5, 12);
+        main.Children.Add(nextCard);
+        main.Children.Add(BuildUpdateCard());
     }
     private static Border Stat(string label, string value, string hint) => Card(Text(label, 11), new TextBlock { Text = value, FontSize = 23, FontWeight = FontWeights.SemiBold, Foreground = Ink, Margin = new Thickness(0, 2, 0, 10) }, Text(hint, 10));
     private void DrawMachines()
