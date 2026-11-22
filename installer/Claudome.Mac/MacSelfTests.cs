@@ -10,6 +10,7 @@ public static class MacSelfTests
 {
     public static int Run(string outputDirectory)
     {
+        outputDirectory = Path.GetFullPath(outputDirectory);
         Directory.CreateDirectory(outputDirectory);
         var rows = new List<object>();
         var failed = 0;
@@ -182,7 +183,7 @@ public static class MacSelfTests
                     Root = root,
                     PlatformId = "fusion",
                     VmName = "MacDeployTest",
-                    CpuCount = 4,
+                    CpuCount = Math.Clamp(Environment.ProcessorCount, 2, 4),
                     MemoryMb = 8192,
                     DiskGb = 80,
                     IsoPath = fakeIso,
