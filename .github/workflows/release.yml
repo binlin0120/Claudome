@@ -95,7 +95,7 @@ jobs:
             - ZIP: `${{ steps.pkg.outputs.zip_sha256 }}`
             - `Claudome.exe`: `${{ steps.pkg.outputs.exe_sha256 }}`
 
-            > 说明：当前发布为 Windows x64 版本；macOS 版本核心 `Claudome.Core` 与 Go 网关已开始跨平台拆分，Mac 桌面端尚在规划推进中。
+            > 说明：当前发布为 Windows x64 版本；macOS 版本核心 `Claudome.Core`、`darwin` Go 网关与 `Claudome.Mac` Avalonia 桌面端骨架已在 `main` 推进，待补全来宾一键编排并完成 Mac 真机验收后发布。
           files: |
             ${{ steps.pkg.outputs.zip_path }}
             ${{ steps.pkg.outputs.sums_path }}

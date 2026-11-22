@@ -4,7 +4,11 @@ Claudome 是 Claude 与 Dome（穹顶）的组合名，寓意为 Claude 提供�
 
 保留 Windows 来宾、Clash Verge Rev、TUN、来宾防火墙和 AdsPower 的原有部署模式。Windows 11 x64 安装器已接入 VirtualBox、Hyper-V、VMware Workstation 三条部署路径，共用资源校验、所选节点、断点继续及结果回读。客户无需 Codex、Go 或 .NET SDK。
 
-**当前为 `0.4.0-dev.20261118.unified10` 开发体验构建，三平台干净机器与浏览器完整流程仍待实机验收。** 本人已在开发任务中继续运行并验证外层防火墙规则创建及回读；源码维护工具未改动主机网络、安全功能或真实虚拟机。自动桌面、安装网络、关闭保护、任务保存与逐步提示的本轮范围见[修复与验证记录](自动桌面与安装网络修复_2026-11-17.md)。
+**当前版本为 `0.4.5`（2026-11-22）：Windows x64 桌面端已通过 GitHub Actions 构建并发布至 [Releases](https://github.com/binlin0120/Claudome/releases)；其中 VirtualBox 路线已完成多轮实机修复与续装验收，Hyper-V 与 VMware Workstation 三平台完整闭环及干净新机验收仍在持续补充。** 本轮 0.4.5 同步完成了：
+- **Windows `0.4.5` 体验与稳定性修复**：可拖动缩放并支持 `Esc` 关闭的「外观与配色」弹窗；Windows 家庭版 + VirtualBox（NEM）多核提醒、25 秒 `0x0` 黑屏兜底横幅与一键恢复 1 核；启动网关前清理 `private` 下旧哈希 `ClaudeNetworkGateway.*.exe` 残留；节点测速与多选测速区分宿主机物理网卡与虚拟 TUN/代理接口。
+- **Mac 跨平台推进（Step 1 & Step 2）**：已抽离跨平台核心 [Claudome.Core](Claudome.Core/Claudome.Core.csproj)、支持 `darwin/arm64` & `darwin/amd64` 交叉编译的 Go 网关，以及 [Claudome.Mac](Claudome.Mac/Claudome.Mac.csproj) Avalonia 桌面端控制台（VMware Fusion / UTM 配置生成、Keychain + AES-GCM 凭据、scoped `pfctl` 锚点规则、双向剪贴板默认开启与开关），已通过离线编译与契约/渲染测试；**因来宾一键编排与 Mac 真机实测尚未完成，暂未发布 Mac 成品包**。
+
+> 下方 `0.4.0-dev.20261118.unified10` 及 `aligned1`/`unified1`~`unified7` 为历史演进归档记录，供回溯设计边界与故障注入修复详情参考。
 
 ## unified10 键盘、剪贴板和退出
 
@@ -32,7 +36,7 @@ Claudome 是 Claude 与 Dome（穹顶）的组合名，寓意为 Claude 提供�
 | Hyper-V | 按版本检查及启用可选功能、二代 VM / TPM / 安全启动、离线应用 Windows、PowerShell Direct、来宾软件 | 没有普通虚拟网卡；经认证的 Hyper-V Socket 和来宾 Wintun 接入同一受控网关 | 功能重启、UAC、关闭主机增强会话策略的单独确认、账号登录 |
 | VMware Workstation | 识别并核验官方安装器、VMDK / VMX、Windows 应答介质、Tools、VIX 来宾配置 | 没有普通网卡；VMCI / vSockets 与来宾 Wintun 接入同一受控网关 | 官方下载登录、首次加密 / vTPM、UAC、账号登录 |
 
-以上是代码能力，不是实机通过结果。Mac 的 Fusion / Parallels / UTM 教程继续保留；此 EXE 不在 Mac 或 Windows ARM 上运行。已有虚拟机只读取注册信息，不覆盖或自动接管其他项目。
+以上是代码能力概述，三平台整套闭环仍需分别按实机验收记录为准。Mac 的 Fusion / Parallels / UTM 教程继续保留；Windows 版 `Claudome.exe` 不直接在 Mac 或 Windows ARM 主机上运行（Mac 端独立工程见 `installer/Claudome.Mac`，尚待真机验收）。已有虚拟机只读取注册信息，不覆盖或自动接管其他项目。
 
 ## 客户操作范围
 
