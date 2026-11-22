@@ -1080,6 +1080,113 @@ public static class SelfTests
             SecretStore.SaveMerged(state.Options.Private, new Secrets { VmPassword = "DifferentLogin1" }, true, true);
             Assert(SecretStore.Load(state.Options.Private)?.VmMicrosoftAddress == "", "Switching to a local account retained the prior Microsoft identity");
         });
+        await Check("self-updater-loopback-manifest-sha256-anti-downgrade-and-swap-script", async () => {
+            var currentExe = Environment.ProcessPath;
+            Assert(!string.IsNullOrWhiteSpace(currentExe) && File.Exists(currentExe), "Missing host process path for update fixture");
+            var currentVer = SelfUpdater.CurrentVersion();
+            var higherVer = new Version(currentVer.Major, currentVer.Minor, currentVer.Build + 1).ToString(3);
+            var stageRoot = Path.Combine(root, "updater-fixture");
+            var srcDir = Path.Combine(stageRoot, "src", $"Claudome_{higherVer}_win-x64");
+            Directory.CreateDirectory(srcDir);
+            var fixtureExe = Path.Combine(srcDir, "Claudome.exe");
+            File.Copy(currentExe!, fixtureExe, overwrite: true);
+            File.WriteAllText(Path.Combine(srcDir, "快速开始.txt"), "fixture quickstart");
+            var validZip = Path.Combine(stageRoot, $"Claudome_{higherVer}_win-x64.zip");
+            System.IO.Compression.ZipFile.CreateFromDirectory(Path.GetDirectoryName(srcDir)!, validZip);
+            var zipHash = await SelfUpdater.ComputeSha256Async(validZip);
+            var exeHash = await SelfUpdater.ComputeSha256Async(fixtureExe);
+
+            var port = 0;
+            using (var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0)) { probe.Start(); port = ((IPEndPoint)probe.LocalEndpoint).Port; }
+            using var listener = new HttpListener();
+            var baseUrl = $"http://127.0.0.1:{port}/";
+            listener.Prefixes.Add(baseUrl);
+            listener.Start();
+            var manifestJson = JsonSerializer.Serialize(new
+            {
+                version = higherVer,
+                tag = "v" + higherVer,
+                zipName = Path.GetFileName(validZip),
+                zipSha256 = zipHash,
+                exeSha256 = exeHash,
+                notes = "fixture",
+                publishedAtUtc = "2026-11-22T08:00:00Z"
+            });
+            using var serverCts = new CancellationTokenSource();
+            var serverTask = Task.Run(async () =>
+            {
+                while (!serverCts.IsCancellationRequested)
+                {
+                    HttpListenerContext ctx;
+                    try { ctx = await listener.GetContextAsync(); } catch { break; }
+                    var rawUrl = ctx.Request.RawUrl ?? "/";
+                    byte[] payload;
+                    if (rawUrl.EndsWith("latest.json")) payload = Encoding.UTF8.GetBytes(manifestJson);
+                    else if (rawUrl.EndsWith(Path.GetFileName(validZip))) payload = await File.ReadAllBytesAsync(validZip);
+                    else { ctx.Response.StatusCode = 404; ctx.Response.Close(); continue; }
+                    ctx.Response.StatusCode = 200;
+                    ctx.Response.ContentLength64 = payload.Length;
+                    await ctx.Response.OutputStream.WriteAsync(payload);
+                    ctx.Response.Close();
+                }
+            });
+
+            try
+            {
+                var check = await SelfUpdater.CheckForUpdateAsync(currentVer, baseUrl + "latest.json", baseUrl + "download");
+                Assert(check.HasUpdate && check.Manifest?.Version == higherVer, "Expected higher version from loopback manifest");
+
+                var upToDate = await SelfUpdater.CheckForUpdateAsync(new Version(99, 0, 0), baseUrl + "latest.json", baseUrl + "download");
+                Assert(!upToDate.HasUpdate, "Same or older version must not advertise update");
+
+                // Same FileVersion on copied currentExe must reject anti-downgrade when checked against currentVer.
+                await RejectAsync(() => SelfUpdater.ExtractAndVerifyPackageAsync(
+                    validZip, Path.Combine(stageRoot, "extract-downgrade"), currentVer, zipHash, exeHash, allowSameVersion: false, CancellationToken.None),
+                    "Same-version package should be blocked unless newer");
+
+                // Allow when checking from an older simulated client version (0.4.0).
+                var staged = await SelfUpdater.ExtractAndVerifyPackageAsync(
+                    validZip, Path.Combine(stageRoot, "extract-ok"), new Version(0, 4, 0), zipHash, exeHash, allowSameVersion: false, CancellationToken.None);
+                Assert(staged.ExeSha256 == exeHash && File.Exists(staged.ExePath), "Valid staged update missing");
+
+                // Tampered SHA-256 must fail closed.
+                await RejectAsync(() => SelfUpdater.ExtractAndVerifyPackageAsync(
+                    validZip, Path.Combine(stageRoot, "extract-badhash"), new Version(0, 4, 0), new string('0', 64), exeHash, allowSameVersion: false, CancellationToken.None),
+                    "Tampered ZIP SHA-256 was accepted");
+
+                // Zip-Slip traversal entry must be rejected.
+                var slipZip = Path.Combine(stageRoot, "slip.zip");
+                using (var archive = System.IO.Compression.ZipFile.Open(slipZip, System.IO.Compression.ZipArchiveMode.Create))
+                {
+                    var bad = archive.CreateEntry("..\\escape.txt");
+                    using var w = new StreamWriter(bad.Open()); w.Write("bad");
+                }
+                await RejectAsync(() => SelfUpdater.ExtractAndVerifyPackageAsync(
+                    slipZip, Path.Combine(stageRoot, "extract-slip"), new Version(0, 4, 0), null, null, allowSameVersion: true, CancellationToken.None),
+                    "Zip-Slip entry escaped staging directory");
+
+                // Swap script + stale cleanup verification.
+                var script = SelfUpdater.BuildSwapScript(@"C:\App", staged.PayloadDirectory, staged.StagingDirectory, "Claudome.exe", "Claudome.exe.123.bak", 123, relaunch: true);
+                Assert(script.Contains("ROLLBACK") && script.Contains("Claudome.exe.123.bak") && script.Contains("快速开始.txt"), "Swap script missing rollback or sidecar copy");
+
+                var cleanupApp = Path.Combine(stageRoot, "cleanup-app");
+                var cleanupTmp = Path.Combine(stageRoot, "cleanup-tmp");
+                Directory.CreateDirectory(cleanupApp);
+                Directory.CreateDirectory(Path.Combine(cleanupTmp, "claudome-stage-abc"));
+                File.WriteAllText(Path.Combine(cleanupApp, "Claudome.exe.99.bak"), "old");
+                File.WriteAllText(Path.Combine(cleanupTmp, "claudome-update-xyz.cmd"), "old");
+                SelfUpdater.CleanupStaleUpdateFiles(cleanupApp, cleanupTmp);
+                Assert(!File.Exists(Path.Combine(cleanupApp, "Claudome.exe.99.bak")) &&
+                    !File.Exists(Path.Combine(cleanupTmp, "claudome-update-xyz.cmd")) &&
+                    !Directory.Exists(Path.Combine(cleanupTmp, "claudome-stage-abc")), "Stale update files were not cleaned up");
+            }
+            finally
+            {
+                serverCts.Cancel();
+                listener.Stop();
+                try { await serverTask; } catch { }
+            }
+        });
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));

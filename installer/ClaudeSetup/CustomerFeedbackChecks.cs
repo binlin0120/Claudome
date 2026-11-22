@@ -592,6 +592,11 @@ public sealed partial class SetupWindow
             manualCardText.Contains("No Proxy") && !manualCardText.Contains("17897");
         if (!matchesManualChecklist) failed++;
         rows.Add(new { name = "manual-adspower-checklist-replaces-stale-socks5-handoff", passed = matchesManualChecklist });
+        var hasLocalUpdaterControls = Descendants<Button>(pages[0]).Any(b => b.Content?.ToString() == "检查在线更新") &&
+            Descendants<Button>(pages[0]).Any(b => b.Content?.ToString() == "从本地 ZIP 更新") &&
+            updateStatusText.Text.Contains($"v{SelfUpdater.CurrentVersion().ToString(3)}");
+        if (!hasLocalUpdaterControls) failed++;
+        rows.Add(new { name = "overview-exposes-in-place-local-updater-controls", passed = hasLocalUpdaterControls });
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);
         JsonFile.Write(Path.Combine(directory, "customer-feedback-ui-tests.json"), new { type = "synthetic WPF visual captions; no VM deployment", passed = rows.Count - failed, failed, tests = rows });

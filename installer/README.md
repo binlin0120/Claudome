@@ -4,7 +4,8 @@ Claudome 是 Claude 与 Dome（穹顶）的组合名，寓意为 Claude 提供�
 
 保留 Windows 来宾、Clash Verge Rev、TUN、来宾防火墙和 AdsPower 的原有部署模式。Windows 11 x64 安装器已接入 VirtualBox、Hyper-V、VMware Workstation 三条部署路径，共用资源校验、所选节点、断点继续及结果回读。客户无需 Codex、Go 或 .NET SDK。
 
-**当前版本为 `0.4.6`（2026-11-22）：Windows x64 桌面端已通过 GitHub Actions 构建并发布至 [Releases](https://github.com/binlin0120/Claudome/releases)；其中 VirtualBox 路线已完成多轮实机修复与续装验收，Hyper-V 与 VMware Workstation 三平台完整闭环及干净新机验收仍在持续补充。** 本轮 0.4.5 / 0.4.6 同步完成了：
+**当前版本为 `0.4.7`（2026-11-22）：Windows x64 桌面端已通过 GitHub Actions 构建并发布至 [Releases](https://github.com/binlin0120/Claudome/releases)；其中 VirtualBox 路线已完成多轮实机修复与续装验收，Hyper-V 与 VMware Workstation 三平台完整闭环及干净新机验收仍在持续补充。** 本轮 0.4.5 ~ 0.4.7 同步完成了：
+- **Windows `0.4.7` 应用内本地原地更新**：新增 [SelfUpdater.cs](Claudome.Core/SelfUpdater.cs) 与概览页「版本与本地更新」卡片，支持联网拉取 Release `latest.json`（通过 ZIP + `Claudome.exe` 双重 SHA-256 校验、防降级和 Zip-Slip 防护），也支持直接选取收到的 `.zip` 安装包在本地原子替换并自动重启，保留原任务与虚拟机。
 - **Windows `0.4.6` Hyper-V 双向剪贴板放开**：默认允许 Hyper-V 增强会话纯剪贴板同步，并在来宾 `Terminal Services` 策略中禁用宿主机磁盘驱动器映射（`fDisableCdm=1`）、USB/PnP、摄像头、打印机与音频重定向；桌面左侧开放与 VirtualBox 对齐的「关闭双向剪贴板 / 启用双向剪贴板」一键切换。
 - **Windows `0.4.5` 体验与稳定性修复**：可拖动缩放并支持 `Esc` 关闭的「外观与配色」弹窗；Windows 家庭版 + VirtualBox（NEM）多核提醒、25 秒 `0x0` 黑屏兜底横幅与一键恢复 1 核；启动网关前清理 `private` 下旧哈希 `ClaudeNetworkGateway.*.exe` 残留；节点测速与多选测速区分宿主机物理网卡与虚拟 TUN/代理接口。
 - **Mac 跨平台推进（Step 1 & Step 2）**：已抽离跨平台核心 [Claudome.Core](Claudome.Core/Claudome.Core.csproj)、支持 `darwin/arm64` & `darwin/amd64` 交叉编译的 Go 网关，以及 [Claudome.Mac](Claudome.Mac/Claudome.Mac.csproj) Avalonia 桌面端控制台（VMware Fusion / UTM 配置生成、Keychain + AES-GCM 凭据、scoped `pfctl` 锚点规则、双向剪贴板默认开启与开关），已通过离线编译与契约/渲染测试；**因来宾一键编排与 Mac 真机实测尚未完成，暂未发布 Mac 成品包**。

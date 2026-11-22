@@ -85,7 +85,7 @@ public sealed partial class SetupWindow
         var groupPanel = new StackPanel(); groupPanel.Children.Add(Text("一起交流", 11));
         var group = Action("交流群  1129410798", (_, _) => { Clipboard.SetText("1129410798"); banner.Text = "群号已复制"; }); group.FontSize = 11; group.Background = Pale; group.Foreground = Accent; group.BorderThickness = new Thickness(0); groupPanel.Children.Add(group);
         desktopHiddenFooter=new Border { BorderBrush=Line,BorderThickness=new Thickness(0,1,0,0),Padding=new Thickness(0,16,0,0),Margin=new Thickness(0,16,0,0),Child=groupPanel };sideBottom.Children.Add(desktopHiddenFooter);
-        sideBottom.Children.Add(new TextBlock { Text = "开发者  李诗恩 · 林琛", FontSize = 10, Foreground = Muted, Margin = new Thickness(12, 12, 0, 4) });
+        sideBottom.Children.Add(new TextBlock { Text = $"v{SelfUpdater.CurrentVersion().ToString(3)} · 李诗恩 · 林琛", FontSize = 10, Foreground = Muted, Margin = new Thickness(12, 12, 0, 4) });
         var body = new Grid { Margin = new Thickness(34, 26, 30, 18) };shellBody=body; Grid.SetColumn(body, 1); ContentRoot.Children.Add(body);
         body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); body.RowDefinitions.Add(new RowDefinition()); body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var heading = new StackPanel();

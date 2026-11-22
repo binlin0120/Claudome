@@ -21,6 +21,7 @@ public static class Program
         if (args.Length == 2 && args[0] == "--scan-machines") { try { JsonFile.Write(args[1], VmInventory.Scan(CancellationToken.None).GetAwaiter().GetResult()); return 0; } catch { return 1; } }
         if (args.Length == 2 && args[0] == "--diagnostics") { try { using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2)); JsonFile.Write(args[1], Diagnostics.Collect(timeout.Token).GetAwaiter().GetResult()); return 0; } catch { return 1; } }
         if (args.Length > 0 && args[0] == "--self-test") return SelfTests.Run(args.Length > 1 ? args[1] : Path.Combine(Path.GetTempPath(), "ClaudeSetup-tests")).GetAwaiter().GetResult();
+        try { SelfUpdater.CleanupStaleUpdateFiles(Path.GetDirectoryName(Environment.ProcessPath ?? "") ?? AppContext.BaseDirectory, Path.GetTempPath()); } catch { }
         var app = new Application();
         app.Exit += (_, _) => Task.Run(() => BoundaryRuntime.Replace(null, "")).GetAwaiter().GetResult();
         app.DispatcherUnhandledException += (_, e) => { MessageBox.Show(Redaction.SafeError(e.Exception), "需要处理", MessageBoxButton.OK, MessageBoxImage.Information); e.Handled = true; };
@@ -85,6 +86,11 @@ public sealed partial class SetupWindow : Window
     private readonly CheckBox manualAdsPower = Check("手动使用 AdsPower（无需本机 API）");
     private readonly CheckBox remember = Check("在本机加密记住必要资料（不勾选则仅本次使用）"), showPassword = Check("显示虚拟机密码"), license = Check("我已核对所选 Windows 的许可与来宾使用授权"), consent = Check("我已阅读组件许可，并确认所选虚拟机方案的安装与配置范围"), outage = Check("对本次新建来宾执行短暂的代理停止与恢复测试"), useCustomVmConfig = Check("使用我填写的自定义资源配置（不自动启用 VirtualBox 防卡死降核）");
     private readonly TextBlock cpuNemWarning = new() { FontSize = 11, TextWrapping = TextWrapping.Wrap, LineHeight = 18, Margin = new Thickness(0, 2, 0, 8), Visibility = Visibility.Collapsed };
+    private readonly TextBlock updateStatusText = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Foreground = Muted, Margin = new Thickness(0, 0, 0, 10) };
+    private readonly ProgressBar updateProgressBar = new() { Minimum = 0, Maximum = 100, Height = 6, Margin = new Thickness(0, 0, 0, 10), Visibility = Visibility.Collapsed, Foreground = Accent };
+    private Button? checkUpdateButton, applyUpdateButton, localZipUpdateButton;
+    private UpdateCheckResult? pendingUpdateCheck;
+    private bool checkingUpdates;
     private readonly ProgressBar progress = new() { Minimum = 0, Maximum = 100, Height = 8, Margin = new Thickness(0, 12, 0, 10), Foreground = Accent };
     private readonly TextBlock progressText = new() { Foreground = Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap };
     private readonly Button previous, next;
@@ -125,6 +131,7 @@ public sealed partial class SetupWindow : Window
         BuildPages(); ApplyRecommendedCpuIfNotCustom(); RefreshCreationFields(); RefreshHost(); if (restoreTask) RestoreLastTask(); Navigate(0);
         platform.SelectionChanged += (_, _) => { if (!refreshingPlatforms) platformInvalidations++; };
         InitializeTaskSaving(restoreTask);
+        if (restoreTask) Loaded += async (_, _) => await CheckForUpdatesAsync(interactive: false);
     }
     private static SolidColorBrush Brush(string color)
     {
@@ -172,6 +179,7 @@ public sealed partial class SetupWindow : Window
         RefreshPlatforms();
         pages[0].Children.Add(Card(Field("选择虚拟机方案（按这台电脑的推荐度排序）", platform), platformReason, Text("推荐度综合系统版本、架构、硬件虚拟化与已有软件；自动部署能力单独标明。Mac 在项目中另有 Fusion / Parallels / UTM 流程，此 Windows 程序不在 Mac 上运行。", 11)));
         pages[0].Children.Add(Card(Text("这次会做什么", 16, false), Text("创建独立的 Windows 虚拟机，准备网络代理与 AdsPower 环境。你可以继续使用已有订阅，自行选择节点。"), Text("客户无需安装 Codex。安装到哪些目录、哪些步骤需要管理员确认，都会在开始前说明。已有虚拟机不会被覆盖。"), Text("当前为开发试用版：Windows 10 与内嵌控制台尚需干净机器端到端验收，程序会如实显示待处理项。", 12), Row(Action("查看组件来源与许可", (_, _) => ShowLicenses()))));
+        pages[0].Children.Add(BuildUpdateCard());
         pages[1].Children.Add(Card(Text("已有虚拟机？", 16, false), Text("先查看当前电脑已注册的环境，再决定新建还是载入原任务。", 12), Row(Action("扫描本机已有虚拟机", async (_, _) => await ScanMachines()), Action("载入已有安装任务", (_, _) => LoadTask())), inventoryPanel));
         cpuNemWarning.Foreground = Accent;
         pages[1].Children.Add(Card(Field("数据与虚拟磁盘目录", root, "建议至少预留 95 GB；可选择本地磁盘，无需强制使用 D 盘。"), Row(Action("选择文件夹", (_, _) => { if(!string.IsNullOrEmpty(state.VmId)){Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。");return;}var d = new OpenFolderDialog(); if (d.ShowDialog() == true) root.Text = d.FolderName; })), Field("虚拟机名称", vmName, "使用英文字母、数字、短横线或下划线。"), Field("来宾内存（MB）", memory), Field("虚拟 CPU 数量", cpu, "开启虚拟化安全（Hyper-V 兼容模式）的电脑上 VirtualBox 默认推荐 1 核以彻底避免多核跨核中断死锁；若你自行修改核数或勾选下方自定义开关，程序将按你选择的配置运行，不自动启用防卡死降核。"), useCustomVmConfig, cpuNemWarning, Field("虚拟磁盘最大容量（GB）", disk),creationNote));
@@ -626,6 +634,132 @@ public sealed partial class SetupWindow : Window
             }
         }
         return "";
+    }
+    private Border BuildUpdateCard()
+    {
+        var current = SelfUpdater.CurrentVersion().ToString(3);
+        updateStatusText.Text = $"当前版本：Claudome v{current}。支持联网检查 GitHub 最新版（通过 SHA-256 校验后在本地原地替换重启），也支持直接导入收到的 .zip 压缩包原地升级，不改动任务目录和虚拟机。";
+        checkUpdateButton = Action("检查在线更新", async (_, _) => await CheckForUpdatesAsync(interactive: true));
+        applyUpdateButton = Action("一键更新并重启", async (_, _) => await ApplyPendingOnlineUpdateAsync(), true);
+        applyUpdateButton.Visibility = Visibility.Collapsed;
+        localZipUpdateButton = Action("从本地 ZIP 更新", async (_, _) => await ApplyLocalZipUpdateAsync());
+        return Card(
+            Text("版本与本地更新", 16, false),
+            updateStatusText,
+            updateProgressBar,
+            Row(applyUpdateButton, checkUpdateButton, localZipUpdateButton));
+    }
+    private void SetUpdateButtonsEnabled(bool enabled)
+    {
+        if (checkUpdateButton is not null) checkUpdateButton.IsEnabled = enabled;
+        if (applyUpdateButton is not null) applyUpdateButton.IsEnabled = enabled;
+        if (localZipUpdateButton is not null) localZipUpdateButton.IsEnabled = enabled;
+    }
+    private async Task CheckForUpdatesAsync(bool interactive)
+    {
+        if (checkingUpdates) return;
+        checkingUpdates = true;
+        SetUpdateButtonsEnabled(false);
+        if (interactive) updateStatusText.Text = "正在检查最新版本…";
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var result = await SelfUpdater.CheckForUpdateAsync(SelfUpdater.CurrentVersion(), token: cts.Token);
+            pendingUpdateCheck = result;
+            if (result.HasUpdate && result.Manifest is { } m)
+            {
+                updateStatusText.Text = $"发现新版本 v{m.Version}（{m.ZipName}），已就绪下载校验与本地原地更新。";
+                if (applyUpdateButton is not null)
+                {
+                    applyUpdateButton.Content = $"一键更新到 v{m.Version} 并重启";
+                    applyUpdateButton.Visibility = Visibility.Visible;
+                }
+            }
+            else if (interactive)
+            {
+                updateStatusText.Text = result.StatusMessage;
+                if (applyUpdateButton is not null) applyUpdateButton.Visibility = Visibility.Collapsed;
+            }
+        }
+        catch (Exception ex) when (interactive)
+        {
+            updateStatusText.Text = "检查更新未成功（可确认代理或直接点击右侧“从本地 ZIP 更新”）：" + Redaction.SafeError(ex);
+        }
+        catch { /* Keep startup background check silent when offline. */ }
+        finally
+        {
+            checkingUpdates = false;
+            SetUpdateButtonsEnabled(true);
+        }
+    }
+    private async Task ApplyPendingOnlineUpdateAsync()
+    {
+        if (pendingUpdateCheck is not { HasUpdate: true, Manifest: { } manifest } check) return;
+        await ExecuteLocalSwapUpdateAsync(
+            manifest.Version,
+            (progressReporter, token) => SelfUpdater.DownloadAndStageAsync(manifest, check.DownloadUrl, SelfUpdater.CurrentVersion(), Path.GetTempPath(), progressReporter, token));
+    }
+    private async Task ApplyLocalZipUpdateAsync()
+    {
+        var dialog = new OpenFileDialog { Filter = "Claudome 更新包|Claudome_*_win-x64.zip|ZIP 压缩包|*.zip", Title = "选择新版 Claudome 安装包" };
+        if (dialog.ShowDialog() != true) return;
+        var current = SelfUpdater.CurrentVersion();
+        var stagingDir = Path.Combine(Path.GetTempPath(), "claudome-stage-" + Guid.NewGuid().ToString("N"));
+        await ExecuteLocalSwapUpdateAsync(
+            "本地包",
+            (_, token) => SelfUpdater.ExtractAndVerifyPackageAsync(dialog.FileName, stagingDir, current, null, null, allowSameVersion: false, token),
+            stagingDir);
+    }
+    private async Task ExecuteLocalSwapUpdateAsync(
+        string targetLabel,
+        Func<IProgress<double>, CancellationToken, Task<StagedUpdate>> stagePackage,
+        string? cleanupDirOnFailure = null)
+    {
+        if (busy) { Notice("当前正在执行部署或网络操作，请等待完成后再更新。"); return; }
+        var confirm = MessageBox.Show(this,
+            $"将验证并应用更新（{targetLabel}），随后自动重启 Claudome。\n\n• 你的虚拟机、磁盘和任务配置会完整保留；\n• 如果当前正在运行受控网络网关，重启期间会暂停网关保护，新版打开后重新连接即可。\n\n是否立即更新并重启？",
+            "确认原地更新", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes) return;
+
+        var currentExe = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(currentExe) || !File.Exists(currentExe))
+        {
+            Notice("当前未从独立 Claudome.exe 启动，无法执行原地文件替换。");
+            return;
+        }
+
+        SetUpdateButtonsEnabled(false);
+        updateProgressBar.Visibility = Visibility.Visible;
+        updateProgressBar.IsIndeterminate = false;
+        updateProgressBar.Value = 0;
+        updateStatusText.Text = $"正在下载并校验 {targetLabel}（SHA-256 与版本检查）…";
+        StagedUpdate? staged = null;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+            var progressReporter = new Progress<double>(pct =>
+            {
+                updateProgressBar.Value = pct;
+                updateStatusText.Text = $"正在准备更新包… {pct:F0}%";
+            });
+            staged = await stagePackage(progressReporter, cts.Token);
+            updateProgressBar.Value = 100;
+            updateStatusText.Text = $"校验通过（v{staged.Version}），正在准备重启替换…";
+
+            await BoundaryRuntime.Replace(null, "");
+            if (desktopTimer is not null) desktopTimer.Stop();
+            SelfUpdater.StartSwapAndRestart(staged, currentExe, Environment.ProcessId, relaunch: true);
+            Close();
+        }
+        catch (Exception ex)
+        {
+            if (staged is not null) try { Directory.Delete(staged.StagingDirectory, true); } catch { }
+            else if (!string.IsNullOrEmpty(cleanupDirOnFailure)) try { Directory.Delete(cleanupDirOnFailure, true); } catch { }
+            updateProgressBar.Visibility = Visibility.Collapsed;
+            updateStatusText.Text = "更新已取消或校验未通过：" + Redaction.SafeError(ex);
+            Notice(updateStatusText.Text);
+            SetUpdateButtonsEnabled(true);
+        }
     }
     private void ShowReport()
     {

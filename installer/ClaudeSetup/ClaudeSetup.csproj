@@ -11,7 +11,7 @@
     <Product>Claudome</Product>
     <Description>Claude 独立环境部署助手</Description>
     <Authors>李诗恩;林琛</Authors>
-    <Version>0.4.6</Version>
+    <Version>0.4.7</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Brand\Claudome.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>

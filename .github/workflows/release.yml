@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag name (e.g. v0.4.6)'
+        description: 'Release tag name (e.g. v0.4.7)'
         required: true
-        default: 'v0.4.6'
+        default: 'v0.4.7'
 
 permissions:
   contents: write
@@ -72,9 +72,21 @@ jobs:
             "$exeHash  $pkgName/Claudome.exe"
           ) | Set-Content -LiteralPath $sumsPath -Encoding UTF8
 
+          $manifestPath = Join-Path $outRoot 'latest.json'
+          [ordered]@{
+            version        = $ver
+            tag            = $tag
+            zipName        = "$pkgName.zip"
+            zipSha256      = $zipHash
+            exeSha256      = $exeHash
+            notes          = "Claudome $tag (Windows x64)"
+            publishedAtUtc = (Get-Date).ToUniversalTime().ToString('O')
+          } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "sums_path=$sumsPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "manifest_path=$manifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "zip_sha256=$zipHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "exe_sha256=$exeHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
@@ -99,3 +111,4 @@ jobs:
           files: |
             ${{ steps.pkg.outputs.zip_path }}
             ${{ steps.pkg.outputs.sums_path }}
+            ${{ steps.pkg.outputs.manifest_path }}
