@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -28,6 +29,7 @@ public static class MacDeployment
         CancellationToken token)
     {
         Paths.ValidateRoot(options.Root);
+        Paths.EnsureWorkspace(options.Root);
         var resources = MacProvisioningMedia.GuestResources(isAppleSilicon);
         using var downloader = new Downloader();
         foreach (var resource in resources)
@@ -58,7 +60,10 @@ public static class MacDeployment
         IsolationPolicy.RequireSupportedPlatform(state, isMacOverride: true);
         var o = state.Options;
         var installWindows = !state.Completed.Contains("guest-ready");
+        if (installWindows && secrets.VmPassword.Trim().Length < 10)
+            throw new SetupException("请设置至少 10 位独立虚拟机密码。");
         o.Validate(requireIso: installWindows);
+        Paths.EnsureWorkspace(o.Root);
         HostPlatform.Environment.RestrictPrivateDirectory(o.Private);
 
         progress.Report("1 / 6  核验或下载 Mac 来宾所需组件…");
@@ -71,23 +76,20 @@ public static class MacDeployment
 
         try
         {
+            var resolvedAddresses = Array.Empty<string>();
+            var endpointPort = 0;
             if (o.NetworkSource != "稍后配置")
             {
                 var selectedNode = ParseNodeJson(secrets.SelectedNodeJson);
-                var upstreamNode = ParseOptionalNodeJson(secrets.UpstreamNodeJson);
-                var targetHost = upstreamNode?.Server ?? selectedNode.Server;
-                var targetPort = upstreamNode?.Port ?? selectedNode.Port;
-                string[] addresses;
-                if (skipEndpointDnsResolveForTest && System.Net.IPAddress.TryParse(targetHost, out _))
-                {
-                    addresses = IsolationPolicy.ValidateEndpoints([targetHost]);
-                }
-                else
-                {
-                    addresses = await NodeEndpointResolver.Resolve(targetHost, token);
-                }
-                progress.Report("2 / 6  准备 macOS pfctl 防火墙隔离锚点…");
-                await firewall.ApplyAsync(o.WorkspaceId, DefaultMacBridgeInterface, addresses, targetPort, DefaultGatewayPort, token);
+                var upstreamNode = selectedNode.Upstream ?? ParseOptionalNodeJson(secrets.UpstreamNodeJson);
+                var firstHop = upstreamNode ?? selectedNode;
+                endpointPort = firstHop.Port;
+                resolvedAddresses = ResolveHostAddresses(firstHop.Server, skipEndpointDnsResolveForTest, token);
+                var bridgeIface = firewall is MacGatewayFirewall macFw
+                    ? await macFw.DetectGuestBridgeInterfaceAsync(token)
+                    : DefaultMacBridgeInterface;
+                progress.Report($"2 / 6  准备 macOS pfctl 防火墙隔离锚点（{bridgeIface}）…");
+                await firewall.ApplyAsync(o.WorkspaceId, bridgeIface, resolvedAddresses, endpointPort, DefaultGatewayPort, token);
             }
 
             progress.Report($"3 / 6  准备 {(o.PlatformId == "utm" ? "UTM" : "VMware Fusion")} 虚拟机环境…");
@@ -103,7 +105,8 @@ public static class MacDeployment
             if (installWindows)
             {
                 progress.Report("4 / 6  生成无人值守引导介质并启动 Windows 安装…");
-                await backend.InstallWindows(state, secrets, token);
+                if (!await backend.IsRunning(state, token))
+                    await backend.InstallWindows(state, secrets, token);
                 await backend.Open(state, token);
 
                 var guestReady = false;
@@ -126,11 +129,26 @@ public static class MacDeployment
                 state.Save();
             }
 
-            progress.Report("5 / 6  向来宾传送安全安装脚本与组件包…");
+            progress.Report("5 / 6  核对来宾 PowerShell 与传送安全安装脚本…");
             var guestRoot = o.GuestSetupDirectory;
-            var guestPwsh = guestRoot + @"\pwsh\pwsh.exe";
-            var runId = Guid.NewGuid().ToString("N");
+            var guestPwshDir = guestRoot + @"\pwsh";
+            var guestPwsh = guestPwshDir + @"\pwsh.exe";
+            await backend.EnsureGuestDirectory(state, secrets, guestRoot, token);
 
+            var pwshResource = resources.SingleOrDefault(r => r.Id == "pwsh")
+                ?? throw new SetupException("Mac 来宾资源清单缺少 PowerShell 包。");
+            if (!await backend.GuestFileExists(state, secrets, guestPwsh, token))
+            {
+                var cachedPwsh = Paths.Under(o.Cache, pwshResource.FileName);
+                if (!File.Exists(cachedPwsh))
+                    throw new SetupException($"本地缓存缺少 {pwshResource.FileName}，请先完成组件下载。");
+                var guestPwshZip = $@"{guestRoot}\{pwshResource.FileName}";
+                await backend.CopyTo(state, secrets, cachedPwsh, guestPwshZip, token);
+                await backend.EnsureGuestDirectory(state, secrets, guestPwshDir, token);
+                await backend.GuestRun(state, secrets, @"C:\Windows\System32\tar.exe", ["-xf", guestPwshZip, "-C", guestPwshDir], token, 180);
+            }
+
+            var runId = Guid.NewGuid().ToString("N");
             foreach (var scriptName in GuestConfigureScripts)
             {
                 var content = Catalog.EmbeddedText(scriptName);
@@ -146,7 +164,19 @@ public static class MacDeployment
                 }
             }
 
-            foreach (var resource in resources)
+            var yamlLocal = Paths.Under(o.Private, $"{runId}-YamlDotNet.dll");
+            await File.WriteAllBytesAsync(yamlLocal, Catalog.EmbeddedBytes("YamlDotNet.dll"), token);
+            try
+            {
+                await backend.CopyTo(state, secrets, yamlLocal, $@"{guestRoot}\YamlDotNet.dll", token);
+            }
+            finally
+            {
+                if (File.Exists(yamlLocal)) File.Delete(yamlLocal);
+            }
+
+            var appResources = resources.Where(r => r.Id != "pwsh").ToArray();
+            foreach (var resource in appResources)
             {
                 var cached = Paths.Under(o.Cache, resource.FileName);
                 if (File.Exists(cached))
@@ -156,8 +186,14 @@ public static class MacDeployment
             }
 
             TimeZoneInfo.TryConvertWindowsIdToIanaId(o.TimeZoneId, o.Country, out var ianaTimeZone);
-            var resolvedAddresses = o.NetworkSource != "稍后配置" ? ResolveCachedAddresses(secrets, skipEndpointDnsResolveForTest) : [];
-            var coreConfig = BuildMinimalCoreConfig(secrets, o.NetworkSource != "稍后配置", resolvedAddresses);
+            var coreConfig = BuildMinimalCoreConfig(secrets, o.NetworkSource != "稍后配置");
+            var configHash = string.IsNullOrEmpty(coreConfig)
+                ? ""
+                : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(coreConfig))).ToLowerInvariant();
+            state.CoreConfigSha256 = configHash;
+            state.GuestSettingsStamp = ResumePlan.SettingsStamp(o, configHash);
+            state.Save();
+
             var payload = JsonSerializer.Serialize(new
             {
                 runId,
@@ -175,7 +211,7 @@ public static class MacDeployment
                 transportKind = "nat",
                 coreConfig,
                 endpointAddresses = resolvedAddresses,
-                endpointPort = 0,
+                endpointPort,
                 expectedExitIp = secrets.ExpectedExitIp,
                 testOutage = o.TestOutage && !state.OutagePassed,
                 resumeNetwork = false,
@@ -183,7 +219,7 @@ public static class MacDeployment
                 browserOnly = false,
                 resumeReopenPassed = state.BrowserReopenPassed,
                 coreConfigSha256 = state.CoreConfigSha256,
-                resources = resources.Select(r => new { id = r.Id, fileName = r.FileName, sha256 = r.Sha256 })
+                resources = appResources.Select(r => new { id = r.Id, fileName = r.FileName, sha256 = r.Sha256 })
             });
 
             var localPayload = Paths.Under(o.Private, $"payload-{runId}.json");
@@ -201,21 +237,58 @@ public static class MacDeployment
             }
 
             progress.Report("6 / 6  在 Windows 来宾内执行 Clash、防火墙与 AdsPower 配置…");
-            await backend.GuestRun(state, secrets, guestPwsh, ["-NoLogo", "-NoProfile", "-File", $@"{guestRoot}\Configure.ps1", "-PayloadPath", guestPayload], token, 1500);
-            await backend.CopyFrom(state, secrets, guestResult, localResult, token);
+            SetupException? guestRunError = null;
+            try
+            {
+                await backend.GuestRun(state, secrets, guestPwsh, ["-NoLogo", "-NoProfile", "-File", $@"{guestRoot}\Configure.ps1", "-PayloadPath", guestPayload], token, 1500);
+            }
+            catch (SetupException ex)
+            {
+                guestRunError = ex;
+            }
+
+            try
+            {
+                await backend.CopyFrom(state, secrets, guestResult, localResult, token);
+            }
+            catch when (guestRunError is not null)
+            {
+                throw guestRunError;
+            }
 
             if (!File.Exists(localResult))
-                throw new SetupException("未能从 Mac 来宾回读部署验收结果。");
+                throw guestRunError ?? new SetupException("未能从 Mac 来宾回读部署验收结果。");
 
             using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(localResult, token));
+            if (File.Exists(localResult)) File.Delete(localResult);
             var rootEl = doc.RootElement;
             state.NetworkPassed = rootEl.TryGetProperty("networkPassed", out var netPassed) && netPassed.GetBoolean();
             state.OutagePassed = rootEl.TryGetProperty("outagePassed", out var outagePassed) && outagePassed.GetBoolean();
-            state.SetupFinished = state.NetworkPassed;
-            state.Status = state.NetworkPassed ? "Mac 来宾环境已完成部署与验收" : "来宾尚有待处理项";
+            state.ClashConfigured = rootEl.TryGetProperty("clashConfigured", out var clashCfg) && clashCfg.GetBoolean();
+            state.BrowserProfileConfigured = rootEl.TryGetProperty("browserProfileConfigured", out var adsCfg) && adsCfg.GetBoolean();
             state.Stage = rootEl.TryGetProperty("code", out var codeProp) ? codeProp.GetString() ?? "" : "";
+            state.PendingActions.Clear();
+            if (rootEl.TryGetProperty("pendingActions", out var pendingEl) && pendingEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in pendingEl.EnumerateArray())
+                {
+                    var title = item.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                    var id = item.TryGetProperty("id", out var i) ? i.GetString() ?? "" : "";
+                    var steps = item.TryGetProperty("steps", out var s) && s.ValueKind == JsonValueKind.Array
+                        ? s.EnumerateArray().Select(x => x.GetString() ?? "").Where(x => !string.IsNullOrWhiteSpace(x)).ToArray()
+                        : [];
+                    if (!string.IsNullOrWhiteSpace(title))
+                        state.PendingActions.Add(new UserAction(title, steps, id));
+                }
+            }
+            state.SetupFinished = state.NetworkPassed && (state.Stage == "NEEDS_BROWSER_ACCEPTANCE" || string.IsNullOrEmpty(state.Stage));
+            state.Status = state.SetupFinished ? "Mac 来宾环境已完成部署与验收" : $"来宾待处理：{state.Stage}";
             state.Save();
-            progress.Report(state.NetworkPassed ? "全部 Mac 部署与来宾配置已通过回读。" : $"来宾返回待处理状态：{state.Stage}");
+
+            if (!state.SetupFinished && guestRunError is not null)
+                throw new SetupException($"来宾配置暂停（{state.Stage}）：{(state.PendingActions.FirstOrDefault()?.Title ?? guestRunError.Message)}");
+
+            progress.Report(state.SetupFinished ? "全部 Mac 部署与来宾配置已通过回读。" : $"来宾返回待处理状态：{state.Stage}");
             return state;
         }
         finally
@@ -233,24 +306,19 @@ public static class MacDeployment
             ? null
             : NetworkImport.Parse("{\"proxies\":[" + json + "]}").Nodes.FirstOrDefault();
 
-    private static string[] ResolveCachedAddresses(Secrets secrets, bool skipDns)
+    private static string[] ResolveHostAddresses(string host, bool skipDns, CancellationToken token)
     {
-        if (string.IsNullOrWhiteSpace(secrets.SelectedNodeJson)) return [];
-        var selected = ParseNodeJson(secrets.SelectedNodeJson);
-        var upstream = ParseOptionalNodeJson(secrets.UpstreamNodeJson);
-        var host = upstream?.Server ?? selected.Server;
         if (System.Net.IPAddress.TryParse(host, out _)) return IsolationPolicy.ValidateEndpoints([host]);
-        if (skipDns) return [];
-        return NodeEndpointResolver.Resolve(host, CancellationToken.None).GetAwaiter().GetResult();
+        if (skipDns) return ["1.1.1.1"];
+        return NodeEndpointResolver.Resolve(host, token).GetAwaiter().GetResult();
     }
 
-    private static string BuildMinimalCoreConfig(Secrets secrets, bool networkEnabled, string[] endpointAddresses)
+    private static string BuildMinimalCoreConfig(Secrets secrets, bool networkEnabled)
     {
         if (!networkEnabled || string.IsNullOrWhiteSpace(secrets.SelectedNodeJson)) return "";
-        return NetworkImport.CoreConfig(
-            ParseNodeJson(secrets.SelectedNodeJson),
-            endpointAddresses,
-            physicalInterface: null,
-            upstream: ParseOptionalNodeJson(secrets.UpstreamNodeJson));
+        var selected = ParseNodeJson(secrets.SelectedNodeJson);
+        var upstream = selected.Upstream ?? ParseOptionalNodeJson(secrets.UpstreamNodeJson);
+        // On Mac NAT (externalGateway = false), keep Clash DNS bootstrap on https://1.1.1.1/dns-query instead of 198.19.250.1.
+        return NetworkImport.CoreConfig(selected, endpointAddresses: null, physicalInterface: null, upstream: upstream);
     }
 }

@@ -216,8 +216,9 @@ function Read-BrowserTrace($Connection,$Tab) {
 function Assert-TaskFirewallSurface {
     $enabled=@(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Outbound -Enabled True -Action Allow)
     $uplink=Get-TaskUplink
-    $expectedNames=@('Claude endpoint TCP','Claude endpoint UDP','Claude pinned node DNS','Claude TUN interface')
-    if($payload.platformId -eq 'virtualbox'){$expectedNames+='Claude guest DHCP'}
+    $dnsRule=if($payload.externalGateway -eq $false){'Claude DNS bootstrap'}else{'Claude pinned node DNS'}
+    $expectedNames=@('Claude endpoint TCP','Claude endpoint UDP',$dnsRule,'Claude TUN interface')
+    if($payload.platformId -eq 'virtualbox' -or ($payload.transportKind -ne 'bus' -and $payload.externalGateway -eq $false)){$expectedNames+='Claude guest DHCP'}
     if((($enabled.DisplayName | Sort-Object) -join ',') -ne (($expectedNames | Sort-Object) -join ',')){throw 'FIREWALL_RULE_SET'}
     foreach($rule in $enabled) {
         $ports=$rule | Get-NetFirewallPortFilter
@@ -238,11 +239,16 @@ function Assert-TaskFirewallSurface {
                 if([string]$ports.Protocol -notin @('UDP','17') -or (@($ports.RemotePort) -join ',') -ne '53' -or
                     $remote -ne '198.19.250.1' -or (ConvertTo-ClashLocalPath ([string]$program.Program)) -ne $script:CoreExe){throw 'FIREWALL_NODE_DNS_SCOPE'}
             }
+            '^Claude DNS bootstrap$' {
+                if([string]$ports.Protocol -notin @('TCP','6') -or (@($ports.RemotePort) -join ',') -ne '443' -or
+                    $remote -ne '1.1.1.1' -or (ConvertTo-ClashLocalPath ([string]$program.Program)) -ne $script:CoreExe){throw 'FIREWALL_NODE_DNS_SCOPE'}
+            }
             '^Claude guest DHCP$' {
                 $service=$rule | Get-NetFirewallServiceFilter
+                $validRemote=if($payload.platformId -eq 'virtualbox' -and $payload.externalGateway){$remote -eq '198.19.250.1,255.255.255.255'}else{$remote -match '^(?:\d{1,3}\.){3}\d{1,3},255\.255\.255\.255$'}
                 if([string]$ports.Protocol -notin @('UDP','17') -or (@($ports.LocalPort) -join ',') -ne '68' -or
                     (@($ports.RemotePort) -join ',') -ne '67' -or $alias -ne $uplink.Name -or
-                    $remote -ne '198.19.250.1,255.255.255.255' -or $service.Service -ne 'Dhcp' -or
+                    -not $validRemote -or $service.Service -ne 'Dhcp' -or
                     [Environment]::ExpandEnvironmentVariables([string]$program.Program) -ne (Join-Path $env:SystemRoot 'System32\svchost.exe')){throw 'FIREWALL_DHCP_SCOPE'}
             }
             '^Claude TUN interface$' {if($alias -ne 'ClaudeTun'){throw 'FIREWALL_TUN_SCOPE'}}

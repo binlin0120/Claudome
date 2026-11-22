@@ -128,6 +128,7 @@ function Test-GuestAppInstalled([string]$Id,[string]$Pattern) {
     if($Id -eq 'clash'){try{$null=Get-ClashExecutable;return $true}catch{return $false}}
     if($Id -eq 'adspower'){
         $paths=@((Join-Path $env:LOCALAPPDATA 'Programs\AdsPower Global\AdsPower Global.exe'),(Join-Path $env:ProgramFiles 'AdsPower Global\AdsPower Global.exe'))
+        if(${env:ProgramFiles(x86)}){$paths+=Join-Path ${env:ProgramFiles(x86)} 'AdsPower Global\AdsPower Global.exe'}
         return [bool]($paths | Where-Object {Test-Path -LiteralPath $_ -PathType Leaf} | Select-Object -First 1)
     }
     return $false

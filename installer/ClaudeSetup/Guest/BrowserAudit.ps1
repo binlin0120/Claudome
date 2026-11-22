@@ -10,7 +10,9 @@ function Get-ExpectedBrowserLanguages([string]$Country) {
     return @($local,$local.Split('-')[0])
 }
 function Start-AdsClient {
-    $adsExe=@((Join-Path $env:LOCALAPPDATA 'Programs\AdsPower Global\AdsPower Global.exe'),(Join-Path $env:ProgramFiles 'AdsPower Global\AdsPower Global.exe')) | Where-Object {Test-Path -LiteralPath $_} | Select-Object -First 1
+    $candidates=@((Join-Path $env:LOCALAPPDATA 'Programs\AdsPower Global\AdsPower Global.exe'),(Join-Path $env:ProgramFiles 'AdsPower Global\AdsPower Global.exe'))
+    if(${env:ProgramFiles(x86)}){$candidates+=Join-Path ${env:ProgramFiles(x86)} 'AdsPower Global\AdsPower Global.exe'}
+    $adsExe=$candidates | Where-Object {Test-Path -LiteralPath $_} | Select-Object -First 1
     if($adsExe -and -not(Get-Process -Name 'AdsPower Global' -ErrorAction SilentlyContinue)){Start-Process -FilePath $adsExe -WindowStyle Minimized | Out-Null;Start-Sleep -Seconds 10}
 }
 function Ads-Request([string]$Method,[string]$Route,$Body=$null) {

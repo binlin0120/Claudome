@@ -143,8 +143,10 @@ public static class MacSelfTests
                     "Mac guest asset missing verified SHA-256 or HTTPS URL");
             }
             Assert(Catalog.EmbeddedText("Configure.ps1").Contains("'fusion'", StringComparison.Ordinal) &&
-                   Catalog.EmbeddedText("Configure.ps1").Contains("'utm'", StringComparison.Ordinal),
-                "Embedded Configure.ps1 missing fusion/utm identity support");
+                   Catalog.EmbeddedText("Configure.ps1").Contains("'utm'", StringComparison.Ordinal) &&
+                   Catalog.EmbeddedText("NetworkAudit.ps1").Contains("'Claude DNS bootstrap'", StringComparison.Ordinal) &&
+                   Catalog.EmbeddedBytes("YamlDotNet.dll").Length > 10000,
+                "Embedded guest scripts or YamlDotNet.dll missing fusion/utm NAT support");
         });
 
         Check("mac-seed-bootstrap-writes-claudebootstrap-identity-for-configure-ps1", () =>
@@ -172,8 +174,8 @@ public static class MacSelfTests
         {
             var root = Path.Combine(outputDirectory, "mac-deploy-fixture");
             if (Directory.Exists(root)) Directory.Delete(root, true);
-            Directory.CreateDirectory(root);
-            var fakeIso = Path.Combine(root, "win11-arm64.iso");
+            Paths.EnsureWorkspace(root);
+            var fakeIso = Path.Combine(outputDirectory, "mac-deploy-win11-arm64.iso");
             using (var fs = File.Create(fakeIso)) fs.SetLength(1024L * 1024 * 1024 + 4096);
 
             var deployState = new SessionState
@@ -216,8 +218,12 @@ public static class MacSelfTests
                 resources,
                 skipEndpointDnsResolveForTest: true).GetAwaiter().GetResult();
 
-            Assert(fakeFirewall.ApplyCalls == 1 && fakeBackend.ConfigureCalls == 1 && fakeBackend.InstallCalls == 1 && fakeBackend.GuestRunCalls == 1,
+            Assert(fakeFirewall.ApplyCalls == 1 && fakeBackend.ConfigureCalls == 1 && fakeBackend.InstallCalls == 1 && fakeBackend.TarExtractCalls == 1 && fakeBackend.ConfigureRunCalls == 1,
                 "Mac deployment orchestrator skipped required lifecycle stages");
+            Assert(fakeBackend.CopiedFiles.Contains("YamlDotNet.dll") && fakeBackend.CopiedFiles.Contains("Configure.ps1") && fakeBackend.CopiedFiles.Contains("NetworkAudit.ps1"),
+                "Mac deployment missing embedded guest dependency upload");
+            Assert(fakeBackend.LastEndpointPort == 443 && !fakeBackend.LastPayloadJson.Contains("198.19.250.1", StringComparison.Ordinal),
+                "Mac NAT guest payload endpointPort or DNS bootstrap mismatch");
             Assert(result.NetworkPassed && result.SetupFinished && result.Completed.Contains("vm-created") && result.Completed.Contains("guest-ready"),
                 "Mac deployment did not persist completed state");
         });
@@ -255,9 +261,16 @@ public static class MacSelfTests
     private sealed class MockMacBackend : IVmBackend
     {
         private string? lastPayloadRunId;
+        private bool running;
+        private bool pwshReady;
         public int ConfigureCalls { get; private set; }
         public int InstallCalls { get; private set; }
+        public int TarExtractCalls { get; private set; }
+        public int ConfigureRunCalls { get; private set; }
         public int GuestRunCalls { get; private set; }
+        public int LastEndpointPort { get; private set; }
+        public string LastPayloadJson { get; private set; } = "";
+        public HashSet<string> CopiedFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         public Task Prepare(SetupOptions options, CancellationToken token) => Task.CompletedTask;
         public Task<string> EnsureMachine(SessionState state, CancellationToken token)
@@ -266,21 +279,38 @@ public static class MacSelfTests
             return Task.FromResult(state.VmId);
         }
         public Task Configure(SessionState state, CancellationToken token) { ConfigureCalls++; return Task.CompletedTask; }
-        public Task InstallWindows(SessionState state, Secrets secrets, CancellationToken token) { InstallCalls++; return Task.CompletedTask; }
-        public Task<bool> IsRunning(SessionState state, CancellationToken token) => Task.FromResult(true);
-        public Task<bool> GuestReady(SessionState state, Secrets secrets, CancellationToken token) => Task.FromResult(true);
+        public Task InstallWindows(SessionState state, Secrets secrets, CancellationToken token) { InstallCalls++; running = true; return Task.CompletedTask; }
+        public Task<bool> IsRunning(SessionState state, CancellationToken token) => Task.FromResult(running);
+        public Task<bool> GuestReady(SessionState state, Secrets secrets, CancellationToken token) => Task.FromResult(running);
         public Task CleanupWindowsMedia(SessionState state, CancellationToken token) => Task.CompletedTask;
         public Task<string> GuestRun(SessionState state, Secrets secrets, string executable, IEnumerable<string> args, CancellationToken token, int seconds = 300)
         {
             GuestRunCalls++;
+            if (executable.EndsWith("tar.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                TarExtractCalls++;
+                pwshReady = true;
+            }
+            else if (executable.EndsWith("pwsh.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                ConfigureRunCalls++;
+            }
             return Task.FromResult("completed");
         }
-        public Task<bool> GuestFileExists(SessionState state, Secrets secrets, string file, CancellationToken token) => Task.FromResult(true);
+        public Task<bool> GuestFileExists(SessionState state, Secrets secrets, string file, CancellationToken token) =>
+            Task.FromResult(file.EndsWith("pwsh.exe", StringComparison.OrdinalIgnoreCase) && pwshReady);
         public Task CopyTo(SessionState state, Secrets secrets, string local, string destination, CancellationToken token)
         {
             var fileName = Path.GetFileName(destination);
+            CopiedFiles.Add(fileName);
             if (fileName.StartsWith("payload-", StringComparison.Ordinal) && fileName.EndsWith(".json", StringComparison.Ordinal))
+            {
                 lastPayloadRunId = fileName["payload-".Length..^".json".Length];
+                LastPayloadJson = File.ReadAllText(local);
+                using var doc = JsonDocument.Parse(LastPayloadJson);
+                if (doc.RootElement.TryGetProperty("endpointPort", out var portProp))
+                    LastEndpointPort = portProp.GetInt32();
+            }
             return Task.CompletedTask;
         }
         public Task CopyFrom(SessionState state, Secrets secrets, string guest, string destination, CancellationToken token)
@@ -290,6 +320,8 @@ public static class MacSelfTests
                 runId = lastPayloadRunId ?? "",
                 networkPassed = true,
                 outagePassed = true,
+                clashConfigured = true,
+                browserProfileConfigured = true,
                 code = "NEEDS_BROWSER_ACCEPTANCE"
             });
             return Task.CompletedTask;

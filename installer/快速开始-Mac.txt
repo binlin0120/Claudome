@@ -1,0 +1,19 @@
+Claudome macOS 预览版使用说明
+
+1. 打开方式（未公证签名时）
+   将 Claudome.app 拖到「应用程序」或保留在本地目录。首次双击如果 macOS 提示“无法验证开发者/已损坏”：
+   - 方法 A：右键点击 Claudome.app → 打开；或在「系统设置 → 隐私与安全性」点击“仍要打开”。
+   - 方法 B：在终端执行：xattr -cr "/Applications/Claudome.app"（或你的实际路径）。
+
+2. 虚拟化引擎选择
+   - VMware Fusion（推荐）：已完整接入 vmrun -T fusion 自动建机、复制脚本、解压 PowerShell 与来宾配置验收。
+   - UTM（实验预览）：当前支持生成 .utm/config.plist、qcow2 与 ARM64 无人值守应答盘及启动控制台；全自动来宾文件传送与脚本执行待真机代理联调。
+
+3. Windows 11 系统镜像要求
+   - Apple Silicon（M1/M2/M3/M4）：请使用微软官方 Windows 11 ARM64 ISO。
+   - Intel Mac：请使用微软官方 Windows 11 x64 ISO。
+   - 注意：AdsPower 当前仅提供 Windows x64 版，在 Win11 ARM64 下依赖系统内置 Prism 转译，需真机实测确认。
+
+4. 防火墙与密钥说明
+   - 本机资料使用 macOS Keychain + AES-256-GCM 加密保存在任务目录 private/credentials.mac。
+   - 部署期间程序会请求管理员权限设置 scoped pfctl 锚点规则；停止或撤回可使用界面中的「撤回 pfctl 防火墙锚点」。

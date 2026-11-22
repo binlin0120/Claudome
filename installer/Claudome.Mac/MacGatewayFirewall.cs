@@ -19,7 +19,24 @@ public sealed class MacGatewayFirewall(ICommandRunner? runner = null) : IHostFir
         return "claudome_" + sanitized[..Math.Min(16, sanitized.Length)].ToLowerInvariant();
     }
 
-    /// <summary>Builds fail-closed pf anchor rules scoping the VM bridge interface strictly to the host gateway.</summary>
+    /// <summary>Detects an active Fusion/UTM NAT bridge interface on macOS hosts, falling back to bridge100.</summary>
+    public async Task<string> DetectGuestBridgeInterfaceAsync(CancellationToken token)
+    {
+        if (!OperatingSystem.IsMacOS()) return MacDeployment.DefaultMacBridgeInterface;
+        try
+        {
+            var output = await commandRunner.Run("ifconfig", ["-l"], token, 10);
+            var interfaces = output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var preferred in new[] { "bridge100", "vmnet8", "bridge101" })
+            {
+                if (interfaces.Contains(preferred, StringComparer.Ordinal)) return preferred;
+            }
+        }
+        catch { }
+        return MacDeployment.DefaultMacBridgeInterface;
+    }
+
+    /// <summary>Builds fail-closed pf anchor rules scoping the VM bridge interface strictly to the host gateway and verified proxy endpoints.</summary>
     internal static string BuildAnchorRules(string guestInterface, string gatewayBindIp, int gatewayPort, string[] endpointIps, int endpointPort)
     {
         if (!Regex.IsMatch(guestInterface, "^[a-zA-Z0-9._-]{2,24}$"))
@@ -34,9 +51,19 @@ public sealed class MacGatewayFirewall(ICommandRunner? runner = null) : IHostFir
         sb.AppendLine($"# Claudome scoped macOS pf anchor ({DateTime.UtcNow:yyyy-MM-ddTHH:mm:ssZ})");
         sb.AppendLine($"pass in quick on {guestInterface} proto udp from any to {bindIp} port {gatewayPort}");
         sb.AppendLine($"pass in quick on {guestInterface} proto tcp from any to {bindIp} port {gatewayPort}");
+        sb.AppendLine($"pass in quick on {guestInterface} proto udp from any to any port 67");
+        sb.AppendLine($"pass in quick on {guestInterface} proto tcp from any to 1.1.1.1 port 443");
+        foreach (var endpoint in validatedEndpoints)
+        {
+            sb.AppendLine($"pass in quick on {guestInterface} proto tcp from any to {endpoint} port {endpointPort}");
+            sb.AppendLine($"pass in quick on {guestInterface} proto udp from any to {endpoint} port {endpointPort}");
+        }
         sb.AppendLine($"block drop quick on {guestInterface} all");
         foreach (var endpoint in validatedEndpoints)
-            sb.AppendLine($"pass out quick proto tcp from any to {endpoint} port {endpointPort} user root");
+        {
+            sb.AppendLine($"pass out quick proto tcp from any to {endpoint} port {endpointPort}");
+            sb.AppendLine($"pass out quick proto udp from any to {endpoint} port {endpointPort}");
+        }
         return sb.ToString();
     }
 
@@ -62,27 +89,30 @@ public sealed class MacGatewayFirewall(ICommandRunner? runner = null) : IHostFir
         await File.WriteAllTextAsync(tempFile, rules, new UTF8Encoding(false), token);
         try
         {
-            await commandRunner.Run("osascript", ["-e", $"do shell script \"pfctl -a {anchor} -f '{tempFile}' && pfctl -e || true\" with administrator privileges"], token, 60);
+            await commandRunner.Run("osascript", ["-e", $"do shell script \"pfctl -a '{anchor}' -f '{tempFile}' && (pfctl -e || true)\" with administrator privileges"], token, 60);
         }
         finally
         {
             if (File.Exists(tempFile)) File.Delete(tempFile);
         }
-        await VerifyAsync(workspaceId, endpointIps, endpointPort, gatewayPort, token);
+        await VerifyReadbackAsync(workspaceId, guestInterface, endpointIps, endpointPort, gatewayPort, token);
     }
 
-    public async Task VerifyAsync(string workspaceId, string[] endpointIps, int endpointPort, int gatewayPort, CancellationToken token)
+    public Task VerifyAsync(string workspaceId, string[] endpointIps, int endpointPort, int gatewayPort, CancellationToken token) =>
+        VerifyReadbackAsync(workspaceId, MacDeployment.DefaultMacBridgeInterface, endpointIps, endpointPort, gatewayPort, token);
+
+    public async Task VerifyReadbackAsync(string workspaceId, string guestInterface, string[] endpointIps, int endpointPort, int gatewayPort, CancellationToken token)
     {
         if (!OperatingSystem.IsMacOS()) return;
         var anchor = AnchorName(workspaceId);
         var output = await commandRunner.Run("pfctl", ["-a", anchor, "-sr"], token, 15);
-        VerifyAnchorReadback(output, "bridge100", "127.0.0.1", gatewayPort, endpointIps, endpointPort);
+        VerifyAnchorReadback(output, guestInterface, "127.0.0.1", gatewayPort, endpointIps, endpointPort);
     }
 
     public async Task ClearAsync(string workspaceId, CancellationToken token)
     {
         if (!OperatingSystem.IsMacOS()) return;
         var anchor = AnchorName(workspaceId);
-        await commandRunner.Run("pfctl", ["-a", anchor, "-F", "all"], token, 15);
+        await commandRunner.Run("osascript", ["-e", $"do shell script \"pfctl -a '{anchor}' -F all\" with administrator privileges"], token, 30);
     }
 }

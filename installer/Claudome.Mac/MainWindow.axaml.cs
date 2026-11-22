@@ -24,6 +24,9 @@ public sealed partial class MainWindow : Window
     private MacHostFacts? hostFacts;
     private List<PlatformChoice> platformChoices = [];
     private List<ProxyNode> parsedNodes = [];
+    private List<ProxyNode> parsedUpstreamNodes = [];
+    private readonly List<RegionOption> regionOptions = [.. RegionCatalog.All];
+    private readonly List<string> timeZoneOptions = RegionCatalog.All.Select(r => r.DefaultWindowsTimeZone).Append("UTC").Distinct().ToList();
     private int currentSection;
     private bool deploying;
     private CancellationTokenSource? deployCts;
@@ -31,15 +34,23 @@ public sealed partial class MainWindow : Window
     // Shared UI inputs
     private readonly TextBox rootBox = new() { Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "ClaudomeWorkspace") };
     private readonly TextBox vmNameBox = new() { Text = "Claude-Workspace" };
-    private readonly TextBox cpuBox = new() { Text = "4" };
+    private readonly TextBox cpuBox = new() { Text = Math.Clamp(Environment.ProcessorCount, 2, 4).ToString() };
     private readonly TextBox memBox = new() { Text = "8192" };
     private readonly TextBox diskBox = new() { Text = "80" };
     private readonly TextBox isoBox = new() { IsReadOnly = true };
     private readonly ComboBox platformBox = new();
-    private readonly TextBox networkTextBox = new() { AcceptsReturn = true, Height = 100, Watermark = "粘贴 Clash proxies YAML 或节点链接（仅在本机读取）" };
+    private readonly TextBox networkTextBox = new() { AcceptsReturn = true, Height = 96, Watermark = "粘贴 Clash proxies YAML、订阅文本或节点链接（仅在本机读取）" };
     private readonly ComboBox nodeBox = new();
+    private readonly TextBox upstreamTextBox = new() { AcceptsReturn = true, Height = 64, Watermark = "可选：前置/中转节点文本（双跳链路时填写）" };
+    private readonly ComboBox upstreamNodeBox = new();
+    private readonly ComboBox countryBox = new();
+    private readonly ComboBox timeZoneBox = new();
+    private readonly TextBox expectedExitIpBox = new() { Watermark = "可选：固定住宅 IP（测速后可自动填入，防止漂移）" };
     private readonly TextBox userBox = new() { Text = "ClaudeUser" };
     private readonly TextBox passwordBox = new() { PasswordChar = '•', Watermark = "至少 10 位独立虚拟机密码" };
+    private readonly TextBox adsPowerApiKeyBox = new() { PasswordChar = '•', Watermark = "AdsPower Local API Key（勾选手动模式时可留空）" };
+    private readonly CheckBox manualAdsPowerCheck = new() { Content = "改为手动配置 AdsPower（仅配置网络与防火墙）", IsChecked = false };
+    private readonly CheckBox testOutageCheck = new() { Content = "部署后执行断线/防泄漏演练校验（建议开启）", IsChecked = true };
     private readonly CheckBox rememberBox = new() { Content = "使用 macOS Keychain + AES-256-GCM 记住资料", IsChecked = true };
     private readonly TextBox deployLogBox = new() { IsReadOnly = true, AcceptsReturn = true, Height = 120, Text = "尚未开始一键部署。" };
 
@@ -55,10 +66,37 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         BuildSidebar();
+        InitRegionSelectors();
         ApplyTheme(appearance);
+        CheckUpdateButton.Click += async (_, _) => await CheckForUpdatesAsync();
         ThemeToggleButton.Click += (_, _) => OpenAppearanceDialog();
         _ = RefreshHostAsync();
         Navigate(0);
+    }
+
+    private void InitRegionSelectors()
+    {
+        countryBox.ItemsSource = regionOptions.Select(r => r.Label).ToList();
+        var usIdx = regionOptions.FindIndex(r => r.Code == state.Options.Country);
+        countryBox.SelectedIndex = usIdx >= 0 ? usIdx : 0;
+
+        timeZoneBox.ItemsSource = timeZoneOptions;
+        var tzIdx = timeZoneOptions.FindIndex(z => z == state.Options.TimeZoneId);
+        timeZoneBox.SelectedIndex = tzIdx >= 0 ? tzIdx : 0;
+
+        countryBox.SelectionChanged += (_, _) =>
+        {
+            var idx = countryBox.SelectedIndex;
+            if (idx < 0 || idx >= regionOptions.Count) return;
+            var matchedTz = timeZoneOptions.FindIndex(z => z == regionOptions[idx].DefaultWindowsTimeZone);
+            if (matchedTz >= 0) timeZoneBox.SelectedIndex = matchedTz;
+        };
+    }
+
+    private static T Detach<T>(T control) where T : Control
+    {
+        if (control.Parent is Panel prior) prior.Children.Remove(control);
+        return control;
     }
 
     private void BuildSidebar()
@@ -101,6 +139,9 @@ public sealed partial class MainWindow : Window
         SidebarBorder.BorderBrush = lineBrush;
         StatusBanner.Background = surfaceBrush;
         StatusBanner.BorderBrush = lineBrush;
+        CheckUpdateButton.Background = surfaceBrush;
+        CheckUpdateButton.Foreground = inkBrush;
+        CheckUpdateButton.BorderBrush = lineBrush;
         ThemeToggleButton.Background = surfaceBrush;
         ThemeToggleButton.Foreground = inkBrush;
         ThemeToggleButton.BorderBrush = lineBrush;
@@ -229,9 +270,17 @@ public sealed partial class MainWindow : Window
                 HeaderSubtitle.Text = "1. 主机检查  ·  2. 选择 Fusion / UTM 与目录  ·  3. 选择 Windows 11 镜像";
                 ContentHost.Children.Add(MakeCard("虚拟化方案（按芯片推荐）",
                     platformBox,
-                    NoteText(platformChoices.ElementAtOrDefault(Math.Max(0, platformBox.SelectedIndex))?.Reason ?? "")));
+                    NoteText(platformChoices.ElementAtOrDefault(Math.Max(0, platformBox.SelectedIndex))?.Reason ?? ""),
+                    NoteText("提示：VMware Fusion 已接入 vmrun 全自动来宾部署；UTM 当前支持建机与控制台启动，来宾自动配置待真机代理联调。")));
+                var rootRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+                Grid.SetColumn(Detach(rootBox), 0);
+                var pickRootBtn = MakeButton("选择目录", async () => await PickRootFolderAsync());
+                pickRootBtn.Margin = new Thickness(8, 0, 0, 0);
+                Grid.SetColumn(pickRootBtn, 1);
+                rootRow.Children.Add(rootBox);
+                rootRow.Children.Add(pickRootBtn);
                 ContentHost.Children.Add(MakeCard("任务目录与虚拟机资源",
-                    NoteText("任务根目录"), rootBox,
+                    NoteText("任务根目录"), rootRow,
                     NoteText("虚拟机名称"), vmNameBox,
                     new Grid
                     {
@@ -274,8 +323,8 @@ public sealed partial class MainWindow : Window
                 break;
 
             case 3:
-                HeaderSubtitle.Text = "导入订阅 / 节点文本，测速并识别 macOS 本机出站网卡（物理网卡 vs 虚拟 TUN）。";
-                ContentHost.Children.Add(MakeCard("节点导入与出站接口探测",
+                HeaderSubtitle.Text = "导入订阅 / 节点文本，测速并自动回填出口国家、时区与防漂移校验 IP。";
+                ContentHost.Children.Add(MakeCard("出口节点导入与真实出口探测",
                     networkTextBox,
                     new StackPanel
                     {
@@ -283,11 +332,29 @@ public sealed partial class MainWindow : Window
                         Spacing = 10,
                         Children =
                         {
-                            MakeButton("解析节点列表", ParseNodesFromInput, primary: true),
-                            MakeButton("测速并识别出口/本机接口", async () => await ProbeNodeAsync())
+                            MakeButton("解析出口节点", ParseNodesFromInput, primary: true),
+                            MakeButton("测速并自动识别出口地区", async () => await ProbeNodeAsync())
                         }
                     },
                     nodeBox));
+                ContentHost.Children.Add(MakeCard("可选：双跳前置中转与出口一致性锁定",
+                    NoteText("如需“本地 -> 前置机场 -> 固定住宅落地”，可粘贴前置节点并解析："),
+                    upstreamTextBox,
+                    new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        Spacing = 10,
+                        Children =
+                        {
+                            MakeButton("解析前置节点", ParseUpstreamFromInput),
+                            MakeButton("清空前置节点", () => { parsedUpstreamNodes.Clear(); upstreamNodeBox.ItemsSource = null; upstreamTextBox.Text = ""; BannerText.Text = "已清空前置节点，恢复单跳模式。"; })
+                        }
+                    },
+                    upstreamNodeBox,
+                    NoteText("最终出口国家或地区"), countryBox,
+                    NoteText("来宾系统匹配时区（Windows TimeZone ID）"), timeZoneBox,
+                    NoteText("固定住宅 IP 校验值（测速后自动填入，防 IP 漂移）"), expectedExitIpBox,
+                    testOutageCheck));
                 break;
 
             case 4:
@@ -304,7 +371,7 @@ public sealed partial class MainWindow : Window
                 HeaderSubtitle.Text = "外层 pfctl 锚点 + 来宾防火墙与出口一致性检查。";
                 ContentHost.Children.Add(MakeCard("双层防护状态",
                     NoteText($"pfctl 锚点前缀：{(string.IsNullOrEmpty(state.Options.WorkspaceId) ? "未初始化" : MacGatewayFirewall.AnchorName(state.Options.WorkspaceId))}\n" +
-                             $"外层网关状态：待在 macOS 主机运行后回读确认。"),
+                             $"外层网关状态：部署期间自动对桥接网卡施加 pfctl 锚点白名单规则，仅放行选定公网节点。"),
                     new StackPanel
                     {
                         Orientation = Orientation.Horizontal,
@@ -336,10 +403,14 @@ public sealed partial class MainWindow : Window
                     NoteText("来宾 Windows 用户名"), userBox,
                     NoteText("独立虚拟机密码（>= 10 位）"), passwordBox,
                     rememberBox));
+                ContentHost.Children.Add(MakeCard("AdsPower 自动化配置选项",
+                    manualAdsPowerCheck,
+                    NoteText("AdsPower Local API Key（自动创建/校验专用浏览器环境时填写；若仅手工打开可勾选上方手动模式）"),
+                    adsPowerApiKeyBox));
                 break;
 
             case 7:
-                HeaderSubtitle.Text = "Mac 端通过拉起并聚焦 Fusion / UTM 原生控制台完成安装与日常操作。";
+                HeaderSubtitle.Text = "Mac 端通过拉起并聚焦 Fusion / UTM 原生控制台完成安装、剪贴板控制与最终浏览器验收。";
                 ContentHost.Children.Add(MakeCard("连接与启动虚拟机控制台",
                     NoteText("1. 首次建机时自动生成安全引导配置（默认开启双向剪贴板，始终关闭共享文件夹和拖放）。\n" +
                              "2. 点击下方按钮唤起已选择的 VMware Fusion 或 UTM 窗口。"),
@@ -359,15 +430,48 @@ public sealed partial class MainWindow : Window
                         : "当前状态：已关闭双向剪贴板（需要时可随时重新开启）。", muted: false),
                     MakeButton(state.Options.SharedClipboardEnabled ? "关闭双向剪贴板" : "启用双向剪贴板",
                         async () => await ToggleSharedClipboardAsync())));
+                if (state.PendingActions.Count > 0)
+                {
+                    var pendingControls = state.PendingActions.Select(a =>
+                        NoteText($"• {a.Title}：{string.Join("；", a.Steps)}", muted: false)).ToArray<Control>();
+                    ContentHost.Children.Add(MakeCard("当前待处理与验收步骤", pendingControls));
+                }
+                var guideControls = CustomerGuide.Software(state.Options).Select(step =>
+                    NoteText($"【{step.Title}】{step.Instructions}")).ToArray<Control>();
+                ContentHost.Children.Add(MakeCard("AdsPower 与 https://ip.net.coffee/claude/ 验收清单", guideControls));
                 break;
         }
     }
 
     private static StackPanel WrapField(string label, Control input, int col)
     {
-        var panel = new StackPanel { Spacing = 4, Margin = new Thickness(col > 0 ? 10 : 0, 0, 0, 0), Children = { new TextBlock { Text = label, FontSize = 12 }, input } };
+        var panel = new StackPanel { Spacing = 4, Margin = new Thickness(col > 0 ? 10 : 0, 0, 0, 0), Children = { new TextBlock { Text = label, FontSize = 12 }, Detach(input) } };
         Grid.SetColumn(panel, col);
         return panel;
+    }
+
+    private async Task PickRootFolderAsync()
+    {
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "选择 Claudome 独立任务目录",
+            AllowMultiple = false
+        });
+        if (folders.Count > 0) rootBox.Text = folders[0].Path.LocalPath;
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        try
+        {
+            var current = SelfUpdater.CurrentVersion(typeof(Program).Assembly);
+            BannerText.Text = $"当前版本 v{current.ToString(3)}，正在检查 GitHub Releases 更新…";
+            var res = await SelfUpdater.CheckForUpdateAsync(current);
+            BannerText.Text = res.HasUpdate && res.Manifest is not null
+                ? $"发现新版本 v{res.Manifest.Version}（{res.Manifest.Tag}）：请前往 https://github.com/binlin0120/Claudome/releases 获取最新安装包。"
+                : res.StatusMessage;
+        }
+        catch (Exception ex) { BannerText.Text = $"检查更新失败：{Redaction.SafeError(ex)}"; }
     }
 
     private async Task PickIsoAsync()
@@ -405,6 +509,19 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { BannerText.Text = Redaction.SafeError(ex); }
     }
 
+    private void ParseUpstreamFromInput()
+    {
+        try
+        {
+            var list = NetworkImport.Parse(upstreamTextBox.Text ?? "");
+            parsedUpstreamNodes = list.Nodes;
+            upstreamNodeBox.ItemsSource = parsedUpstreamNodes.Select(n => n.ToString()).ToList();
+            if (parsedUpstreamNodes.Count > 0) upstreamNodeBox.SelectedIndex = 0;
+            BannerText.Text = $"已导入 {parsedUpstreamNodes.Count} 个前置节点（跳过 {list.Unsupported} 项）。";
+        }
+        catch (Exception ex) { BannerText.Text = Redaction.SafeError(ex); }
+    }
+
     private async Task ProbeNodeAsync()
     {
         if (nodeBox.SelectedIndex < 0 || nodeBox.SelectedIndex >= parsedNodes.Count)
@@ -415,10 +532,36 @@ public sealed partial class MainWindow : Window
         try
         {
             var selected = parsedNodes[nodeBox.SelectedIndex];
-            var result = await NodeExitProbe.ProbeAsync(new SetupOptions { Root = rootBox.Text ?? "" }, selected, selected.Upstream, CancellationToken.None);
-            BannerText.Text = $"出口 {result.ExitIp} ({result.CountryCode}) · {result.LatencyMs} ms · {result.OutboundInterfaceSummary}";
+            var upstream = selected.Upstream ?? (upstreamNodeBox.SelectedIndex >= 0 && upstreamNodeBox.SelectedIndex < parsedUpstreamNodes.Count ? parsedUpstreamNodes[upstreamNodeBox.SelectedIndex] : null);
+            if (OperatingSystem.IsWindows())
+            {
+                var result = await NodeExitProbe.ProbeAsync(new SetupOptions { Root = rootBox.Text ?? "" }, selected, upstream, CancellationToken.None);
+                ApplyProbeSelection(result.CountryCode, result.ExitIp, result.WindowsTimeZoneId ?? "");
+                BannerText.Text = $"出口 {result.ExitIp} ({result.CountryCode}) · {result.LatencyMs} ms · {result.OutboundInterfaceSummary}";
+                return;
+            }
+            var firstHop = upstream ?? selected;
+            var resolved = await NodeEndpointResolver.Resolve(firstHop.Server, CancellationToken.None);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            using var tcp = new System.Net.Sockets.TcpClient();
+            await tcp.ConnectAsync(System.Net.IPAddress.Parse(resolved[0]), firstHop.Port);
+            sw.Stop();
+            BannerText.Text = $"Mac TCP 连通 {firstHop.Server} ({resolved[0]}:{firstHop.Port}) · {sw.ElapsedMilliseconds} ms；请确认下方出口国家与时区（部署时将在来宾 Clash 内核复核最终出口）。";
         }
         catch (Exception ex) { BannerText.Text = Redaction.SafeError(ex); }
+    }
+
+    private void ApplyProbeSelection(string countryCode, string exitIp, string windowsTimeZoneId)
+    {
+        var rIdx = regionOptions.FindIndex(r => r.Code.Equals(countryCode, StringComparison.OrdinalIgnoreCase));
+        if (rIdx >= 0) countryBox.SelectedIndex = rIdx;
+        if (!string.IsNullOrWhiteSpace(windowsTimeZoneId))
+        {
+            if (!timeZoneOptions.Contains(windowsTimeZoneId)) timeZoneOptions.Add(windowsTimeZoneId);
+            timeZoneBox.ItemsSource = timeZoneOptions.ToList();
+            timeZoneBox.SelectedIndex = timeZoneOptions.IndexOf(windowsTimeZoneId);
+        }
+        if (!string.IsNullOrWhiteSpace(exitIp)) expectedExitIpBox.Text = exitIp;
     }
 
     private async Task ToggleSharedClipboardAsync()
@@ -477,7 +620,17 @@ public sealed partial class MainWindow : Window
             diskBox.Text = loaded.Options.DiskGb.ToString();
             isoBox.Text = loaded.Options.IsoPath;
             userBox.Text = loaded.Options.UserName;
+            manualAdsPowerCheck.IsChecked = loaded.Options.ManualAdsPower;
+            testOutageCheck.IsChecked = loaded.Options.TestOutage;
             rememberBox.IsChecked = loaded.Options.Remember;
+            var rIdx = regionOptions.FindIndex(r => r.Code.Equals(loaded.Options.Country, StringComparison.OrdinalIgnoreCase));
+            if (rIdx >= 0) countryBox.SelectedIndex = rIdx;
+            if (!timeZoneOptions.Contains(loaded.Options.TimeZoneId))
+            {
+                timeZoneOptions.Add(loaded.Options.TimeZoneId);
+                timeZoneBox.ItemsSource = timeZoneOptions.ToList();
+            }
+            timeZoneBox.SelectedIndex = timeZoneOptions.IndexOf(loaded.Options.TimeZoneId);
             var matchIdx = platformChoices.FindIndex(c => c.Id == loaded.Options.PlatformId);
             if (matchIdx >= 0) platformBox.SelectedIndex = matchIdx;
             if (loaded.Options.Remember)
@@ -487,6 +640,11 @@ public sealed partial class MainWindow : Window
                 {
                     passwordBox.Text = savedSecrets.VmPassword;
                     networkTextBox.Text = savedSecrets.NetworkText;
+                    upstreamTextBox.Text = savedSecrets.UpstreamNetworkText;
+                    expectedExitIpBox.Text = savedSecrets.ExpectedExitIp;
+                    adsPowerApiKeyBox.Text = savedSecrets.AdsPowerApiKey;
+                    if (!string.IsNullOrWhiteSpace(savedSecrets.NetworkText)) ParseNodesFromInput();
+                    if (!string.IsNullOrWhiteSpace(savedSecrets.UpstreamNetworkText)) ParseUpstreamFromInput();
                 }
             }
             BannerText.Text = $"已载入任务：{loaded.Options.VmName}（{loaded.Status}）";
@@ -517,26 +675,38 @@ public sealed partial class MainWindow : Window
         deployCts = new CancellationTokenSource();
         try
         {
-            state.Options.Root = rootBox.Text ?? state.Options.Root;
-            state.Options.VmName = vmNameBox.Text ?? state.Options.VmName;
+            state.Options.Root = (rootBox.Text ?? state.Options.Root).Trim();
+            state.Options.VmName = (vmNameBox.Text ?? state.Options.VmName).Trim();
             if (int.TryParse(cpuBox.Text, out var parsedCpu)) state.Options.CpuCount = parsedCpu;
             if (int.TryParse(memBox.Text, out var parsedMem)) state.Options.MemoryMb = parsedMem;
             if (int.TryParse(diskBox.Text, out var parsedDisk)) state.Options.DiskGb = parsedDisk;
-            state.Options.IsoPath = isoBox.Text ?? "";
-            state.Options.UserName = userBox.Text ?? "ClaudeUser";
+            state.Options.IsoPath = (isoBox.Text ?? "").Trim();
+            state.Options.UserName = (userBox.Text ?? "ClaudeUser").Trim();
+            state.Options.ManualAdsPower = manualAdsPowerCheck.IsChecked == true;
+            state.Options.TestOutage = testOutageCheck.IsChecked == true;
             state.Options.Remember = rememberBox.IsChecked == true;
             state.Options.AcceptChanges = true;
             state.Options.AcceptWindowsLicense = true;
+            state.Options.Country = regionOptions.ElementAtOrDefault(Math.Max(0, countryBox.SelectedIndex))?.Code ?? "US";
+            state.Options.TimeZoneId = timeZoneOptions.ElementAtOrDefault(Math.Max(0, timeZoneBox.SelectedIndex)) ?? "Pacific Standard Time";
             var chosen = platformChoices.ElementAtOrDefault(Math.Max(0, platformBox.SelectedIndex))?.Id ?? "fusion";
             state.Options.PlatformId = chosen;
             state.Options.NetworkSource = nodeBox.SelectedIndex >= 0 && nodeBox.SelectedIndex < parsedNodes.Count ? "节点链接 / Clash 配置文本" : "稍后配置";
 
+            var selectedNode = nodeBox.SelectedIndex >= 0 && nodeBox.SelectedIndex < parsedNodes.Count ? parsedNodes[nodeBox.SelectedIndex] : null;
+            var selectedUpstream = selectedNode?.Upstream
+                ?? (upstreamNodeBox.SelectedIndex >= 0 && upstreamNodeBox.SelectedIndex < parsedUpstreamNodes.Count ? parsedUpstreamNodes[upstreamNodeBox.SelectedIndex] : null);
             var secrets = new Secrets
             {
                 VmPassword = passwordBox.Text ?? "",
                 NetworkText = networkTextBox.Text ?? "",
-                SelectedNodeJson = nodeBox.SelectedIndex >= 0 && nodeBox.SelectedIndex < parsedNodes.Count ? parsedNodes[nodeBox.SelectedIndex].Json : ""
+                UpstreamNetworkText = upstreamTextBox.Text ?? "",
+                SelectedNodeJson = selectedNode?.Json ?? "",
+                UpstreamNodeJson = selectedUpstream?.Json ?? "",
+                ExpectedExitIp = (expectedExitIpBox.Text ?? "").Trim(),
+                AdsPowerApiKey = adsPowerApiKeyBox.Text ?? ""
             };
+            Paths.EnsureWorkspace(state.Options.Root);
             if (state.Options.Remember && !string.IsNullOrEmpty(secrets.VmPassword))
                 secretStore.Save(state.Options.Private, secrets, state.CredentialsRevision);
 
@@ -548,6 +718,7 @@ public sealed partial class MainWindow : Window
             });
             var facts = hostFacts ?? await hostEnv.DetectAsync(deployCts.Token);
             await MacDeployment.DeployAsync(state, secrets, facts, progress, deployCts.Token);
+            Navigate(7);
         }
         catch (Exception ex)
         {
