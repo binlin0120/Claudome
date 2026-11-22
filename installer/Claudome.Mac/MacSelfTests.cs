@@ -131,6 +131,96 @@ public static class MacSelfTests
                 "unsupported Mac platform accepted");
         });
 
+        Check("mac-guest-assets-have-verified-sha256-for-arm64-and-x64", () =>
+        {
+            foreach (var isArm in new[] { true, false })
+            {
+                var resources = MacProvisioningMedia.GuestResources(isArm);
+                Assert(resources.Count == 4, $"expected 4 guest resources for arch arm={isArm}");
+                Assert(resources.Select(r => r.Id).SequenceEqual(["pwsh", "clash", "vcredist", "adspower"]), "unexpected Mac guest resource IDs");
+                Assert(resources.All(r => r.Url.StartsWith("https://", StringComparison.Ordinal) && r.Sha256.Length == 64 && r.Size > 0),
+                    "Mac guest asset missing verified SHA-256 or HTTPS URL");
+            }
+            Assert(Catalog.EmbeddedText("Configure.ps1").Contains("'fusion'", StringComparison.Ordinal) &&
+                   Catalog.EmbeddedText("Configure.ps1").Contains("'utm'", StringComparison.Ordinal),
+                "Embedded Configure.ps1 missing fusion/utm identity support");
+        });
+
+        Check("mac-seed-bootstrap-writes-claudebootstrap-identity-for-configure-ps1", () =>
+        {
+            var root = Path.Combine(outputDirectory, "mac-seed-fixture");
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+            var seedState = new SessionState
+            {
+                VmId = Guid.NewGuid().ToString(),
+                Options = new() { Root = root, PlatformId = "fusion" }
+            };
+            var seedPath = MacProvisioningMedia.EnsureSeedIsoAsync(
+                seedState,
+                new Secrets { VmPassword = "FictionalMacPass!1" },
+                isArm64: true,
+                new NoOpRunner(),
+                CancellationToken.None).GetAwaiter().GetResult();
+            Assert(seedPath.EndsWith("mac-seed.iso", StringComparison.OrdinalIgnoreCase), "unexpected seed ISO path");
+            var initCmd = File.ReadAllText(Path.Combine(seedState.Options.Private, "mac-seed", "ClaudeBootstrap", "Initialize.cmd"));
+            Assert(initCmd.Contains(@"C:\ProgramData\ClaudeBootstrap\identity.json", StringComparison.Ordinal),
+                "Initialize.cmd did not match Configure.ps1 identity path");
+        });
+
+        Check("mac-deployment-orchestrator-runs-end-to-end-with-mock-fusion-and-pfctl", () =>
+        {
+            var root = Path.Combine(outputDirectory, "mac-deploy-fixture");
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+            Directory.CreateDirectory(root);
+            var fakeIso = Path.Combine(root, "win11-arm64.iso");
+            using (var fs = File.Create(fakeIso)) fs.SetLength(1024L * 1024 * 1024 + 4096);
+
+            var deployState = new SessionState
+            {
+                Options = new()
+                {
+                    Root = root,
+                    PlatformId = "fusion",
+                    VmName = "MacDeployTest",
+                    CpuCount = 4,
+                    MemoryMb = 8192,
+                    DiskGb = 80,
+                    IsoPath = fakeIso,
+                    NetworkSource = "节点链接 / Clash 配置文本",
+                    Country = "US",
+                    TimeZoneId = "Pacific Standard Time",
+                    AcceptChanges = true,
+                    AcceptWindowsLicense = true
+                }
+            };
+            Directory.CreateDirectory(deployState.Options.Cache);
+            var fakeBackend = new MockMacBackend();
+            var fakeFirewall = new MockMacFirewall();
+            var fakeNodeJson = """{"name":"TestNode","type":"socks5","server":"1.1.1.1","port":443}""";
+            var resources = MacProvisioningMedia.GuestResources(true);
+            foreach (var r in resources) File.WriteAllText(Paths.Under(deployState.Options.Cache, r.FileName), "fixture");
+
+            var facts = MacHostEnvironment.ParseSysctlFacts(
+                "arm64", "1", "0", "Apple M3", "15.1", 16L * 1024 * 1024 * 1024,
+                "Pages free: 300000.\n", 8, "/Applications/VMware Fusion.app/Contents/Library/vmrun", null, false);
+            var logs = new List<string>();
+            var result = MacDeployment.DeployAsync(
+                deployState,
+                new Secrets { VmPassword = "FictionalMacPass!1", SelectedNodeJson = fakeNodeJson },
+                facts,
+                new Progress<string>(logs.Add),
+                CancellationToken.None,
+                fakeBackend,
+                fakeFirewall,
+                resources,
+                skipEndpointDnsResolveForTest: true).GetAwaiter().GetResult();
+
+            Assert(fakeFirewall.ApplyCalls == 1 && fakeBackend.ConfigureCalls == 1 && fakeBackend.InstallCalls == 1 && fakeBackend.GuestRunCalls == 1,
+                "Mac deployment orchestrator skipped required lifecycle stages");
+            Assert(result.NetworkPassed && result.SetupFinished && result.Completed.Contains("vm-created") && result.Completed.Contains("guest-ready"),
+                "Mac deployment did not persist completed state");
+        });
+
         JsonFile.Write(Path.Combine(outputDirectory, "mac-tests.json"), new
         {
             dateUtc = DateTime.UtcNow,
@@ -141,5 +231,68 @@ public static class MacSelfTests
         });
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));
         return failed == 0 ? 0 : 1;
+    }
+
+    private sealed class NoOpRunner : ICommandRunner
+    {
+        public Task<string> Run(string fileName, IEnumerable<string> arguments, CancellationToken token, int seconds = 60) =>
+            Task.FromResult("");
+    }
+
+    private sealed class MockMacFirewall : IHostFirewall
+    {
+        public int ApplyCalls { get; private set; }
+        public Task ApplyAsync(string workspaceId, string guestInterface, string[] endpointIps, int endpointPort, int gatewayPort, CancellationToken token)
+        {
+            ApplyCalls++;
+            return Task.CompletedTask;
+        }
+        public Task VerifyAsync(string workspaceId, string[] endpointIps, int endpointPort, int gatewayPort, CancellationToken token) => Task.CompletedTask;
+        public Task ClearAsync(string workspaceId, CancellationToken token) => Task.CompletedTask;
+    }
+
+    private sealed class MockMacBackend : IVmBackend
+    {
+        private string? lastPayloadRunId;
+        public int ConfigureCalls { get; private set; }
+        public int InstallCalls { get; private set; }
+        public int GuestRunCalls { get; private set; }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public Task Prepare(SetupOptions options, CancellationToken token) => Task.CompletedTask;
+        public Task<string> EnsureMachine(SessionState state, CancellationToken token)
+        {
+            state.VmId = string.IsNullOrEmpty(state.VmId) ? Guid.NewGuid().ToString() : state.VmId;
+            return Task.FromResult(state.VmId);
+        }
+        public Task Configure(SessionState state, CancellationToken token) { ConfigureCalls++; return Task.CompletedTask; }
+        public Task InstallWindows(SessionState state, Secrets secrets, CancellationToken token) { InstallCalls++; return Task.CompletedTask; }
+        public Task<bool> IsRunning(SessionState state, CancellationToken token) => Task.FromResult(true);
+        public Task<bool> GuestReady(SessionState state, Secrets secrets, CancellationToken token) => Task.FromResult(true);
+        public Task CleanupWindowsMedia(SessionState state, CancellationToken token) => Task.CompletedTask;
+        public Task<string> GuestRun(SessionState state, Secrets secrets, string executable, IEnumerable<string> args, CancellationToken token, int seconds = 300)
+        {
+            GuestRunCalls++;
+            return Task.FromResult("completed");
+        }
+        public Task<bool> GuestFileExists(SessionState state, Secrets secrets, string file, CancellationToken token) => Task.FromResult(true);
+        public Task CopyTo(SessionState state, Secrets secrets, string local, string destination, CancellationToken token)
+        {
+            var fileName = Path.GetFileName(destination);
+            if (fileName.StartsWith("payload-", StringComparison.Ordinal) && fileName.EndsWith(".json", StringComparison.Ordinal))
+                lastPayloadRunId = fileName["payload-".Length..^".json".Length];
+            return Task.CompletedTask;
+        }
+        public Task CopyFrom(SessionState state, Secrets secrets, string guest, string destination, CancellationToken token)
+        {
+            JsonFile.Write(destination, new
+            {
+                runId = lastPayloadRunId ?? "",
+                networkPassed = true,
+                outagePassed = true,
+                code = "NEEDS_BROWSER_ACCEPTANCE"
+            });
+            return Task.CompletedTask;
+        }
+        public Task Open(SessionState state, CancellationToken token) => Task.CompletedTask;
     }
 }

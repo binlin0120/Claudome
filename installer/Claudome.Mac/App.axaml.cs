@@ -18,8 +18,9 @@ public sealed partial class App : Application
             {
                 window.Opened += async (_, _) =>
                 {
-                    var ok = await window.RunPreviewChecksAsync(Program.PreviewOutputDirectory);
-                    Avalonia.Threading.Dispatcher.UIThread.Post(() => desktop.Shutdown(ok ? 0 : 1));
+                    var ok = false;
+                    try { ok = await window.RunPreviewChecksAsync(Program.PreviewOutputDirectory); }
+                    finally { Avalonia.Threading.Dispatcher.UIThread.Post(() => desktop.Shutdown(ok ? 0 : 1)); }
                 };
             }
         }

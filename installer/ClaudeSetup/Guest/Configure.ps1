@@ -65,9 +65,12 @@ try {
     if($payload.platformId -eq 'hyperv') {
         $identity=Get-Content -LiteralPath 'C:\ProgramData\ClaudeBootstrap\identity.json' -Raw | ConvertFrom-Json
         if($model.Manufacturer -ne 'Microsoft Corporation' -or $model.Model -ne 'Virtual Machine' -or $identity.vmId -ne $payload.vmId -or $identity.workspaceId -ne $payload.workspaceId){throw 'TARGET_VM_IDENTITY_MISMATCH'}
-    }elseif($payload.platformId -eq 'workstation') {
+    }elseif($payload.platformId -in @('workstation','fusion')) {
         $identity=Get-Content -LiteralPath 'C:\ProgramData\ClaudeBootstrap\identity.json' -Raw | ConvertFrom-Json
         if($model.Manufacturer -notmatch 'VMware' -or $model.Model -notmatch 'VMware' -or $identity.vmId -ne $payload.vmId -or $identity.workspaceId -ne $payload.workspaceId){throw 'TARGET_VM_IDENTITY_MISMATCH'}
+    }elseif($payload.platformId -eq 'utm') {
+        $identity=Get-Content -LiteralPath 'C:\ProgramData\ClaudeBootstrap\identity.json' -Raw | ConvertFrom-Json
+        if($model.Manufacturer -notmatch 'QEMU|UTM|Bochs' -or $identity.vmId -ne $payload.vmId -or $identity.workspaceId -ne $payload.workspaceId){throw 'TARGET_VM_IDENTITY_MISMATCH'}
     }elseif($payload.platformId -eq 'virtualbox') {
         if($model.Model -notmatch 'VirtualBox' -or ([guid]$product.UUID) -ne ([guid]$payload.vmId)){throw 'TARGET_VM_IDENTITY_MISMATCH'}
     }else{throw 'TARGET_VM_IDENTITY_MISMATCH'}

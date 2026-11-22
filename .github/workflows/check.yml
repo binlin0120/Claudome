@@ -48,3 +48,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'V11 session tests failed' }
           $v11 = Get-Content -LiteralPath (Join-Path $stage 'V11-session-test-results.json') -Raw | ConvertFrom-Json
           if ($null -eq $v11.failed -or $v11.failed -ne 0) { throw 'V11 session test cases failed' }
+
+  macos-preview:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '^1.26.0'
+      - name: Build darwin Go gateways and verify Claudome.Mac
+        run: |
+          set -euo pipefail
+          mkdir -p installer/artifacts
+          (cd installer/network-gateway && GOOS=darwin GOARCH=arm64 go build -o ../artifacts/ClaudeNetworkGateway-darwin-arm64 .)
+          (cd installer/network-gateway && GOOS=darwin GOARCH=amd64 go build -o ../artifacts/ClaudeNetworkGateway-darwin-amd64 .)
+          dotnet build installer/Claudome.Mac/Claudome.Mac.csproj -c Release
+          dotnet exec installer/Claudome.Mac/bin/Release/net10.0/Claudome.Mac.dll --self-test installer/artifacts/mac-tests

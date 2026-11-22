@@ -14,6 +14,8 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.2.5" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.5" />
     <AvaloniaResource Include="..\ClaudeSetup\Brand\Claudome.png" Link="Assets\Claudome.png" />
+    <EmbeddedResource Include="..\ClaudeSetup\Resources\catalog.json" LogicalName="ClaudeSetup.Resources.catalog.json" />
+    <EmbeddedResource Include="..\ClaudeSetup\Guest\*.ps1" LogicalName="ClaudeSetup.Guest.%(Filename)%(Extension)" />
     <EmbeddedResource Include="..\artifacts\Gateway-THIRD-PARTY-NOTICES.txt" Condition="Exists('..\artifacts\Gateway-THIRD-PARTY-NOTICES.txt')" LogicalName="ClaudeSetup.Gateway-THIRD-PARTY-NOTICES.txt" />
   </ItemGroup>
 </Project>

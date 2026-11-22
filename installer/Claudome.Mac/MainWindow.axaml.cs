@@ -25,6 +25,8 @@ public sealed partial class MainWindow : Window
     private List<PlatformChoice> platformChoices = [];
     private List<ProxyNode> parsedNodes = [];
     private int currentSection;
+    private bool deploying;
+    private CancellationTokenSource? deployCts;
 
     // Shared UI inputs
     private readonly TextBox rootBox = new() { Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "ClaudomeWorkspace") };
@@ -39,6 +41,7 @@ public sealed partial class MainWindow : Window
     private readonly TextBox userBox = new() { Text = "ClaudeUser" };
     private readonly TextBox passwordBox = new() { PasswordChar = '•', Watermark = "至少 10 位独立虚拟机密码" };
     private readonly CheckBox rememberBox = new() { Content = "使用 macOS Keychain + AES-256-GCM 记住资料", IsChecked = true };
+    private readonly TextBox deployLogBox = new() { IsReadOnly = true, AcceptsReturn = true, Height = 120, Text = "尚未开始一键部署。" };
 
     private IBrush canvasBrush = Brushes.WhiteSmoke;
     private IBrush surfaceBrush = Brushes.White;
@@ -130,7 +133,11 @@ public sealed partial class MainWindow : Window
     {
         var panel = new StackPanel { Spacing = 10 };
         panel.Children.Add(new TextBlock { Text = heading, FontSize = 16, FontWeight = FontWeight.SemiBold, Foreground = inkBrush });
-        foreach (var child in children) panel.Children.Add(child);
+        foreach (var child in children)
+        {
+            if (child.Parent is Panel prior) prior.Children.Remove(child);
+            panel.Children.Add(child);
+        }
         return new Border
         {
             Background = surfaceBrush,
@@ -196,14 +203,26 @@ public sealed partial class MainWindow : Window
                         Children =
                         {
                             MakeButton("开始新环境向导", () => Navigate(1), primary: true),
+                            MakeButton("载入已有任务", async () => await LoadExistingTaskAsync()),
                             MakeButton("查看网络节点与测速", () => Navigate(3)),
                             MakeButton("打开虚拟机控制台", () => Navigate(7))
                         }
                     }));
-                ContentHost.Children.Add(MakeCard("Mac 双层隔离架构边界",
+                ContentHost.Children.Add(MakeCard("一键部署与 Mac 双层隔离边界",
                     NoteText("1. 外层防线：macOS 版 Go 网关（darwin/arm64 & darwin/amd64）配合 scoped pfctl 锚点规则，仅放行选定公网 IPv4 节点。\n" +
                              "2. 内层防线：来宾 Windows 11 内保持 Clash Verge（ARM64/x64）+ 出站全阻断防火墙 + AdsPower。\n" +
-                             "3. 交互说明：Mac 版不强行跨进程嵌入第三方窗口，改为右侧启动并置前 VMware Fusion / UTM 原生窗口。")));
+                             "3. 一键编排：填好向导配置后可直接在下方启动全自动建机、注入应答文件与来宾配置（需在真实 Mac 上配合 Fusion/UTM 验收）。"),
+                    new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        Spacing = 10,
+                        Children =
+                        {
+                            MakeButton(deploying ? "正在部署…" : "开始 / 继续一键部署", async () => await StartMacDeploymentAsync(), primary: true),
+                            MakeButton("暂停部署", () => { deployCts?.Cancel(); BannerText.Text = "已请求暂停 Mac 部署。"; })
+                        }
+                    },
+                    deployLogBox));
                 break;
 
             case 1:
@@ -241,8 +260,17 @@ public sealed partial class MainWindow : Window
             case 2:
                 HeaderSubtitle.Text = "管理 Mac 上的 VMware Fusion (.vmx) 与 UTM (.utm) 任务环境。";
                 ContentHost.Children.Add(MakeCard("已加载任务",
-                    NoteText($"当前任务目录：{rootBox.Text}\n虚拟机 ID：{(string.IsNullOrEmpty(state.VmId) ? "尚未创建" : state.VmId)}"),
-                    MakeButton("检测本地 Fusion / UTM 状态", async () => { await RefreshHostAsync(); BannerText.Text = hostFacts?.Summary ?? "已刷新"; })));
+                    NoteText($"当前任务目录：{rootBox.Text}\n虚拟机 ID：{(string.IsNullOrEmpty(state.VmId) ? "尚未创建" : state.VmId)}\n状态：{state.Status}"),
+                    new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        Spacing = 10,
+                        Children =
+                        {
+                            MakeButton("载入 setup-state.json", async () => await LoadExistingTaskAsync(), primary: true),
+                            MakeButton("检测本地 Fusion / UTM 状态", async () => { await RefreshHostAsync(); BannerText.Text = hostFacts?.Summary ?? "已刷新"; })
+                        }
+                    }));
                 break;
 
             case 3:
@@ -263,10 +291,13 @@ public sealed partial class MainWindow : Window
                 break;
 
             case 4:
-                HeaderSubtitle.Text = "展示 ARM64 / x64 来宾所需组件与官方来源核验状态。";
-                var rows = MacProvisioningMedia.GuestAssets.Select(a =>
-                    NoteText($"• {a.Name} [{a.Architecture}] — {(a.ChecksumVerifiedOnMac ? "已核验" : "待 Mac 真机核定 SHA-256")} · {a.Notes}")).ToArray();
-                ContentHost.Children.Add(MakeCard("Mac / Win11 ARM64 来宾组件清单", rows));
+                HeaderSubtitle.Text = "展示 ARM64 / x64 来宾所需组件与官方 SHA-256 核验及下载。";
+                var isArm = hostFacts?.IsAppleSilicon ?? true;
+                var targetAssets = MacProvisioningMedia.GuestAssets.Where(a => a.Architecture == (isArm ? "arm64" : "x64") || a.ResourceId is "vcredist" or "adspower");
+                var rows = targetAssets.Select(a =>
+                    NoteText($"• {a.Name} [{a.Architecture}] — {(a.ChecksumVerifiedOnMac ? "已核验 SHA-256" : "待核验")} · {a.Notes}")).ToList<Control>();
+                rows.Add(MakeButton("下载并核验当前芯片全部组件", async () => await DownloadAssetsAsync(), primary: true));
+                ContentHost.Children.Add(MakeCard("Mac / Win11 来宾组件清单", rows.ToArray()));
                 break;
 
             case 5:
@@ -274,12 +305,29 @@ public sealed partial class MainWindow : Window
                 ContentHost.Children.Add(MakeCard("双层防护状态",
                     NoteText($"pfctl 锚点前缀：{(string.IsNullOrEmpty(state.Options.WorkspaceId) ? "未初始化" : MacGatewayFirewall.AnchorName(state.Options.WorkspaceId))}\n" +
                              $"外层网关状态：待在 macOS 主机运行后回读确认。"),
-                    MakeButton("运行 Mac 离线自检（Contract）", () =>
+                    new StackPanel
                     {
-                        var outDir = Path.Combine(Path.GetTempPath(), "Claudome-Mac-self-test");
-                        var exit = MacSelfTests.Run(outDir);
-                        BannerText.Text = exit == 0 ? $"Mac 离线契约自检全部通过（报告位于 {outDir}）" : "Mac 离线自检存在失败项";
-                    }, primary: true)));
+                        Orientation = Orientation.Horizontal,
+                        Spacing = 10,
+                        Children =
+                        {
+                            MakeButton("运行 Mac 离线自检（Contract）", () =>
+                            {
+                                var outDir = Path.Combine(Path.GetTempPath(), "Claudome-Mac-self-test");
+                                var exit = MacSelfTests.Run(outDir);
+                                BannerText.Text = exit == 0 ? $"Mac 离线契约自检全部通过（报告位于 {outDir}）" : "Mac 离线自检存在失败项";
+                            }, primary: true),
+                            MakeButton("撤回 pfctl 防火墙锚点", async () =>
+                            {
+                                try
+                                {
+                                    await hostFirewall.ClearAsync(state.Options.WorkspaceId, CancellationToken.None);
+                                    BannerText.Text = "已请求清理本任务 pfctl 锚点规则。";
+                                }
+                                catch (Exception ex) { BannerText.Text = Redaction.SafeError(ex); }
+                            })
+                        }
+                    }));
                 break;
 
             case 6:
@@ -409,6 +457,111 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { BannerText.Text = Redaction.SafeError(ex); }
     }
 
+    private async Task LoadExistingTaskAsync()
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "选择 setup-state.json",
+            AllowMultiple = false,
+            FileTypeFilter = [new FilePickerFileType("Claudome 任务状态") { Patterns = ["setup-state.json", "*.json"] }]
+        });
+        if (files.Count == 0) return;
+        try
+        {
+            var loaded = JsonFile.Read<SessionState>(files[0].Path.LocalPath);
+            state = loaded;
+            rootBox.Text = loaded.Options.Root;
+            vmNameBox.Text = loaded.Options.VmName;
+            cpuBox.Text = loaded.Options.CpuCount.ToString();
+            memBox.Text = loaded.Options.MemoryMb.ToString();
+            diskBox.Text = loaded.Options.DiskGb.ToString();
+            isoBox.Text = loaded.Options.IsoPath;
+            userBox.Text = loaded.Options.UserName;
+            rememberBox.IsChecked = loaded.Options.Remember;
+            var matchIdx = platformChoices.FindIndex(c => c.Id == loaded.Options.PlatformId);
+            if (matchIdx >= 0) platformBox.SelectedIndex = matchIdx;
+            if (loaded.Options.Remember)
+            {
+                var savedSecrets = secretStore.Load(loaded.Options.Private, loaded.CredentialsRevision);
+                if (savedSecrets is not null)
+                {
+                    passwordBox.Text = savedSecrets.VmPassword;
+                    networkTextBox.Text = savedSecrets.NetworkText;
+                }
+            }
+            BannerText.Text = $"已载入任务：{loaded.Options.VmName}（{loaded.Status}）";
+            Navigate(currentSection);
+        }
+        catch (Exception ex) { BannerText.Text = Redaction.SafeError(ex); }
+    }
+
+    private async Task DownloadAssetsAsync()
+    {
+        try
+        {
+            var opts = new SetupOptions { Root = rootBox.Text ?? "" };
+            var progress = new Progress<string>(msg =>
+            {
+                BannerText.Text = msg;
+                deployLogBox.Text += Environment.NewLine + msg;
+            });
+            await MacDeployment.DownloadGuestAssetsAsync(opts, hostFacts?.IsAppleSilicon ?? true, progress, null, CancellationToken.None);
+        }
+        catch (Exception ex) { BannerText.Text = Redaction.SafeError(ex); }
+    }
+
+    private async Task StartMacDeploymentAsync()
+    {
+        if (deploying) return;
+        deploying = true;
+        deployCts = new CancellationTokenSource();
+        try
+        {
+            state.Options.Root = rootBox.Text ?? state.Options.Root;
+            state.Options.VmName = vmNameBox.Text ?? state.Options.VmName;
+            if (int.TryParse(cpuBox.Text, out var parsedCpu)) state.Options.CpuCount = parsedCpu;
+            if (int.TryParse(memBox.Text, out var parsedMem)) state.Options.MemoryMb = parsedMem;
+            if (int.TryParse(diskBox.Text, out var parsedDisk)) state.Options.DiskGb = parsedDisk;
+            state.Options.IsoPath = isoBox.Text ?? "";
+            state.Options.UserName = userBox.Text ?? "ClaudeUser";
+            state.Options.Remember = rememberBox.IsChecked == true;
+            state.Options.AcceptChanges = true;
+            state.Options.AcceptWindowsLicense = true;
+            var chosen = platformChoices.ElementAtOrDefault(Math.Max(0, platformBox.SelectedIndex))?.Id ?? "fusion";
+            state.Options.PlatformId = chosen;
+            state.Options.NetworkSource = nodeBox.SelectedIndex >= 0 && nodeBox.SelectedIndex < parsedNodes.Count ? "节点链接 / Clash 配置文本" : "稍后配置";
+
+            var secrets = new Secrets
+            {
+                VmPassword = passwordBox.Text ?? "",
+                NetworkText = networkTextBox.Text ?? "",
+                SelectedNodeJson = nodeBox.SelectedIndex >= 0 && nodeBox.SelectedIndex < parsedNodes.Count ? parsedNodes[nodeBox.SelectedIndex].Json : ""
+            };
+            if (state.Options.Remember && !string.IsNullOrEmpty(secrets.VmPassword))
+                secretStore.Save(state.Options.Private, secrets, state.CredentialsRevision);
+
+            deployLogBox.Text = "开始执行 Mac 一键部署流程…";
+            var progress = new Progress<string>(msg =>
+            {
+                BannerText.Text = msg;
+                deployLogBox.Text += Environment.NewLine + msg;
+            });
+            var facts = hostFacts ?? await hostEnv.DetectAsync(deployCts.Token);
+            await MacDeployment.DeployAsync(state, secrets, facts, progress, deployCts.Token);
+        }
+        catch (Exception ex)
+        {
+            BannerText.Text = Redaction.SafeError(ex);
+            deployLogBox.Text += Environment.NewLine + "中断：" + BannerText.Text;
+        }
+        finally
+        {
+            deploying = false;
+            deployCts?.Dispose();
+            deployCts = null;
+        }
+    }
+
     private void OpenAppearanceDialog()
     {
         var accentInput = new TextBox { Text = appearance.Accent };
@@ -490,7 +643,7 @@ public sealed partial class MainWindow : Window
         if (!uiOk) failed++;
         rows.Add(new { name = "mac-avalonia-renders-all-8-sections-and-platform-choices", passed = uiOk, screenshot = shotPath });
 
-        var selfExit = MacSelfTests.Run(outputDirectory);
+        var selfExit = await Task.Run(() => MacSelfTests.Run(outputDirectory));
         if (selfExit != 0) failed++;
         rows.Add(new { name = "mac-backend-contract-suite", passed = selfExit == 0 });
 
