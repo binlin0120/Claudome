@@ -62,7 +62,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '^1.26.0'
-      - name: Build darwin Go gateways, verify Claudome.Mac, and package preview .app bundles
+      - name: Build darwin Go gateways and verify Claudome.Mac contracts
         run: |
           set -euo pipefail
           mkdir -p installer/artifacts
@@ -70,7 +70,14 @@ jobs:
           (cd installer/network-gateway && GOOS=darwin GOARCH=amd64 go build -o ../artifacts/ClaudeNetworkGateway-darwin-amd64 .)
           dotnet build installer/Claudome.Mac/Claudome.Mac.csproj -c Release
           dotnet exec installer/Claudome.Mac/bin/Release/net10.0/Claudome.Mac.dll --self-test installer/artifacts/mac-tests
+      - name: Try Avalonia --preview screenshot (when GUI session is attached)
+        continue-on-error: true
+        run: |
+          mkdir -p installer/artifacts/mac-ui-preview
           dotnet exec installer/Claudome.Mac/bin/Release/net10.0/Claudome.Mac.dll --preview installer/artifacts/mac-ui-preview
+      - name: Package macOS .app preview bundles (arm64 & x64)
+        run: |
+          set -euo pipefail
           chmod +x installer/scripts/package_mac.sh
           bash installer/scripts/package_mac.sh 0.4.8 "arm64 x64"
       - name: Upload macOS preview bundles and test reports
@@ -81,6 +88,5 @@ jobs:
             installer/artifacts/mac-release/*.zip
             installer/artifacts/mac-release/SHA256SUMS-mac.txt
             installer/artifacts/mac-tests/mac-tests.json
-            installer/artifacts/mac-ui-preview/mac-ui-tests.json
-            installer/artifacts/mac-ui-preview/claudome-mac-overview.png
+            installer/artifacts/mac-ui-preview/*
           retention-days: 14
