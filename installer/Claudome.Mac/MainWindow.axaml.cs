@@ -11,7 +11,7 @@ public sealed partial class MainWindow : Window
 {
     private static readonly string[] SectionNames =
     [
-        "概览", "安装环境", "我的虚拟机", "网络节点", "下载管理", "检测与修复", "本机资料", "虚拟机桌面"
+        "概览", "安装环境", "我的虚拟机", "网络节点", "下载管理", "检测与修复", "本机资料", "虚拟机桌面", "存储与清理"
     ];
 
     private readonly MacHostEnvironment hostEnv = new();
@@ -27,8 +27,10 @@ public sealed partial class MainWindow : Window
     private List<ProxyNode> parsedUpstreamNodes = [];
     private readonly List<RegionOption> regionOptions = [.. RegionCatalog.All];
     private readonly List<string> timeZoneOptions = RegionCatalog.All.Select(r => r.DefaultWindowsTimeZone).Append("UTC").Distinct().ToList();
+    private readonly MacDeployment.MacIsoLicenseGuard isoLicenseGuard = new();
     private int currentSection;
     private bool deploying;
+    private bool syncingConsentUi;
     private CancellationTokenSource? deployCts;
 
     // Shared UI inputs
@@ -38,6 +40,10 @@ public sealed partial class MainWindow : Window
     private readonly TextBox memBox = new() { Text = "8192" };
     private readonly TextBox diskBox = new() { Text = "80" };
     private readonly TextBox isoBox = new() { IsReadOnly = true };
+    private readonly CheckBox acceptWindowsLicenseCheck = new() { Content = "我已确认持有当前所选 Windows 11 安装镜像的合法有效微软授权许可", IsChecked = false };
+    private readonly CheckBox acceptChangesCheck = new() { Content = "我同意程序在独立任务目录配置双层防泄漏隔离环境与虚拟机", IsChecked = false };
+    private readonly CheckBox confirmBrowserExitCheck = new() { Content = "我已在真实 AdsPower 窗口打开 https://ip.net.coffee/claude/ 核对地区、出口 IP、DNS、WebRTC 与时区一致", IsChecked = false };
+    private readonly CheckBox confirmClaudeConversationCheck = new() { Content = "（独立验收）我已在上述 AdsPower 窗口完成 https://claude.ai/ 登录并成功发送一条测试对话", IsChecked = false };
     private readonly ComboBox platformBox = new();
     private readonly TextBox networkTextBox = new() { AcceptsReturn = true, Height = 96, Watermark = "粘贴 Clash proxies YAML、订阅文本或节点链接（仅在本机读取）" };
     private readonly ComboBox nodeBox = new();
@@ -70,6 +76,24 @@ public sealed partial class MainWindow : Window
         ApplyTheme(appearance);
         CheckUpdateButton.Click += async (_, _) => await CheckForUpdatesAsync();
         ThemeToggleButton.Click += (_, _) => OpenAppearanceDialog();
+        acceptWindowsLicenseCheck.IsCheckedChanged += (_, _) =>
+        {
+            if (syncingConsentUi) return;
+            if (acceptWindowsLicenseCheck.IsChecked == true && !isoLicenseGuard.IsIsoVerifiedForCurrent)
+            {
+                syncingConsentUi = true;
+                acceptWindowsLicenseCheck.IsChecked = false;
+                syncingConsentUi = false;
+                BannerText.Text = "请先点击「校验 ISO 架构」核对当前镜像，再勾选微软授权许可。";
+                return;
+            }
+            isoLicenseGuard.SetLicenseAccepted(acceptWindowsLicenseCheck.IsChecked == true);
+        };
+        acceptChangesCheck.IsCheckedChanged += (_, _) =>
+        {
+            if (syncingConsentUi) return;
+            isoLicenseGuard.SetChangesAccepted(acceptChangesCheck.IsChecked == true);
+        };
         _ = RefreshHostAsync();
         Navigate(0);
     }
@@ -267,7 +291,7 @@ public sealed partial class MainWindow : Window
                 break;
 
             case 1:
-                HeaderSubtitle.Text = "1. 主机检查  ·  2. 选择 Fusion / UTM 与目录  ·  3. 选择 Windows 11 镜像";
+                HeaderSubtitle.Text = "1. 主机检查  ·  2. 选择 Fusion / UTM 与目录  ·  3. 选择 Windows 11 镜像并确认授权";
                 ContentHost.Children.Add(MakeCard("虚拟化方案（按芯片推荐）",
                     platformBox,
                     NoteText(platformChoices.ElementAtOrDefault(Math.Max(0, platformBox.SelectedIndex))?.Reason ?? ""),
@@ -292,8 +316,12 @@ public sealed partial class MainWindow : Window
                             WrapField("磁盘 (GB)", diskBox, 2)
                         }
                     }));
-                ContentHost.Children.Add(MakeCard("Windows 11 ISO 镜像（ARM64 / x64 架构校验）",
+                var isoStatusText = isoLicenseGuard.IsIsoVerifiedForCurrent
+                    ? $"架构校验状态：已通过（{isoLicenseGuard.VerifiedIsoArch}，匹配当前芯片）"
+                    : "架构校验状态：待校验（选择或更换 ISO 后需点下方「校验 ISO 架构」并重新勾选当前镜像授权许可）";
+                ContentHost.Children.Add(MakeCard("Windows 11 ISO 镜像与授权确认（必填）",
                     isoBox,
+                    NoteText(isoStatusText, muted: false),
                     new StackPanel
                     {
                         Orientation = Orientation.Horizontal,
@@ -303,13 +331,15 @@ public sealed partial class MainWindow : Window
                             MakeButton("选择本地 ISO", async () => await PickIsoAsync(), primary: true),
                             MakeButton("校验 ISO 架构", async () => await VerifyIsoAsync())
                         }
-                    }));
+                    },
+                    acceptWindowsLicenseCheck,
+                    acceptChangesCheck));
                 break;
 
             case 2:
                 HeaderSubtitle.Text = "管理 Mac 上的 VMware Fusion (.vmx) 与 UTM (.utm) 任务环境。";
                 ContentHost.Children.Add(MakeCard("已加载任务",
-                    NoteText($"当前任务目录：{rootBox.Text}\n虚拟机 ID：{(string.IsNullOrEmpty(state.VmId) ? "尚未创建" : state.VmId)}\n状态：{state.Status}"),
+                    NoteText($"当前任务目录：{rootBox.Text}\n虚拟机 ID：{(string.IsNullOrEmpty(state.VmId) ? "尚未创建" : state.VmId)}\n完成标记：SetupFinished={state.SetupFinished} · ApplicationAccepted={state.ApplicationAccepted}\n状态：{state.Status}"),
                     new StackPanel
                     {
                         Orientation = Orientation.Horizontal,
@@ -436,9 +466,27 @@ public sealed partial class MainWindow : Window
                         NoteText($"• {a.Title}：{string.Join("；", a.Steps)}", muted: false)).ToArray<Control>();
                     ContentHost.Children.Add(MakeCard("当前待处理与验收步骤", pendingControls));
                 }
+                if (state.NetworkPassed && !state.SetupFinished)
+                {
+                    ContentHost.Children.Add(MakeCard("确认完成浏览器最终验收",
+                        NoteText($"当前状态：{state.Status}（来宾网络已通过，尚未确认最终浏览器窗口验收，任务仍保持待验收）。", muted: false),
+                        confirmBrowserExitCheck,
+                        MakeButton("确认已完成 AdsPower 验收并完成设置", ConfirmBrowserAcceptanceFromUi, primary: true)));
+                }
+                else if (state.SetupFinished && state.ApplicationAccepted)
+                {
+                    ContentHost.Children.Add(MakeCard("浏览器验收与 Claude 独立对话登记",
+                        NoteText("已完成 AdsPower 窗口出口确认（browserAcceptance=user-confirmed）；Claude 登录与对话需在完成实测后单独勾选登记。", muted: false),
+                        confirmClaudeConversationCheck,
+                        MakeButton("登记 Claude 登录与对话已通过", ConfirmClaudeConversationFromUi, primary: true)));
+                }
                 var guideControls = CustomerGuide.Software(state.Options).Select(step =>
                     NoteText($"【{step.Title}】{step.Instructions}")).ToArray<Control>();
                 ContentHost.Children.Add(MakeCard("AdsPower 与 https://ip.net.coffee/claude/ 验收清单", guideControls));
+                break;
+
+            case 8:
+                RenderStorageCleanupSection();
                 break;
         }
     }
@@ -482,16 +530,65 @@ public sealed partial class MainWindow : Window
             AllowMultiple = false,
             FileTypeFilter = [new FilePickerFileType("Windows ISO") { Patterns = ["*.iso"] }]
         });
-        if (files.Count > 0) isoBox.Text = files[0].Path.LocalPath;
+        if (files.Count > 0)
+        {
+            var chosen = files[0].Path.LocalPath;
+            isoBox.Text = chosen;
+            isoLicenseGuard.SelectIso(chosen);
+            syncingConsentUi = true;
+            acceptWindowsLicenseCheck.IsChecked = isoLicenseGuard.IsLicenseConfirmedForCurrent;
+            syncingConsentUi = false;
+            BannerText.Text = "已更换或选择新 ISO 镜像，已重置许可勾选；请重新校验 ISO 架构并确认当前镜像授权。";
+            if (currentSection == 1) Navigate(1);
+        }
     }
 
     private async Task VerifyIsoAsync()
     {
         try
         {
+            var path = (isoBox.Text ?? "").Trim();
             var expectArm64 = hostFacts?.IsAppleSilicon ?? true;
-            var arch = await hostEnv.InspectIsoArchitectureAsync(isoBox.Text ?? "", expectArm64, CancellationToken.None);
-            BannerText.Text = $"ISO 架构校验通过：{arch}";
+            BannerText.Text = "正在校验 ISO 架构并计算 SHA-256 指纹…";
+            var arch = await hostEnv.InspectIsoArchitectureAsync(path, expectArm64, CancellationToken.None);
+            var sha256 = await MacDeployment.ComputeFileSha256Async(path, CancellationToken.None);
+            isoLicenseGuard.MarkIsoVerified(path, arch, sha256);
+            syncingConsentUi = true;
+            acceptWindowsLicenseCheck.IsChecked = isoLicenseGuard.IsLicenseConfirmedForCurrent;
+            syncingConsentUi = false;
+            BannerText.Text = $"ISO 架构校验通过：{arch}（{sha256[..12]}…）" +
+                              (isoLicenseGuard.IsLicenseConfirmedForCurrent ? "" : "；请勾选当前镜像的微软授权许可。");
+            if (currentSection == 1) Navigate(1);
+        }
+        catch (Exception ex)
+        {
+            isoLicenseGuard.ClearVerificationAndLicense();
+            syncingConsentUi = true;
+            acceptWindowsLicenseCheck.IsChecked = false;
+            syncingConsentUi = false;
+            BannerText.Text = Redaction.SafeError(ex);
+            if (currentSection == 1) Navigate(1);
+        }
+    }
+
+    private void ConfirmBrowserAcceptanceFromUi()
+    {
+        try
+        {
+            MacDeployment.ConfirmBrowserAcceptance(state, confirmBrowserExitCheck.IsChecked == true);
+            BannerText.Text = "已确认 AdsPower 浏览器验收（Claude 登录与对话保持待独立确认）。";
+            Navigate(currentSection);
+        }
+        catch (Exception ex) { BannerText.Text = Redaction.SafeError(ex); }
+    }
+
+    private void ConfirmClaudeConversationFromUi()
+    {
+        try
+        {
+            MacDeployment.ConfirmClaudeLoginAndConversation(state, confirmClaudeConversationCheck.IsChecked == true);
+            BannerText.Text = "已单独登记 Claude 登录与对话实测完成。";
+            Navigate(currentSection);
         }
         catch (Exception ex) { BannerText.Text = Redaction.SafeError(ex); }
     }
@@ -619,7 +716,14 @@ public sealed partial class MainWindow : Window
             memBox.Text = loaded.Options.MemoryMb.ToString();
             diskBox.Text = loaded.Options.DiskGb.ToString();
             isoBox.Text = loaded.Options.IsoPath;
+            isoLicenseGuard.LoadTask(loaded.Options);
             userBox.Text = loaded.Options.UserName;
+            syncingConsentUi = true;
+            acceptWindowsLicenseCheck.IsChecked = false;
+            acceptChangesCheck.IsChecked = loaded.Options.AcceptChanges;
+            syncingConsentUi = false;
+            confirmBrowserExitCheck.IsChecked = loaded.ApplicationAccepted && loaded.SetupFinished;
+            confirmClaudeConversationCheck.IsChecked = false;
             manualAdsPowerCheck.IsChecked = loaded.Options.ManualAdsPower;
             testOutageCheck.IsChecked = loaded.Options.TestOutage;
             rememberBox.IsChecked = loaded.Options.Remember;
@@ -685,13 +789,38 @@ public sealed partial class MainWindow : Window
             state.Options.ManualAdsPower = manualAdsPowerCheck.IsChecked == true;
             state.Options.TestOutage = testOutageCheck.IsChecked == true;
             state.Options.Remember = rememberBox.IsChecked == true;
-            state.Options.AcceptChanges = true;
-            state.Options.AcceptWindowsLicense = true;
+            state.Options.AcceptChanges = acceptChangesCheck.IsChecked == true;
+            state.Options.AcceptWindowsLicense = acceptWindowsLicenseCheck.IsChecked == true;
             state.Options.Country = regionOptions.ElementAtOrDefault(Math.Max(0, countryBox.SelectedIndex))?.Code ?? "US";
             state.Options.TimeZoneId = timeZoneOptions.ElementAtOrDefault(Math.Max(0, timeZoneBox.SelectedIndex)) ?? "Pacific Standard Time";
             var chosen = platformChoices.ElementAtOrDefault(Math.Max(0, platformBox.SelectedIndex))?.Id ?? "fusion";
             state.Options.PlatformId = chosen;
             state.Options.NetworkSource = nodeBox.SelectedIndex >= 0 && nodeBox.SelectedIndex < parsedNodes.Count ? "节点链接 / Clash 配置文本" : "稍后配置";
+
+            var installWindows = !state.Completed.Contains("guest-ready");
+            isoLicenseGuard.SelectIso(state.Options.IsoPath);
+            isoLicenseGuard.SetChangesAccepted(acceptChangesCheck.IsChecked == true);
+            isoLicenseGuard.SetLicenseAccepted(acceptWindowsLicenseCheck.IsChecked == true);
+            var currentIsoSha256 = installWindows
+                ? await MacDeployment.ComputeFileSha256Async(state.Options.IsoPath, deployCts.Token)
+                : "";
+            try
+            {
+                isoLicenseGuard.ValidateForDeploy(installWindows, currentIsoSha256);
+            }
+            catch
+            {
+                syncingConsentUi = true;
+                acceptWindowsLicenseCheck.IsChecked = isoLicenseGuard.IsLicenseConfirmedForCurrent;
+                syncingConsentUi = false;
+                throw;
+            }
+            state.Options.AcceptChanges = isoLicenseGuard.AcceptChanges;
+            state.Options.AcceptWindowsLicense = isoLicenseGuard.IsLicenseConfirmedForCurrent;
+            state.Options.IsoSha256 = installWindows ? currentIsoSha256 : state.Options.IsoSha256;
+            if (installWindows && (passwordBox.Text ?? "").Trim().Length < 10)
+                throw new SetupException("请设置至少 10 位独立虚拟机密码。");
+            state.Options.Validate(requireIso: installWindows);
 
             var selectedNode = nodeBox.SelectedIndex >= 0 && nodeBox.SelectedIndex < parsedNodes.Count ? parsedNodes[nodeBox.SelectedIndex] : null;
             var selectedUpstream = selectedNode?.Upstream
@@ -801,6 +930,15 @@ public sealed partial class MainWindow : Window
             Navigate(i);
             UpdateLayout();
         }
+        Navigate(8);
+        UpdateLayout();
+        var storageSize = new PixelSize(Math.Max(960, (int)ClientSize.Width), Math.Max(680, (int)ClientSize.Height));
+        using (var storageRtb = new RenderTargetBitmap(storageSize, new Vector(96, 96)))
+        {
+            storageRtb.Render(this);
+            storageRtb.Save(Path.Combine(outputDirectory, "claudome-mac-storage-cleanup.png"));
+        }
+
         Navigate(0);
         UpdateLayout();
 
@@ -810,9 +948,11 @@ public sealed partial class MainWindow : Window
         var shotPath = Path.Combine(outputDirectory, "claudome-mac-overview.png");
         rtb.Save(shotPath);
 
-        var uiOk = File.Exists(shotPath) && new FileInfo(shotPath).Length > 1000 && navButtons.Count == 8 && platformChoices.Count == 2;
+        var uiOk = File.Exists(shotPath) && new FileInfo(shotPath).Length > 1000 &&
+                   File.Exists(Path.Combine(outputDirectory, "claudome-mac-storage-cleanup.png")) &&
+                   navButtons.Count == 9 && platformChoices.Count == 2;
         if (!uiOk) failed++;
-        rows.Add(new { name = "mac-avalonia-renders-all-8-sections-and-platform-choices", passed = uiOk, screenshot = shotPath });
+        rows.Add(new { name = "mac-avalonia-renders-all-9-sections-and-storage-cleanup", passed = uiOk, screenshot = shotPath });
 
         var selfExit = await Task.Run(() => MacSelfTests.Run(outputDirectory));
         if (selfExit != 0) failed++;

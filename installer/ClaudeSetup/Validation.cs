@@ -118,9 +118,5 @@ public sealed partial class Deployment
         }
         state.PendingActions.AddRange(result.GetProperty("pendingActions").Deserialize<List<UserAction>>(JsonFile.Format)??[]);
     }
-    private static void WriteValidationAcceptance(SessionState state)=>JsonFile.Write(Paths.Under(state.Options.Root,"acceptance.json"),new {
-        dateUtc=DateTime.UtcNow,networkPassed=state.NetworkPassed,outagePassed=state.OutagePassed,browserRuntimePassed=state.BrowserRuntimePassed,
-        browserReopenPassed=state.BrowserReopenPassed,translationPassed=state.TranslationPassed,restartPassed=state.RestartPassed,
-        restartPending=state.RestartBootBefore.Length>0,browserAcceptance="not-tested",claudeLoginAndConversation="not-tested",status=state.Status
-    });
+    private static void WriteValidationAcceptance(SessionState state) => Deployment.WriteAcceptanceReport(state);
 }

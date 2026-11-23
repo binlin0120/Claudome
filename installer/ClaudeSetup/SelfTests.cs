@@ -1090,6 +1090,8 @@ public static class SelfTests
             Directory.CreateDirectory(srcDir);
             var fixtureExe = Path.Combine(srcDir, "Claudome.exe");
             File.Copy(currentExe!, fixtureExe, overwrite: true);
+            File.WriteAllText(Path.Combine(srcDir, "PROJECT-LICENSE.txt"), "fixture-license");
+            File.WriteAllText(Path.Combine(srcDir, "Gateway-THIRD-PARTY-NOTICES.txt"), "fixture-notices");
             File.WriteAllText(Path.Combine(srcDir, "快速开始.txt"), "fixture quickstart");
             var validZip = Path.Combine(stageRoot, $"Claudome_{higherVer}_win-x64.zip");
             System.IO.Compression.ZipFile.CreateFromDirectory(Path.GetDirectoryName(srcDir)!, validZip);
@@ -1165,20 +1167,233 @@ public static class SelfTests
                     slipZip, Path.Combine(stageRoot, "extract-slip"), new Version(0, 4, 0), null, null, allowSameVersion: true, CancellationToken.None),
                     "Zip-Slip entry escaped staging directory");
 
+                // Blocker 1: ZIP missing any RequiredSideFile must be rejected with missing filename; partial staged payload must abort precheck without touching target files or writing completion receipt.
+                foreach (var missingReq in new[] { "PROJECT-LICENSE.txt", "Gateway-THIRD-PARTY-NOTICES.txt" })
+                {
+                    var partialSrc = Path.Combine(stageRoot, $"src-missing-{missingReq}");
+                    var innerDir = Path.Combine(partialSrc, $"Claudome_{higherVer}_win-x64");
+                    Directory.CreateDirectory(innerDir);
+                    File.Copy(currentExe!, Path.Combine(innerDir, "Claudome.exe"), overwrite: true);
+                    File.WriteAllText(Path.Combine(innerDir, "快速开始.txt"), "q");
+                    foreach (var side in new[] { "PROJECT-LICENSE.txt", "Gateway-THIRD-PARTY-NOTICES.txt" })
+                    {
+                        if (!string.Equals(side, missingReq, StringComparison.OrdinalIgnoreCase))
+                            File.WriteAllText(Path.Combine(innerDir, side), "present");
+                    }
+                    var partialZip = Path.Combine(stageRoot, $"missing-{missingReq}.zip");
+                    System.IO.Compression.ZipFile.CreateFromDirectory(partialSrc, partialZip);
+                    var thrown = false;
+                    try
+                    {
+                        await SelfUpdater.ExtractAndVerifyPackageAsync(
+                            partialZip, Path.Combine(stageRoot, $"extract-missing-{missingReq}"), new Version(0, 4, 0), null, null, allowSameVersion: false, CancellationToken.None);
+                    }
+                    catch (SetupException ex) when (ex.Message.Contains(missingReq, StringComparison.Ordinal))
+                    {
+                        thrown = true;
+                    }
+                    Assert(thrown, $"Package missing {missingReq} was not rejected with missing filename");
+                }
+
                 // Swap script + stale cleanup verification.
                 var script = SelfUpdater.BuildSwapScript(@"C:\App", staged.PayloadDirectory, staged.StagingDirectory, "Claudome.exe", "Claudome.exe.123.bak", 123, relaunch: true);
                 Assert(script.Contains("ROLLBACK") && script.Contains("Claudome.exe.123.bak") && script.Contains("快速开始.txt"), "Swap script missing rollback or sidecar copy");
 
                 var cleanupApp = Path.Combine(stageRoot, "cleanup-app");
+                var cleanupOtherApp = Path.Combine(stageRoot, "cleanup-other-app");
                 var cleanupTmp = Path.Combine(stageRoot, "cleanup-tmp");
+                var cleanupSettings = Path.Combine(stageRoot, "cleanup-settings.json");
+                var cleanupReg = Path.Combine(stageRoot, "cleanup-registry.json");
                 Directory.CreateDirectory(cleanupApp);
-                Directory.CreateDirectory(Path.Combine(cleanupTmp, "claudome-stage-abc"));
-                File.WriteAllText(Path.Combine(cleanupApp, "Claudome.exe.99.bak"), "old");
-                File.WriteAllText(Path.Combine(cleanupTmp, "claudome-update-xyz.cmd"), "old");
-                SelfUpdater.CleanupStaleUpdateFiles(cleanupApp, cleanupTmp);
-                Assert(!File.Exists(Path.Combine(cleanupApp, "Claudome.exe.99.bak")) &&
-                    !File.Exists(Path.Combine(cleanupTmp, "claudome-update-xyz.cmd")) &&
-                    !Directory.Exists(Path.Combine(cleanupTmp, "claudome-stage-abc")), "Stale update files were not cleaned up");
+                Directory.CreateDirectory(cleanupOtherApp);
+                Directory.CreateDirectory(cleanupTmp);
+                new CleanupSettings().Save(cleanupSettings);
+
+                var stage1 = Path.Combine(cleanupTmp, "claudome-stage-abc");
+                var script1 = Path.Combine(cleanupTmp, "claudome-update-xyz.cmd");
+                var bak1 = Path.Combine(cleanupApp, "Claudome.exe.99.bak");
+                var lic1 = Path.Combine(cleanupApp, "PROJECT-LICENSE.txt.99.bak");
+                var not1 = Path.Combine(cleanupApp, "Gateway-THIRD-PARTY-NOTICES.txt.99.bak");
+                var bak2 = Path.Combine(cleanupApp, "Claudome.exe.200.bak");
+                var lic2 = Path.Combine(cleanupApp, "PROJECT-LICENSE.txt.200.bak");
+                var not2 = Path.Combine(cleanupApp, "Gateway-THIRD-PARTY-NOTICES.txt.200.bak");
+                var unownedBak = Path.Combine(cleanupApp, "Claudome.exe.888.bak");
+                var unownedStage = Path.Combine(cleanupTmp, "claudome-stage-unowned");
+                var otherStage = Path.Combine(cleanupTmp, "claudome-stage-other");
+                Directory.CreateDirectory(stage1);
+                Directory.CreateDirectory(unownedStage);
+                Directory.CreateDirectory(otherStage);
+                File.WriteAllText(script1, "old");
+                File.WriteAllText(bak1, "old1");
+                File.WriteAllText(lic1, "old-lic1");
+                File.WriteAllText(not1, "old-not1");
+                File.WriteAllText(bak2, "old2");
+                File.WriteAllText(lic2, "old-lic2");
+                File.WriteAllText(not2, "old-not2");
+                File.WriteAllText(unownedBak, "unowned");
+
+                var t1 = DateTime.UtcNow.AddMinutes(-10);
+                var t2 = DateTime.UtcNow.AddMinutes(-2);
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord { Category = BackupCategory.ProgramUpdate, ScopeId = Path.GetFullPath(cleanupApp), ScopeLabel = "App1", Path = bak1, StageRoot = stage1, TransactionId = "tx1", Role = "backup", OpState = BackupOpState.VerifiedSuccess, CreatedUtc = t1 }, cleanupReg);
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord { Category = BackupCategory.ProgramUpdate, ScopeId = Path.GetFullPath(cleanupApp), ScopeLabel = "App1", Path = lic1, StageRoot = stage1, TransactionId = "tx1", Role = "backup-sidecar", OpState = BackupOpState.VerifiedSuccess, CreatedUtc = t1 }, cleanupReg);
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord { Category = BackupCategory.ProgramUpdate, ScopeId = Path.GetFullPath(cleanupApp), ScopeLabel = "App1", Path = not1, StageRoot = stage1, TransactionId = "tx1", Role = "backup-sidecar", OpState = BackupOpState.VerifiedSuccess, CreatedUtc = t1 }, cleanupReg);
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord { Category = BackupCategory.ProgramUpdate, ScopeId = Path.GetFullPath(cleanupApp), ScopeLabel = "App1", Path = stage1, StageRoot = stage1, TransactionId = "tx1", Role = "staging", OpState = BackupOpState.VerifiedSuccess, CreatedUtc = t1 }, cleanupReg);
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord { Category = BackupCategory.ProgramUpdate, ScopeId = Path.GetFullPath(cleanupApp), ScopeLabel = "App1", Path = script1, StageRoot = stage1, TransactionId = "tx1", Role = "swap-script", OpState = BackupOpState.VerifiedSuccess, CreatedUtc = t1 }, cleanupReg);
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord { Category = BackupCategory.ProgramUpdate, ScopeId = Path.GetFullPath(cleanupApp), ScopeLabel = "App1", Path = bak2, TransactionId = "tx2", Role = "backup", OpState = BackupOpState.VerifiedSuccess, CreatedUtc = t2 }, cleanupReg);
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord { Category = BackupCategory.ProgramUpdate, ScopeId = Path.GetFullPath(cleanupApp), ScopeLabel = "App1", Path = lic2, TransactionId = "tx2", Role = "backup-sidecar", OpState = BackupOpState.VerifiedSuccess, CreatedUtc = t2 }, cleanupReg);
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord { Category = BackupCategory.ProgramUpdate, ScopeId = Path.GetFullPath(cleanupApp), ScopeLabel = "App1", Path = not2, TransactionId = "tx2", Role = "backup-sidecar", OpState = BackupOpState.VerifiedSuccess, CreatedUtc = t2 }, cleanupReg);
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord { Category = BackupCategory.ProgramUpdate, ScopeId = Path.GetFullPath(cleanupOtherApp), ScopeLabel = "App2", Path = otherStage, StageRoot = otherStage, TransactionId = "txother", Role = "staging", OpState = BackupOpState.InProgress, CreatedUtc = t2 }, cleanupReg);
+
+                SelfUpdater.CleanupStaleUpdateFiles(cleanupApp, cleanupTmp, cleanupSettings, cleanupReg);
+                Assert(!File.Exists(bak1) && !File.Exists(lic1) && !File.Exists(not1) && !File.Exists(script1) && !Directory.Exists(stage1) &&
+                       File.Exists(bak2) && File.Exists(lic2) && File.Exists(not2) && File.Exists(unownedBak) &&
+                       Directory.Exists(unownedStage) && Directory.Exists(otherStage),
+                    "Startup cleanup failed to rotate registered old update cleanly or touched retained/unowned/other-install items");
+
+                // Real cmd.exe swap execution tests:
+                // (1) WX01: Non-ASCII Chinese + space directory works under CP936 cmd.exe via chcp 65001 + UTF-8 without BOM.
+                static int RunRealSwapCmd(string appDir, string payloadDir, string stageDir, int fakePid)
+                {
+                    var cmdPath = Path.Combine(Path.GetDirectoryName(stageDir)!, $"run-{Guid.NewGuid():N}.cmd");
+                    var scriptText = SelfUpdater.BuildSwapScript(appDir, payloadDir, stageDir, "Claudome.exe", $"Claudome.exe.{fakePid}.bak", fakePid, relaunch: false);
+                    File.WriteAllText(cmdPath, scriptText, new System.Text.UTF8Encoding(false));
+                    using var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", SelfUpdater.BuildCmdArguments(cmdPath))
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WorkingDirectory = Path.GetTempPath()
+                    })!;
+                    Assert(proc.WaitForExit(15000), "Swap cmd script timed out");
+                    if (File.Exists(cmdPath)) File.Delete(cmdPath);
+                    return proc.ExitCode;
+                }
+
+                (string app, string stage, string payload) CreateSwapFixture(string name)
+                {
+                    var app = Path.Combine(stageRoot, name);
+                    var stage = Path.Combine(stageRoot, $"claudome-stage-{Guid.NewGuid():N}");
+                    var payload = Path.Combine(stage, "payload");
+                    Directory.CreateDirectory(app);
+                    Directory.CreateDirectory(payload);
+                    File.WriteAllText(Path.Combine(app, "Claudome.exe"), "old-exe");
+                    File.WriteAllText(Path.Combine(app, "PROJECT-LICENSE.txt"), "old-lic");
+                    File.WriteAllText(Path.Combine(app, "Gateway-THIRD-PARTY-NOTICES.txt"), "old-notices");
+                    File.WriteAllText(Path.Combine(app, "快速开始.txt"), "old-quick");
+                    File.WriteAllText(Path.Combine(payload, "Claudome.exe"), "new-exe");
+                    File.WriteAllText(Path.Combine(payload, "PROJECT-LICENSE.txt"), "new-lic");
+                    File.WriteAllText(Path.Combine(payload, "Gateway-THIRD-PARTY-NOTICES.txt"), "new-notices");
+                    File.WriteAllText(Path.Combine(payload, "快速开始.txt"), "new-quick");
+                    return (app, stage, payload);
+                }
+
+                var (cpApp, cpStage, cpPayload) = CreateSwapFixture("验收 目录 (中文)");
+                var cpExit = RunRealSwapCmd(cpApp, cpPayload, cpStage, 999997);
+                Assert(cpExit == 0 &&
+                    File.ReadAllText(Path.Combine(cpApp, "Claudome.exe")) == "new-exe" &&
+                    File.ReadAllText(Path.Combine(cpApp, "PROJECT-LICENSE.txt")) == "new-lic" &&
+                    File.ReadAllText(Path.Combine(cpApp, "Gateway-THIRD-PARTY-NOTICES.txt")) == "new-notices" &&
+                    File.ReadAllText(Path.Combine(cpApp, "快速开始.txt")) == "new-quick" &&
+                    !File.Exists(Path.Combine(cpApp, SelfUpdater.UpdateErrorMarkerName)) &&
+                    !File.Exists(Path.Combine(cpApp, SelfUpdater.UpdateDeferredManifestName)),
+                    $"CP936 Chinese+space cmd swap failed (exit={cpExit})");
+
+                // (2) WX04-a: Locked required sidecar (PROJECT-LICENSE.txt) forces full rollback of EXE + required files, error marker, non-zero exit.
+                var (reqApp, reqStage, reqPayload) = CreateSwapFixture("req-lock-中文");
+                int reqExit;
+                using (var reqLock = new FileStream(Path.Combine(reqApp, "PROJECT-LICENSE.txt"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    reqExit = RunRealSwapCmd(reqApp, reqPayload, reqStage, 999997);
+                }
+                var reqNotice = SelfUpdater.ReadPendingUpdateNotice(reqApp);
+                Assert(reqExit != 0 &&
+                    File.ReadAllText(Path.Combine(reqApp, "Claudome.exe")) == "old-exe" &&
+                    File.ReadAllText(Path.Combine(reqApp, "PROJECT-LICENSE.txt")) == "old-lic" &&
+                    !string.IsNullOrEmpty(reqNotice.ErrorReason) &&
+                    reqNotice.ErrorReason.Contains("PROJECT-LICENSE.txt", StringComparison.Ordinal),
+                    $"Locked required file did not roll back EXE and record error marker (exit={reqExit})");
+                SelfUpdater.ClearUpdateErrorMarker(reqApp);
+                Assert(SelfUpdater.ReadPendingUpdateNotice(reqApp).ErrorReason is null, "ClearUpdateErrorMarker did not clear marker");
+
+                // (3) WX04-b & C04: Locked deferrable doc (快速开始.txt) tested for BOTH ZIP root layout (payload==stage) AND nested subfolder layout!
+                foreach (var rootLayout in new[] { true, false })
+                {
+                    var tag = rootLayout ? "root" : "nested";
+                    var defApp = Path.Combine(stageRoot, $"def-lock-{tag}-中文");
+                    var defStage = Path.Combine(stageRoot, $"claudome-stage-{tag}-{Guid.NewGuid():N}");
+                    var defPayload = rootLayout ? defStage : Path.Combine(defStage, "inner", "app");
+                    Directory.CreateDirectory(defApp);
+                    Directory.CreateDirectory(defPayload);
+                    File.WriteAllText(Path.Combine(defApp, "Claudome.exe"), "old-exe");
+                    File.WriteAllText(Path.Combine(defApp, "PROJECT-LICENSE.txt"), "old-lic");
+                    File.WriteAllText(Path.Combine(defApp, "Gateway-THIRD-PARTY-NOTICES.txt"), "old-notices");
+                    File.WriteAllText(Path.Combine(defApp, "快速开始.txt"), "old-quick");
+                    File.WriteAllText(Path.Combine(defPayload, "Claudome.exe"), "new-exe");
+                    File.WriteAllText(Path.Combine(defPayload, "PROJECT-LICENSE.txt"), "new-lic");
+                    File.WriteAllText(Path.Combine(defPayload, "Gateway-THIRD-PARTY-NOTICES.txt"), "new-notices");
+                    File.WriteAllText(Path.Combine(defPayload, "快速开始.txt"), $"new-quick-{tag}");
+
+                    int defExit;
+                    using (var defLock = new FileStream(Path.Combine(defApp, "快速开始.txt"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    {
+                        defExit = RunRealSwapCmd(defApp, defPayload, defStage, 999997);
+                    }
+                    var defNoticeBeforeCleanup = SelfUpdater.ReadPendingUpdateNotice(defApp);
+                    SelfUpdater.CleanupStaleUpdateFiles(defApp, stageRoot);
+                    Assert(defExit == 0 &&
+                        File.ReadAllText(Path.Combine(defApp, "Claudome.exe")) == "new-exe" &&
+                        File.ReadAllText(Path.Combine(defApp, "PROJECT-LICENSE.txt")) == "new-lic" &&
+                        File.ReadAllText(Path.Combine(defApp, "快速开始.txt")) == "old-quick" &&
+                        defNoticeBeforeCleanup.ErrorReason is null &&
+                        defNoticeBeforeCleanup.DeferredFile == "快速开始.txt" &&
+                        !string.IsNullOrEmpty(defNoticeBeforeCleanup.DeferredStageDir) &&
+                        Directory.Exists(defStage),
+                        $"Locked deferrable doc ({tag} ZIP layout) lost staging or failed deferred manifest (exit={defExit})");
+                    SelfUpdater.RetryDeferredSideFiles(defApp);
+                    Assert(File.ReadAllText(Path.Combine(defApp, "快速开始.txt")) == $"new-quick-{tag}" &&
+                        !File.Exists(Path.Combine(defApp, SelfUpdater.UpdateDeferredManifestName)) &&
+                        !Directory.Exists(defStage),
+                        $"RetryDeferredSideFiles ({tag} ZIP layout) did not complete copy and clean staging");
+                }
+
+                // (4) Blocker 1: Swap script precheck MUST abort before mutating appDir or writing receipt if staged payload misses any required file.
+                foreach (var missingSide in new[] { "PROJECT-LICENSE.txt", "Gateway-THIRD-PARTY-NOTICES.txt" })
+                {
+                    var missApp = Path.Combine(stageRoot, $"miss-req-{missingSide}");
+                    var missStage = Path.Combine(stageRoot, $"claudome-stage-miss-{Guid.NewGuid():N}");
+                    var missPayload = Path.Combine(missStage, "payload");
+                    Directory.CreateDirectory(missApp);
+                    Directory.CreateDirectory(missPayload);
+                    File.WriteAllText(Path.Combine(missApp, "Claudome.exe"), "old-exe");
+                    File.WriteAllText(Path.Combine(missApp, "PROJECT-LICENSE.txt"), "old-lic");
+                    File.WriteAllText(Path.Combine(missApp, "Gateway-THIRD-PARTY-NOTICES.txt"), "old-notices");
+                    File.WriteAllText(Path.Combine(missPayload, "Claudome.exe"), "new-exe");
+                    File.WriteAllText(Path.Combine(missPayload, "PROJECT-LICENSE.txt"), "new-lic");
+                    File.WriteAllText(Path.Combine(missPayload, "Gateway-THIRD-PARTY-NOTICES.txt"), "new-notices");
+                    File.Delete(Path.Combine(missPayload, missingSide));
+
+                    var txId = $"tx-miss-{missingSide}";
+                    var cmdPath = Path.Combine(stageRoot, $"run-miss-{Guid.NewGuid():N}.cmd");
+                    var scriptText = SelfUpdater.BuildSwapScript(missApp, missPayload, missStage, "Claudome.exe", "Claudome.exe.999994.bak", 999994, relaunch: false, transactionId: txId);
+                    File.WriteAllText(cmdPath, scriptText, new System.Text.UTF8Encoding(false));
+                    using var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", SelfUpdater.BuildCmdArguments(cmdPath))
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WorkingDirectory = Path.GetTempPath()
+                    })!;
+                    Assert(proc.WaitForExit(15000), "Missing-sidecar swap script timed out");
+                    if (File.Exists(cmdPath)) File.Delete(cmdPath);
+
+                    var notice = SelfUpdater.ReadPendingUpdateNotice(missApp);
+                    Assert(proc.ExitCode != 0 &&
+                        File.ReadAllText(Path.Combine(missApp, "Claudome.exe")) == "old-exe" &&
+                        File.ReadAllText(Path.Combine(missApp, "PROJECT-LICENSE.txt")) == "old-lic" &&
+                        File.ReadAllText(Path.Combine(missApp, "Gateway-THIRD-PARTY-NOTICES.txt")) == "old-notices" &&
+                        !File.Exists(Path.Combine(missApp, SelfUpdater.UpdateCompletedReceiptName)) &&
+                        !string.IsNullOrEmpty(notice.ErrorReason) &&
+                        notice.ErrorReason.Contains(missingSide, StringComparison.Ordinal),
+                        $"Missing required sidecar {missingSide} did not abort swap cleanly");
+                }
             }
             finally
             {
@@ -1187,6 +1402,7 @@ public static class SelfTests
                 try { await serverTask; } catch { }
             }
         });
+        await StorageCleanupTests.Run(Check, output);
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));

@@ -79,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x installer/scripts/package_mac.sh
-          bash installer/scripts/package_mac.sh 0.4.8 "arm64 x64"
+          bash installer/scripts/package_mac.sh 0.4.9 "arm64 x64"
       - name: Upload macOS preview bundles and test reports
         uses: actions/upload-artifact@v4
         with:

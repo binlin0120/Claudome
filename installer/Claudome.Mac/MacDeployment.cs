@@ -60,9 +60,22 @@ public static class MacDeployment
         IsolationPolicy.RequireSupportedPlatform(state, isMacOverride: true);
         var o = state.Options;
         var installWindows = !state.Completed.Contains("guest-ready");
+        if (!o.AcceptChanges)
+            throw new SetupException("请先勾选确认在独立任务目录配置双层防泄漏隔离环境。");
+        if (installWindows && !o.AcceptWindowsLicense)
+            throw new SetupException("请先勾选确认持有合法有效的微软 Windows 11 安装授权许可。");
         if (installWindows && secrets.VmPassword.Trim().Length < 10)
             throw new SetupException("请设置至少 10 位独立虚拟机密码。");
         o.Validate(requireIso: installWindows);
+        if (installWindows)
+        {
+            if (string.IsNullOrWhiteSpace(o.IsoSha256))
+                o.IsoSha256 = await ComputeFileSha256Async(o.IsoPath, token);
+            else
+                await RequireVerifiedIsoSha256Async(o, "部署前检测到", token);
+        }
+        if (installWindows && backendOverride is null)
+            await (HostPlatform.Environment as MacHostEnvironment ?? new MacHostEnvironment()).InspectIsoArchitectureAsync(o.IsoPath, hostFacts.IsAppleSilicon, token);
         Paths.EnsureWorkspace(o.Root);
         HostPlatform.Environment.RestrictPrivateDirectory(o.Private);
 
@@ -97,6 +110,8 @@ public static class MacDeployment
             await backend.EnsureMachine(state, token);
             if (!state.Completed.Contains("vm-created"))
             {
+                if (installWindows)
+                    await RequireVerifiedIsoSha256Async(o, "配置虚拟机前检测到", token);
                 await backend.Configure(state, token);
                 state.Completed.Add("vm-created");
                 state.Save();
@@ -106,7 +121,10 @@ public static class MacDeployment
             {
                 progress.Report("4 / 6  生成无人值守引导介质并启动 Windows 安装…");
                 if (!await backend.IsRunning(state, token))
+                {
+                    await RequireVerifiedIsoSha256Async(o, "挂载安装介质前检测到", token);
                     await backend.InstallWindows(state, secrets, token);
+                }
                 await backend.Open(state, token);
 
                 var guestReady = false;
@@ -266,6 +284,9 @@ public static class MacDeployment
             state.OutagePassed = rootEl.TryGetProperty("outagePassed", out var outagePassed) && outagePassed.GetBoolean();
             state.ClashConfigured = rootEl.TryGetProperty("clashConfigured", out var clashCfg) && clashCfg.GetBoolean();
             state.BrowserProfileConfigured = rootEl.TryGetProperty("browserProfileConfigured", out var adsCfg) && adsCfg.GetBoolean();
+            state.BrowserRuntimePassed = rootEl.TryGetProperty("browserRuntimePassed", out var rtPassed) && rtPassed.GetBoolean();
+            state.BrowserReopenPassed = rootEl.TryGetProperty("browserReopenPassed", out var reopenPassed) && reopenPassed.GetBoolean();
+            state.TranslationPassed = rootEl.TryGetProperty("translationPassed", out var trPassed) && trPassed.GetBoolean();
             state.Stage = rootEl.TryGetProperty("code", out var codeProp) ? codeProp.GetString() ?? "" : "";
             state.PendingActions.Clear();
             if (rootEl.TryGetProperty("pendingActions", out var pendingEl) && pendingEl.ValueKind == JsonValueKind.Array)
@@ -281,19 +302,275 @@ public static class MacDeployment
                         state.PendingActions.Add(new UserAction(title, steps, id));
                 }
             }
-            state.SetupFinished = state.NetworkPassed && (state.Stage == "NEEDS_BROWSER_ACCEPTANCE" || string.IsNullOrEmpty(state.Stage));
-            state.Status = state.SetupFinished ? "Mac 来宾环境已完成部署与验收" : $"来宾待处理：{state.Stage}";
+
+            if (o.NetworkSource != "稍后配置")
+            {
+                state.Protection.ConfigHash = state.CoreConfigSha256;
+                state.Protection.Boundary = new(CheckStatus.Passed, DateTime.UtcNow, "macOS pfctl 锚点与主规则集回读通过");
+                state.Protection.Exit = new(state.NetworkPassed ? CheckStatus.Passed : CheckStatus.Failed, DateTime.UtcNow,
+                    state.NetworkPassed ? "来宾出口与地区校验通过" : $"来宾待处理：{state.Stage}");
+                state.Protection.Browser = new(CheckStatus.NotTested, DateTime.UtcNow, "等待在 AdsPower 浏览器内打开检测页确认");
+            }
+            if (state.NetworkPassed && o.NetworkSource != "稍后配置")
+            {
+                if (o.ManualAdsPower && state.PendingActions.All(a => a.Id != CustomerGuide.ManualAdsPowerId))
+                    state.PendingActions.Add(CustomerGuide.ManualAdsPower());
+                else if (!o.ManualAdsPower && state.PendingActions.All(a => a.Id != "acceptance"))
+                    state.PendingActions.Add(new UserAction(
+                        "在专用浏览器完成验收与登录",
+                        ["打开 Claude 专用 AdsPower 环境，访问 https://ip.net.coffee/claude/。", "核对地区、出口 IP、DNS、WebRTC 与时区一致后，回到本助手勾选确认完成。"],
+                        "acceptance"));
+            }
+
+            var guestStageAccepted = state.NetworkPassed && (state.Stage == "NEEDS_BROWSER_ACCEPTANCE" || string.IsNullOrEmpty(state.Stage));
+            state.ApplicationAccepted = false;
+            state.SetupFinished = false;
+            state.Status = guestStageAccepted ? "需要本人完成浏览器验收" : $"来宾待处理：{state.Stage}";
+            if (guestStageAccepted && !state.Completed.Contains("software"))
+                state.Completed.Add("software");
             state.Save();
 
-            if (!state.SetupFinished && guestRunError is not null)
+            if (guestStageAccepted)
+            {
+                JsonFile.Write(Paths.Under(o.Root, "acceptance.json"), new
+                {
+                    dateUtc = DateTime.UtcNow,
+                    vmCreated = true,
+                    guestTools = true,
+                    softwareInstalled = true,
+                    networkPassed = state.NetworkPassed,
+                    outagePassed = state.OutagePassed,
+                    browserRuntimePassed = state.BrowserRuntimePassed,
+                    browserReopenPassed = state.BrowserReopenPassed,
+                    translationPassed = state.TranslationPassed,
+                    browserAcceptance = "not-tested",
+                    claudeLoginAndConversation = "not-tested",
+                    status = state.Status
+                });
+            }
+
+            if (!guestStageAccepted && guestRunError is not null)
                 throw new SetupException($"来宾配置暂停（{state.Stage}）：{(state.PendingActions.FirstOrDefault()?.Title ?? guestRunError.Message)}");
 
-            progress.Report(state.SetupFinished ? "全部 Mac 部署与来宾配置已通过回读。" : $"来宾返回待处理状态：{state.Stage}");
+            progress.Report(guestStageAccepted
+                ? "网络与软件已通过回读；请在 AdsPower 打开 https://ip.net.coffee/claude/ 验收后点击确认完成。"
+                : $"来宾返回待处理状态：{state.Stage}");
             return state;
         }
         finally
         {
             if (ownedBackend is not null) await ownedBackend.DisposeAsync();
+        }
+    }
+
+    /// <summary>Marks final workspace completion only after the user explicitly confirms real AdsPower browser verification (keeps Claude login/conversation not-tested until independently confirmed).</summary>
+    public static void ConfirmBrowserAcceptance(SessionState state, bool browserConfirmed)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        if (!state.NetworkPassed)
+            throw new SetupException("来宾网络与出口尚未通过验收，不能标记完成。");
+        if (!browserConfirmed)
+            throw new SetupException("请先勾选确认已在真实 AdsPower 窗口核对检测页一致。");
+
+        state.Protection.Browser = new(CheckStatus.Passed, DateTime.UtcNow, "用户确认实际 AdsPower 窗口出口");
+        state.PendingActions.RemoveAll(a => a.Id is "acceptance" or CustomerGuide.ManualAdsPowerId);
+        state.ApplicationAccepted = true;
+        state.SetupFinished = true;
+        state.Stage = "已完成设置，可进入虚拟机";
+        state.Status = "设置已完成";
+        state.Save();
+
+        var priorClaudeStatus = ReadAcceptanceField(state.Options.Root, "claudeLoginAndConversation");
+        WriteAcceptanceFile(state, browserAcceptance: "user-confirmed", claudeLoginAndConversation: string.IsNullOrWhiteSpace(priorClaudeStatus) ? "not-tested" : priorClaudeStatus);
+    }
+
+    /// <summary>Independently records user-confirmed Claude login and first conversation inside the verified AdsPower environment.</summary>
+    public static void ConfirmClaudeLoginAndConversation(SessionState state, bool claudeConfirmed)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        if (!state.SetupFinished || state.Protection.Browser.Status != CheckStatus.Passed)
+            throw new SetupException("请先完成 AdsPower 浏览器出口验收，再单独确认 Claude 登录与对话。");
+        if (!claudeConfirmed)
+            throw new SetupException("请先勾选确认已在同一 AdsPower 窗口完成 Claude 登录与对话。");
+
+        WriteAcceptanceFile(state, browserAcceptance: "user-confirmed", claudeLoginAndConversation: "user-confirmed");
+    }
+
+    private static string? ReadAcceptanceField(string root, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(root)) return null;
+        var path = Paths.Under(root, "acceptance.json");
+        if (!File.Exists(path)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            return doc.RootElement.TryGetProperty(fieldName, out var prop) ? prop.GetString() : null;
+        }
+        catch { return null; }
+    }
+
+    private static void WriteAcceptanceFile(SessionState state, string browserAcceptance, string claudeLoginAndConversation)
+    {
+        if (string.IsNullOrWhiteSpace(state.Options.Root) || !Directory.Exists(state.Options.Root)) return;
+        JsonFile.Write(Paths.Under(state.Options.Root, "acceptance.json"), new
+        {
+            dateUtc = DateTime.UtcNow,
+            vmCreated = true,
+            guestTools = true,
+            softwareInstalled = true,
+            networkPassed = state.NetworkPassed,
+            outagePassed = state.OutagePassed,
+            browserRuntimePassed = state.BrowserRuntimePassed,
+            browserReopenPassed = state.BrowserReopenPassed,
+            translationPassed = state.TranslationPassed,
+            browserAcceptance,
+            claudeLoginAndConversation,
+            status = state.Status
+        });
+    }
+
+    /// <summary>Computes lowercase hex SHA-256 of a local ISO file without loading it into memory.</summary>
+    public static async Task<string> ComputeFileSha256Async(string path, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            throw new SetupException("未找到指定的 Windows ISO 镜像文件。");
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, useAsync: true);
+        var hash = await SHA256.HashDataAsync(stream, token);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>Verifies that the ISO on disk still matches the expected SHA-256 digest immediately before provisioning or boot.</summary>
+    public static async Task RequireVerifiedIsoSha256Async(SetupOptions options, string stagePrefix, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(options.IsoSha256)) return;
+        var actualIsoSha = await ComputeFileSha256Async(options.IsoPath, token);
+        if (!actualIsoSha.Equals(options.IsoSha256.Trim(), StringComparison.OrdinalIgnoreCase))
+            throw new SetupException($"{stagePrefix} Windows ISO 文件内容已发生变化（SHA-256 不匹配），已终止当前安装阶段，请重新校验架构并确认当前镜像的授权许可。");
+    }
+
+    /// <summary>Opens the verified ISO read-only (FileShare.Read) and re-checks its SHA-256 before VM config emission.</summary>
+    internal static FileStream OpenAndVerifyIsoLock(string isoPath, string? expectedSha256, string stagePrefix)
+    {
+        if (string.IsNullOrWhiteSpace(isoPath) || !File.Exists(isoPath))
+            throw new SetupException("未找到指定的 Windows ISO 镜像文件。");
+        var stream = new FileStream(isoPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, useAsync: false);
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(expectedSha256))
+            {
+                var actualSha = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+                if (!actualSha.Equals(expectedSha256.Trim(), StringComparison.OrdinalIgnoreCase))
+                    throw new SetupException($"{stagePrefix} Windows ISO 文件内容已发生变化（SHA-256 不匹配），已终止生成虚拟机安装配置，请重新校验架构并确认当前镜像的授权许可。");
+                stream.Position = 0;
+            }
+            return stream;
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Binds ISO architecture verification and Windows license confirmation strictly to the ISO's SHA-256 content identity.</summary>
+    public sealed class MacIsoLicenseGuard
+    {
+        public string SelectedIsoPath { get; private set; } = "";
+        public string VerifiedIsoPath { get; private set; } = "";
+        public string VerifiedIsoArch { get; private set; } = "";
+        public string VerifiedIsoSha256 { get; private set; } = "";
+        public bool AcceptWindowsLicense { get; private set; }
+        public string LicensedIsoPath { get; private set; } = "";
+        public string LicensedIsoSha256 { get; private set; } = "";
+        public bool AcceptChanges { get; private set; }
+
+        public bool IsIsoVerifiedForCurrent =>
+            !string.IsNullOrWhiteSpace(SelectedIsoPath) &&
+            !string.IsNullOrWhiteSpace(VerifiedIsoSha256) &&
+            string.Equals(SelectedIsoPath, VerifiedIsoPath, StringComparison.OrdinalIgnoreCase);
+
+        public bool IsLicenseConfirmedForCurrent =>
+            AcceptWindowsLicense &&
+            IsIsoVerifiedForCurrent &&
+            !string.IsNullOrWhiteSpace(LicensedIsoSha256) &&
+            string.Equals(VerifiedIsoSha256, LicensedIsoSha256, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(SelectedIsoPath, LicensedIsoPath, StringComparison.OrdinalIgnoreCase);
+
+        public void SelectIso(string isoPath)
+        {
+            var normalized = (isoPath ?? "").Trim();
+            if (!string.Equals(normalized, SelectedIsoPath, StringComparison.OrdinalIgnoreCase))
+                ClearVerificationAndLicense();
+            SelectedIsoPath = normalized;
+        }
+
+        public void LoadTask(SetupOptions options)
+        {
+            SelectedIsoPath = (options.IsoPath ?? "").Trim();
+            ClearVerificationAndLicense();
+            AcceptChanges = options.AcceptChanges;
+        }
+
+        public void MarkIsoVerified(string isoPath, string arch, string isoSha256)
+        {
+            var normalized = (isoPath ?? "").Trim();
+            var normalizedSha = (isoSha256 ?? "").Trim().ToLowerInvariant();
+            if (normalizedSha.Length != 64)
+                throw new SetupException("Windows ISO 校验指纹无效。");
+            if (!string.Equals(normalized, SelectedIsoPath, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(normalizedSha, LicensedIsoSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                AcceptWindowsLicense = false;
+                LicensedIsoPath = "";
+                LicensedIsoSha256 = "";
+            }
+            SelectedIsoPath = normalized;
+            VerifiedIsoPath = normalized;
+            VerifiedIsoArch = arch;
+            VerifiedIsoSha256 = normalizedSha;
+        }
+
+        public void ClearVerificationAndLicense()
+        {
+            VerifiedIsoPath = "";
+            VerifiedIsoArch = "";
+            VerifiedIsoSha256 = "";
+            AcceptWindowsLicense = false;
+            LicensedIsoPath = "";
+            LicensedIsoSha256 = "";
+        }
+
+        public void SetLicenseAccepted(bool accepted)
+        {
+            if (!accepted || !IsIsoVerifiedForCurrent)
+            {
+                AcceptWindowsLicense = false;
+                LicensedIsoPath = "";
+                LicensedIsoSha256 = "";
+                return;
+            }
+            AcceptWindowsLicense = true;
+            LicensedIsoPath = SelectedIsoPath;
+            LicensedIsoSha256 = VerifiedIsoSha256;
+        }
+
+        public void SetChangesAccepted(bool accepted) => AcceptChanges = accepted;
+
+        public void ValidateForDeploy(bool installWindows, string currentIsoSha256)
+        {
+            if (!AcceptChanges)
+                throw new SetupException("请先到「安装环境」勾选同意程序在独立目录配置双层隔离环境。");
+            if (!installWindows) return;
+            if (!IsIsoVerifiedForCurrent)
+                throw new SetupException("当前 Windows ISO 尚未通过架构校验（或已更换镜像），请先到「安装环境」点击「校验 ISO 架构」。");
+            var actualSha = (currentIsoSha256 ?? "").Trim().ToLowerInvariant();
+            if (!string.Equals(actualSha, VerifiedIsoSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                ClearVerificationAndLicense();
+                throw new SetupException("所选 Windows ISO 文件内容已发生变化（SHA-256 改变），已重置校验与许可，请重新校验架构并确认当前镜像的授权许可。");
+            }
+            if (!IsLicenseConfirmedForCurrent)
+                throw new SetupException("请先为当前已校验的 Windows 11 安装镜像确认并勾选持有合法有效的微软授权许可。");
         }
     }
 

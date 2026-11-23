@@ -452,7 +452,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 adsNext?.Title ?? "软件和网络已配置，请完成 AdsPower 登录后继续";
             state.Save();
             if (!state.DeferCheckpoint && o.NetworkSource != "稍后配置") WriteProtectionReport(state);
-            if (!state.DeferCheckpoint) JsonFile.Write(Paths.Under(o.Root, "acceptance.json"), new { dateUtc = DateTime.UtcNow, vmCreated = true, guestTools = true, softwareInstalled = true, networkPassed = state.NetworkPassed, outagePassed = state.OutagePassed, browserRuntimePassed=state.BrowserRuntimePassed, browserReopenPassed=state.BrowserReopenPassed, translationPassed=state.TranslationPassed, restartPassed=state.RestartPassed, browserAcceptance = "not-tested", claudeLoginAndConversation = "not-tested", status = state.Status });
+            if (!state.DeferCheckpoint) WriteAcceptanceReport(state);
             messages.Report(!o.ManualAdsPower && state.BrowserProfileConfigured
                 ? state.Stage + "。请在专用浏览器中完成实际联网和出口核验。"
                 : state.Stage + "。请按下方待办处理。");
@@ -506,6 +506,11 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         GuestEvidence.RequireCurrent(report.RootElement,state,runId);
         if (!report.RootElement.GetProperty("rollbackApplied").GetBoolean()) throw new SetupException("撤回未完成，代码：" + report.RootElement.GetProperty("code").GetString());
         state.NetworkPassed = false; state.OutagePassed = false; state.ApplicationAccepted = false; state.SetupFinished = false; state.Protection = new(); state.Status = "网络保护已撤回"; state.Stage = "来宾防火墙已恢复；外层通道已关闭，重新使用前需配置与验收"; state.Save();
+        if (!state.DeferCheckpoint && !string.IsNullOrWhiteSpace(state.Options.Root) && Directory.Exists(state.Options.Root))
+        {
+            WriteProtectionReport(state);
+            WriteAcceptanceReport(state);
+        }
         messages.Report(state.Stage);
     }
     public async Task RestoreHyperVConsole(SessionState state,CancellationToken token)

@@ -182,8 +182,11 @@ public sealed class UtmBackend(ICommandRunner? commandRunner = null, string? tes
 
     public async Task InstallWindows(SessionState state, Secrets secrets, CancellationToken token)
     {
+        await MacDeployment.RequireVerifiedIsoSha256Async(state.Options, "挂载安装介质前检测到", token);
         var appleSilicon = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64;
         var seed = await MacProvisioningMedia.EnsureSeedIsoAsync(state, secrets, appleSilicon, runner, token);
+        // Hold shared-read stream and re-verify SHA-256 AFTER seed generation and BEFORE writing UTM config.plist.
+        using var isoLock = MacDeployment.OpenAndVerifyIsoLock(state.Options.IsoPath, state.Options.IsoSha256, "生成 UTM 安装配置前检测到");
         var bundle = UtmBundleDirectory(state);
         Directory.CreateDirectory(Path.Combine(bundle, "Data"));
         var plist = BuildUtmConfigPlist(state, appleSilicon, GenerateLocallyAdministeredMac(), "disk0.qcow2", state.Options.IsoPath, seed);

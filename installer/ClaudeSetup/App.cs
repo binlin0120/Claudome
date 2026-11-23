@@ -36,9 +36,9 @@ public static class Program
                 try
                 {
                     window.PreviewTheme(false);
-                    foreach (var (name, route) in new[] { ("overview", -1), ("virtual-machines", -2), ("network", -3), ("downloads", -4), ("dual-protection", -5), ("platform-choice", 0), ("create-virtual-machine", 1), ("install-windows", 2), ("install-progress", 5) })
+                    foreach (var (name, route) in new[] { ("overview", -1), ("virtual-machines", -2), ("network", -3), ("downloads", -4), ("dual-protection", -5), ("storage-cleanup", -6), ("platform-choice", 0), ("create-virtual-machine", 1), ("install-windows", 2), ("install-progress", 5) })
                     {
-                        if (route == -1) window.Navigate(0); else if (route == -2) window.Navigate(2); else if (route == -3) window.Navigate(3); else if (route == -4) window.Navigate(4); else if (route == -5) window.Navigate(5); else window.Go(route);
+                        if (route == -1) window.Navigate(0); else if (route == -2) window.Navigate(2); else if (route == -3) window.Navigate(3); else if (route == -4) window.Navigate(4); else if (route == -5) window.Navigate(5); else if (route == -6) window.Navigate(8); else window.Go(route);
                         await Save(name);
                     }
                     await window.VerifyCustomerFeedbackUI(directory);
@@ -132,7 +132,11 @@ public sealed partial class SetupWindow : Window
         BuildPages(); ApplyRecommendedCpuIfNotCustom(); RefreshCreationFields(); RefreshHost(); if (restoreTask) RestoreLastTask(); Navigate(0);
         platform.SelectionChanged += (_, _) => { if (!refreshingPlatforms) platformInvalidations++; };
         InitializeTaskSaving(restoreTask);
-        if (restoreTask) Loaded += async (_, _) => await CheckForUpdatesAsync(interactive: false);
+        if (restoreTask) Loaded += async (_, _) =>
+        {
+            SurfacePendingUpdateArtifacts();
+            await CheckForUpdatesAsync(interactive: false);
+        };
     }
     private static SolidColorBrush Brush(string color)
     {
@@ -754,15 +758,147 @@ public sealed partial class SetupWindow : Window
             globalUpdateBanner.Visibility = Visibility.Visible;
         banner.Text = $"发现新版本 v{m.Version}，点击上方提示条即可直接在本地升级。";
     }
+    internal static (string Message, string ActionLabel, bool ClearErrorMarker)? DescribePendingUpdateNotice(SelfUpdater.PendingUpdateNotice pending)
+    {
+        if (pending.IsUpdateInProgress)
+        {
+            return (
+                "后台正在执行原地更新替换，请等待当前更新完成后再试。",
+                "",
+                false);
+        }
+        if (pending.IsRollbackIncomplete)
+        {
+            var filesText = pending.UnrecoveredFiles is { Length: > 0 }
+                ? string.Join("、", pending.UnrecoveredFiles)
+                : "部分核心文件";
+            return (
+                $"上次原地更新失败且回滚未完成，以下文件仍未恢复原版：{filesText}。关闭占用这些文件的程序后，点右侧按钮继续从本地备份恢复。",
+                "继续恢复原版",
+                false);
+        }
+        if (!string.IsNullOrWhiteSpace(pending.ErrorReason))
+        {
+            if (pending.IsOriginalGroupVerifiedRestored)
+            {
+                return (
+                    $"上次原地更新未完成，已核验原版程序及必需文件完整（{pending.ErrorReason}）。关闭占用文件后可点右侧按钮重试。",
+                    "重试检查更新",
+                    true);
+            }
+            return (
+                $"上次原地更新异常且未能确认原版完整（{pending.ErrorReason}）。请核实或点击右侧按钮继续恢复后重试。",
+                "继续恢复原版",
+                false);
+        }
+        if (!string.IsNullOrWhiteSpace(pending.DeferredFile))
+        {
+            return (
+                $"主程序已更新，但随包文件 {pending.DeferredFile} 上次被占用尚未替换。",
+                "补全随包文件",
+                false);
+        }
+        return null;
+    }
+
+    private void SurfacePendingUpdateArtifacts()
+    {
+        var appDir = Path.GetDirectoryName(Environment.ProcessPath ?? "") ?? AppContext.BaseDirectory;
+        var pending = SelfUpdater.ReadPendingUpdateNotice(appDir);
+        if (DescribePendingUpdateNotice(pending) is not { } display)
+            return;
+
+        updateStatusText.Text = display.Message;
+        if (globalUpdateBannerText is not null && globalUpdateBanner is not null && globalUpdateActionButton is not null)
+        {
+            globalUpdateBannerText.Text = display.Message;
+            if (string.IsNullOrEmpty(display.ActionLabel))
+            {
+                globalUpdateActionButton.Visibility = Visibility.Collapsed;
+            }
+            else
+            {
+                globalUpdateActionButton.Content = display.ActionLabel;
+                globalUpdateActionButton.Visibility = Visibility.Visible;
+            }
+            globalUpdateBanner.Visibility = Visibility.Visible;
+        }
+        banner.Text = display.Message;
+        if (display.ClearErrorMarker)
+            SelfUpdater.ClearUpdateErrorMarker(appDir);
+    }
+
     private async Task ApplyPendingOnlineUpdateAsync()
     {
-        if (pendingUpdateCheck is not { HasUpdate: true, Manifest: { } manifest } check) return;
+        var appDir = Path.GetDirectoryName(Environment.ProcessPath ?? "") ?? AppContext.BaseDirectory;
+        var pending = SelfUpdater.ReadPendingUpdateNotice(appDir);
+        if (pending.IsUpdateInProgress)
+        {
+            Notice("后台正在执行原地更新替换，请等待当前更新完成后再试。");
+            return;
+        }
+        if (pending.IsRollbackIncomplete)
+        {
+            try
+            {
+                var resumed = SelfUpdater.ResumePendingRollback(appDir);
+                updateStatusText.Text = resumed.Message;
+                banner.Text = resumed.Message;
+                if (resumed.Succeeded)
+                {
+                    if (globalUpdateBanner is not null) globalUpdateBanner.Visibility = Visibility.Collapsed;
+                }
+                else if (globalUpdateBannerText is not null && globalUpdateBanner is not null && globalUpdateActionButton is not null)
+                {
+                    globalUpdateBannerText.Text = resumed.Message;
+                    globalUpdateActionButton.Content = "继续恢复原版";
+                    globalUpdateBanner.Visibility = Visibility.Visible;
+                }
+                Notice(resumed.Message);
+                return;
+            }
+            catch (Exception ex) { Notice("继续恢复原版未成功：" + Redaction.SafeError(ex)); return; }
+        }
+        if (!string.IsNullOrWhiteSpace(pending.DeferredFile))
+        {
+            try
+            {
+                SelfUpdater.RetryDeferredSideFiles(appDir);
+                updateStatusText.Text = $"已补全更新随包文件（{pending.DeferredFile}）。";
+                if (globalUpdateBanner is not null) globalUpdateBanner.Visibility = Visibility.Collapsed;
+                Notice(updateStatusText.Text);
+                return;
+            }
+            catch (Exception ex) { Notice("补全随包文件未成功：" + Redaction.SafeError(ex)); return; }
+        }
+        if (pendingUpdateCheck is not { HasUpdate: true, Manifest: { } manifest } check)
+        {
+            if (SelfUpdater.TryGetPendingUpdateBlocker(appDir, out var blockerMsg))
+            {
+                Notice(blockerMsg);
+                return;
+            }
+            await CheckForUpdatesAsync(interactive: true);
+            return;
+        }
+        if (SelfUpdater.TryGetPendingUpdateBlocker(appDir, out var preDownloadBlocker))
+        {
+            Notice(preDownloadBlocker);
+            return;
+        }
         await ExecuteLocalSwapUpdateAsync(
             manifest.Version,
             (progressReporter, token) => SelfUpdater.DownloadAndStageAsync(manifest, check.DownloadUrl, SelfUpdater.CurrentVersion(), Path.GetTempPath(), progressReporter, token));
     }
     private async Task ApplyLocalZipUpdateAsync()
     {
+        var currentExe = Environment.ProcessPath;
+        var appDir = Path.GetDirectoryName(currentExe ?? "") ?? AppContext.BaseDirectory;
+        if (SelfUpdater.TryGetPendingUpdateBlocker(appDir, out var blockerMsg))
+        {
+            Notice(blockerMsg);
+            return;
+        }
         var dialog = new OpenFileDialog { Filter = "Claudome 更新包|Claudome_*_win-x64.zip|ZIP 压缩包|*.zip", Title = "选择新版 Claudome 安装包" };
         if (dialog.ShowDialog() != true) return;
         var current = SelfUpdater.CurrentVersion();
@@ -778,17 +914,22 @@ public sealed partial class SetupWindow : Window
         string? cleanupDirOnFailure = null)
     {
         if (busy) { Notice("当前正在执行部署或网络操作，请等待完成后再更新。"); return; }
-        var confirm = MessageBox.Show(this,
-            $"将验证并应用更新（{targetLabel}），随后自动重启 Claudome。\n\n• 你的虚拟机、磁盘和任务配置会完整保留；\n• 如果当前正在运行受控网络网关，重启期间会暂停网关保护，新版打开后重新连接即可。\n\n是否立即更新并重启？",
-            "确认原地更新", MessageBoxButton.YesNo, MessageBoxImage.Question);
-        if (confirm != MessageBoxResult.Yes) return;
-
         var currentExe = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(currentExe) || !File.Exists(currentExe))
         {
             Notice("当前未从独立 Claudome.exe 启动，无法执行原地文件替换。");
             return;
         }
+        var appDir = Path.GetDirectoryName(currentExe) ?? AppContext.BaseDirectory;
+        if (SelfUpdater.TryGetPendingUpdateBlocker(appDir, out var preBlockerMsg))
+        {
+            Notice(preBlockerMsg);
+            return;
+        }
+        var confirm = MessageBox.Show(this,
+            $"将验证并应用更新（{targetLabel}），随后自动重启 Claudome。\n\n• 你的虚拟机、磁盘和任务配置会完整保留；\n• 如果当前正在运行受控网络网关，重启期间会暂停网关保护，新版打开后重新连接即可。\n\n是否立即更新并重启？",
+            "确认原地更新", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes) return;
 
         SetUpdateButtonsEnabled(false);
         updateProgressBar.Visibility = Visibility.Visible;
@@ -805,6 +946,8 @@ public sealed partial class SetupWindow : Window
                 updateStatusText.Text = $"正在准备更新包… {pct:F0}%";
             });
             staged = await stagePackage(progressReporter, cts.Token);
+            if (SelfUpdater.TryGetPendingUpdateBlocker(appDir, out var postStageBlocker))
+                throw new SetupException(postStageBlocker);
             updateProgressBar.Value = 100;
             updateStatusText.Text = $"校验通过（v{staged.Version}），正在准备重启替换…";
 
@@ -825,7 +968,18 @@ public sealed partial class SetupWindow : Window
     }
     private void ShowReport()
     {
-        try { var path = Paths.Under(root.Text, "acceptance.json"); if (!File.Exists(path)) throw new SetupException("尚未生成实际验收报告。"); Notice(File.ReadAllText(path)); }
+        try
+        {
+            var path = Paths.Under(root.Text, "acceptance.json");
+            if (!File.Exists(path)) throw new SetupException("尚未生成实际验收报告。");
+            var reportText = File.ReadAllText(path);
+            using var doc = JsonDocument.Parse(reportText);
+            var claimedSuccess = (doc.RootElement.TryGetProperty("setupFinished", out var sf) && sf.GetBoolean()) ||
+                                 (doc.RootElement.TryGetProperty("browserAcceptance", out var ba) && ba.GetString() == "user-confirmed");
+            if (claimedSuccess && (!state.NetworkPassed || state.Protection.Browser.Status != CheckStatus.Passed || (!state.SetupFinished && doc.RootElement.TryGetProperty("setupFinished", out var sf2) && sf2.GetBoolean())))
+                throw new SetupException("检测到本地验收报告与当前防护状态不一致（可能已过期或复核未通过），请先重新核验当前防护。");
+            Notice(reportText);
+        }
         catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
     }
     private void Notice(string text) => MessageBox.Show(this, text, "Claudome", MessageBoxButton.OK, MessageBoxImage.Information);

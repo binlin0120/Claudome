@@ -1,7 +1,7 @@
 # Claudome · Claude 独立环境
 
-> **最新动态（2026-11-22）：** 仓库已正式命名为 **Claudome**（原名 `claude-environment-deploy` / `virtual-pc-setup`）。
-> - **Windows 桌面端已发布（`v0.4.8`）**：前往 [GitHub Releases](https://github.com/binlin0120/Claudome/releases) 下载 `Claudome_*_win-x64.zip`，解压后直接双击 `Claudome.exe` 启动（免装 Go / .NET / Codex）；首页「概览」直接内置「检查在线更新 / 从本地 ZIP 更新」并带全局顶部新版高亮提示条。
+> **最新动态（2026-11-23）：** 仓库已正式命名为 **Claudome**（原名 `claude-environment-deploy` / `virtual-pc-setup`）。
+> - **Windows 桌面端已发布（`v0.4.9`）**：前往 [GitHub Releases](https://github.com/binlin0120/Claudome/releases) 下载 `Claudome_*_win-x64.zip`，解压后直接双击 `Claudome.exe` 启动（免装 Go / .NET / Codex）；首页「概览」内置「检查在线更新 / 从本地 ZIP 更新」与「存储与备份清理」管理页（双端事务登记、三件完整回退组保护与首启 SHA-256 核验恢复）。
 > - **Mac 跨平台桌面端开发中**：源码已拆分跨平台核心 [Claudome.Core](installer/Claudome.Core/Claudome.Core.csproj)、`darwin/arm64` & `darwin/amd64` Go 网关及 [Claudome.Mac](installer/Claudome.Mac/Claudome.Mac.csproj) Avalonia 控制台骨架；待补全来宾一键编排并完成 Mac 真机联调后再发布 Mac 成品。
 > - **V11 Agent 辅助教程与脚本**：下方原有的 V11 中文填写模板、Codex Skill 及测试脚本继续完整保留（路径仍兼容 `skills/claude-environment-deploy/`）。先读 [第11版使用方法](docs/第11版使用方法.md) 与 [Claudome 开发说明](installer/README.md)。
 
@@ -9,7 +9,7 @@
 
 `Claudome`（原仓库名 `claude-environment-deploy` / `virtual-pc-setup`）提供双层网络隔离下的独立 Windows 环境搭建方案，用来配置网络、AdsPower 专用浏览器和所选 Claude 客户端。Windows 桌面端已接入 VirtualBox、Hyper-V 与 VMware Workstation 三条路线（另有 V11 Codex 辅助部署教程与脚本）；Mac 端按芯片提供 Fusion / UTM 教程与正在推进中的 `Claudome.Mac` 桌面端源码。
 
-**交付形态说明：** Windows x64 桌面端安装包已在 [Releases](https://github.com/binlin0120/Claudome/releases) 发布 **`v0.4.8`**（其中 VirtualBox 路线已完成多轮实机与 0.4.5 修复验收；Hyper-V 已于 `v0.4.6` 放开双向剪贴板开关并保留来宾磁盘/设备隔离策略，首页直接提供应用内本地原地更新与全局顶部新版横幅提示，三平台完整新机闭环及 Mac 路线仍在持续完善验收中）。Claude 模型仍在服务商处运行。
+**交付形态说明：** Windows x64 桌面端安装包已在 [Releases](https://github.com/binlin0120/Claudome/releases) 发布 **`v0.4.9`**（其中 VirtualBox 路线已完成多轮实机与 0.4.5 修复验收；Hyper-V 已于 `v0.4.6` 放开双向剪贴板开关并保留来宾磁盘/设备隔离策略；`v0.4.9` 补齐 Windows & Mac 存储/备份统一清理控制台与事务级原地更新首启核验/本地恢复闭环，三平台完整新机闭环及 Mac 路线仍在持续完善验收中）。Claude 模型仍在服务商处运行。
 
 **开源整理与最新基线：2026-11-22（V11 基线 2026-11-15）；许可证：[MIT](LICENSE)。** 桌面端详情见 [Claudome 开发说明](installer/README.md)；V11 中文流程首次使用读 [用户须知](01_用户须知.md)，准备工具读 [采购清单](02_采购清单与工具入口.md)，历史核验见 [首次发布核验](docs/发布核验_2026-11-12.md)。
 

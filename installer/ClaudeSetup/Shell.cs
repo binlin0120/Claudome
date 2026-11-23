@@ -14,8 +14,8 @@ namespace ClaudeSetup;
 public sealed partial class SetupWindow
 {
     private static readonly Brush Surface = Brush("#FFFFFF"), Line = Brush("#E5EAF0"), Canvas = Brush("#F4F6FA"), OnAccent = Brush("#FFFFFF");
-    private readonly string[] sections = ["概览", "安装环境", "我的虚拟机", "网络节点", "下载管理", "检测与修复", "本机资料", "虚拟机桌面"];
-    private readonly string[] glyphs = ["\uE80F", "\uE710", "\uE7F4", "\uE774", "\uE896", "\uE90F", "\uE77B", "\uE7F4"];
+    private readonly string[] sections = ["概览", "安装环境", "我的虚拟机", "网络节点", "下载管理", "检测与修复", "本机资料", "虚拟机桌面", "存储与清理"];
+    private readonly string[] glyphs = ["\uE80F", "\uE710", "\uE7F4", "\uE774", "\uE896", "\uE90F", "\uE77B", "\uE7F4", "\uE7B8"];
     private readonly WrapPanel steps = new() { Margin = new Thickness(0, 0, 0, 18) };
     private readonly TextBlock sectionBadge = new();
     private int section;
@@ -221,6 +221,7 @@ public sealed partial class SetupWindow
             case 5: DrawRecovery(); break;
             case 6: subtitle.Text = "账号和资料，按你的习惯保存。"; main.Children.Add(pages[4]); break;
             case 7: DrawDesktop();break;
+            case 8: DrawStorageCleanup(); break;
         }
         shellContentScroll?.ScrollToTop();
     }

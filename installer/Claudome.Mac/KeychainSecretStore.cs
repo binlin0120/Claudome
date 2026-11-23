@@ -210,23 +210,39 @@ public sealed class KeychainSecretStore(ICommandRunner? runner = null) : ISecret
         }
     }
 
-    public void PruneRevisions(SessionState committed, SessionState previous)
+    public void PruneRevisions(SessionState committed, SessionState previous) => PruneRevisions(committed, previous, null, null);
+
+    public void PruneRevisions(SessionState committed, SessionState previous, string? settingsPath, string? registryPath)
     {
         var o = committed.Options;
         if (!Directory.Exists(o.Private)) return;
-        var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (o.Remember)
+        if (previous.Options.Remember && !string.Equals(previous.CredentialsRevision, committed.CredentialsRevision, StringComparison.OrdinalIgnoreCase))
         {
-            keep.Add(CredentialsPath(o.Private, committed.CredentialsRevision));
-            if (previous.Options.Remember) keep.Add(CredentialsPath(o.Private, previous.CredentialsRevision));
+            var prevPath = CredentialsPath(o.Private, previous.CredentialsRevision);
+            if (File.Exists(prevPath))
+            {
+                StorageCleanupService.RegisterRecord(new BackupRegistryRecord
+                {
+                    Category = BackupCategory.RouteConfig,
+                    OwnerPlatform = "mac",
+                    SourceFeature = "线路与凭据版本",
+                    ScopeId = o.WorkspaceId,
+                    ScopeLabel = o.VmName,
+                    Path = Path.GetFullPath(prevPath),
+                    Role = "route-revision",
+                    OpState = BackupOpState.VerifiedSuccess,
+                    ReferencedBy = previous.CredentialsRevision,
+                    SizeBytes = new FileInfo(prevPath).Length
+                }, registryPath);
+            }
         }
-        foreach (var file in Directory.EnumerateFiles(o.Private, "credentials*.mac"))
-        {
-            var name = Path.GetFileNameWithoutExtension(file);
-            if (name != "credentials" && !(name.StartsWith("credentials-") &&
-                Guid.TryParseExact(name[12..], "N", out _))) continue;
-            Paths.RejectLinks(file);
-            if (!keep.Contains(file)) File.Delete(file);
-        }
+        var ctx = new StorageCleanupContext(
+            "mac",
+            Path.GetDirectoryName(Environment.ProcessPath ?? "") ?? AppContext.BaseDirectory,
+            Path.GetTempPath(),
+            [o.Root],
+            SettingsPath: settingsPath,
+            RegistryPath: registryPath);
+        StorageCleanupService.RotateAfterVerifiedSuccess(BackupCategory.RouteConfig, o.WorkspaceId, ctx);
     }
 }

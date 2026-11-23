@@ -607,6 +607,77 @@ public sealed partial class SetupWindow
         pendingUpdateCheck = null;
         if (!hasLocalUpdaterControls) failed++;
         rows.Add(new { name = "overview-exposes-in-place-local-updater-controls", passed = hasLocalUpdaterControls });
+
+        // WX03: protection-report.json and acceptance.json must stay synchronized across validation, browser confirm, finish, and revoke, without fabricating Claude login confirmation.
+        var syncDir = Path.Combine(directory, "report-sync-fixture");
+        Paths.EnsureWorkspace(syncDir);
+        var syncState = new SessionState
+        {
+            VmId = "33333333-3333-3333-3333-333333333333",
+            Options = new() { Root = syncDir, Country = "US" },
+            CoreConfigSha256 = new string('c', 64),
+            NetworkPassed = true,
+            OutagePassed = true,
+            BrowserRuntimePassed = true,
+            BrowserReopenPassed = true,
+            TranslationPassed = true,
+            Protection = new()
+            {
+                ConfigHash = new string('c', 64),
+                Boundary = new(CheckStatus.Passed),
+                Exit = new(CheckStatus.Passed),
+                Dns = new(CheckStatus.Passed)
+            }
+        };
+        Deployment.WriteProtectionReport(syncState);
+        Deployment.WriteAcceptanceReport(syncState);
+        syncState.Protection.Browser = new(CheckStatus.Passed, DateTime.UtcNow, "user-confirmed");
+        Deployment.WriteProtectionReport(syncState);
+        syncState.SetupFinished = true;
+        Deployment.WriteProtectionReport(syncState);
+        bool reportsSynchronized;
+        using (var protAfter = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Paths.Under(syncDir, "protection-report.json"))))
+        using (var accAfter = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Paths.Under(syncDir, "acceptance.json"))))
+        {
+            reportsSynchronized =
+                protAfter.RootElement.GetProperty("browserExit").GetProperty("status").GetString() == "Passed" &&
+                protAfter.RootElement.GetProperty("setupFinished").GetBoolean() &&
+                accAfter.RootElement.GetProperty("browserAcceptance").GetString() == "user-confirmed" &&
+                accAfter.RootElement.GetProperty("setupFinished").GetBoolean() &&
+                accAfter.RootElement.GetProperty("claudeLoginAndConversation").GetString() == "not-tested";
+        }
+        syncState.SetupFinished = false;
+        syncState.NetworkPassed = false;
+        syncState.Protection.Browser = new(CheckStatus.Unverified);
+        syncState.Protection.Exit = new(CheckStatus.Unverified);
+        Deployment.WriteProtectionReport(syncState);
+        Deployment.WriteAcceptanceReport(syncState);
+        using (var protRevoke = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Paths.Under(syncDir, "protection-report.json"))))
+        using (var accRevoke = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Paths.Under(syncDir, "acceptance.json"))))
+        {
+            reportsSynchronized &=
+                protRevoke.RootElement.GetProperty("browserExit").GetProperty("status").GetString() == "Unverified" &&
+                !protRevoke.RootElement.GetProperty("setupFinished").GetBoolean() &&
+                accRevoke.RootElement.GetProperty("browserAcceptance").GetString() == "not-tested" &&
+                !accRevoke.RootElement.GetProperty("setupFinished").GetBoolean();
+        }
+        Directory.Delete(syncDir, true);
+        if (!reportsSynchronized) failed++;
+        rows.Add(new { name = "protection-and-acceptance-reports-stay-synchronized-without-forging-claude-confirmation", passed = reportsSynchronized });
+
+        Navigate(8);
+        UpdateLayout();
+        var storageTexts = Descendants<TextBlock>(main).Select(t => t.Text).ToList();
+        var storageButtons = Descendants<Button>(main).Select(b => b.Content?.ToString() ?? "").ToList();
+        var storageUiReady = navigationButtons.Count == 9 &&
+            storageTexts.Any(t => t == "存储总览") &&
+            storageTexts.Any(t => t == "自动清理策略") &&
+            storageTexts.Any(t => t == "手动清理与保留明细") &&
+            storageButtons.Any(b => b.Contains("选择历史交付 ZIP 目录预览"));
+        Navigate(0);
+        if (!storageUiReady) failed++;
+        rows.Add(new { name = "storage-and-cleanup-page-exposes-overview-auto-policy-and-manual-preview", passed = storageUiReady });
+
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);
         JsonFile.Write(Path.Combine(directory, "customer-feedback-ui-tests.json"), new { type = "synthetic WPF visual captions; no VM deployment", passed = rows.Count - failed, failed, tests = rows });

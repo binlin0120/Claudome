@@ -119,7 +119,51 @@ public sealed partial class Deployment
             p.Dns.Status != CheckStatus.Failed;
     }
 
-    internal static void WriteProtectionReport(SessionState state) =>
+    internal static void WriteAcceptanceReport(SessionState state, bool claudeConversationConfirmed = false)
+    {
+        var path = Paths.Under(state.Options.Root, "acceptance.json");
+        var priorClaude = "not-tested";
+        if (!claudeConversationConfirmed && File.Exists(path))
+        {
+            try
+            {
+                using var existing = JsonDocument.Parse(File.ReadAllText(path));
+                if (existing.RootElement.TryGetProperty("claudeLoginAndConversation", out var prop) &&
+                    prop.GetString() == "user-confirmed" &&
+                    state.Protection.Browser.Status == CheckStatus.Passed &&
+                    state.NetworkPassed)
+                    priorClaude = "user-confirmed";
+            }
+            catch { }
+        }
+        var browserAcceptance = state.Protection.Browser.Status switch
+        {
+            CheckStatus.Passed => "user-confirmed",
+            CheckStatus.Failed => "failed",
+            _ => "not-tested"
+        };
+        JsonFile.Write(path, new
+        {
+            dateUtc = DateTime.UtcNow,
+            vmCreated = !string.IsNullOrEmpty(state.VmId),
+            guestTools = state.Completed.Contains("guest-ready"),
+            softwareInstalled = state.Completed.Contains("software"),
+            networkPassed = state.NetworkPassed,
+            outagePassed = state.OutagePassed,
+            browserRuntimePassed = state.BrowserRuntimePassed,
+            browserReopenPassed = state.BrowserReopenPassed,
+            translationPassed = state.TranslationPassed,
+            restartPassed = state.RestartPassed,
+            restartPending = state.RestartBootBefore.Length > 0,
+            browserAcceptance,
+            claudeLoginAndConversation = claudeConversationConfirmed ? "user-confirmed" : priorClaude,
+            setupFinished = state.SetupFinished,
+            status = state.Status
+        });
+    }
+
+    internal static void WriteProtectionReport(SessionState state)
+    {
         JsonFile.Write(Paths.Under(state.Options.Root, "protection-report.json"), new
         {
             checkedUtc = DateTime.UtcNow,
@@ -132,6 +176,9 @@ public sealed partial class Deployment
             blockAudit = state.Protection.BlockAuditNote,
             outage = SafeCheck(state.Protection.Outage)
         });
+        if (!state.DeferCheckpoint && File.Exists(Paths.Under(state.Options.Root, "acceptance.json")))
+            WriteAcceptanceReport(state);
+    }
 
     private static object SafeCheck(ProtectionCheck check) =>
         new { status = check.Status.ToString(), checkedUtc = check.CheckedUtc, evidence = check.Evidence };
@@ -203,6 +250,8 @@ public sealed partial class SetupWindow
         try
         {
             mutation();
+            Deployment.WriteProtectionReport(state);
+            if (!state.DeferCheckpoint) Deployment.WriteAcceptanceReport(state);
             state.Save();
         }
         catch
@@ -210,7 +259,6 @@ public sealed partial class SetupWindow
             state = snapshot;
             throw;
         }
-        Deployment.WriteProtectionReport(state);
     }
 
     private static string FormatCompletionHint(SessionState task, bool connected)

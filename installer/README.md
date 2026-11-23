@@ -4,7 +4,8 @@ Claudome 是 Claude 与 Dome（穹顶）的组合名，寓意为 Claude 提供�
 
 保留 Windows 来宾、Clash Verge Rev、TUN、来宾防火墙和 AdsPower 的原有部署模式。Windows 11 x64 安装器已接入 VirtualBox、Hyper-V、VMware Workstation 三条部署路径，共用资源校验、所选节点、断点继续及结果回读。客户无需 Codex、Go 或 .NET SDK。
 
-**当前版本为 `0.4.8`（2026-11-22）：Windows x64 桌面端已通过 GitHub Actions 构建并发布至 [Releases](https://github.com/binlin0120/Claudome/releases)；其中 VirtualBox 路线已完成多轮实机修复与续装验收，Hyper-V 与 VMware Workstation 三平台完整闭环及干净新机验收仍在持续补充。** 本轮 0.4.5 ~ 0.4.8 同步完成了：
+**当前版本为 `0.4.9`（2026-11-23）：Windows x64 桌面端已通过 GitHub Actions 构建并发布至 [Releases](https://github.com/binlin0120/Claudome/releases)；其中 VirtualBox 路线已完成多轮实机修复与续装验收，Hyper-V 与 VMware Workstation 三平台完整闭环及干净新机验收仍在持续补充。** 本轮 0.4.5 ~ 0.4.9 同步完成了：
+- **Windows / Mac `0.4.9` 存储与备份统一清理 + 原地更新事务恢复闭环**：新增跨平台 `StorageCleanup` 事务登记与「存储与备份清理」页面（预览/选择清理旧更新组、暂存目录、恢复归档、镜像校验，保留最近完整可用组与进行中事务）；强化 `SelfUpdater` 必需随包文件与主程序 SHA-256 首启校验、部分收尾幂等收敛及异常回退组本地恢复。
 - **Windows `0.4.7 / 0.4.8` 首页更新入口与全窗口提示**：将「版本与本地更新」卡片直接放在「概览」首页首屏可见，配合全窗口顶部新版高亮提示条与 [SelfUpdater.cs](Claudome.Core/SelfUpdater.cs)（SHA-256 校验、防降级、Zip-Slip 防护及本地 `.zip` 原地升级）。
 - **Windows `0.4.6` Hyper-V 双向剪贴板放开**：默认允许 Hyper-V 增强会话纯剪贴板同步，并在来宾 `Terminal Services` 策略中禁用宿主机磁盘驱动器映射（`fDisableCdm=1`）、USB/PnP、摄像头、打印机与音频重定向；桌面左侧开放与 VirtualBox 对齐的「关闭双向剪贴板 / 启用双向剪贴板」一键切换。
 - **Windows `0.4.5` 体验与稳定性修复**：可拖动缩放并支持 `Esc` 关闭的「外观与配色」弹窗；Windows 家庭版 + VirtualBox（NEM）多核提醒、25 秒 `0x0` 黑屏兜底横幅与一键恢复 1 核；启动网关前清理 `private` 下旧哈希 `ClaudeNetworkGateway.*.exe` 残留；节点测速与多选测速区分宿主机物理网卡与虚拟 TUN/代理接口。

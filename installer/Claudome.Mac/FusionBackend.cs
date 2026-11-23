@@ -150,10 +150,13 @@ public sealed class FusionBackend(ICommandRunner? commandRunner = null, string? 
 
     public async Task InstallWindows(SessionState state, Secrets secrets, CancellationToken token)
     {
+        await MacDeployment.RequireVerifiedIsoSha256Async(state.Options, "挂载安装介质前检测到", token);
         var appleSilicon = RuntimeInformationIsArm64();
         var seed = await MacProvisioningMedia.EnsureSeedIsoAsync(state, secrets, appleSilicon, runner, token);
         var vmx = VmxPath(state);
         var disk = Paths.Under(state.Options.VmDirectory, state.Options.VmName + ".vmdk");
+        // Hold a shared-read stream and re-verify SHA-256 AFTER seed generation and BEFORE writing .vmx so ISO swaps during seeding never write unverified configs.
+        using var isoLock = MacDeployment.OpenAndVerifyIsoLock(state.Options.IsoPath, state.Options.IsoSha256, "生成 Fusion 安装配置前检测到");
         await File.WriteAllTextAsync(vmx, BuildVmx(state, appleSilicon, disk, state.Options.IsoPath, seed), new UTF8Encoding(false), token);
         if (OperatingSystem.IsMacOS())
             await runner.Run(RequireVmrun(), ["-T", "fusion", "start", vmx], token, 60);

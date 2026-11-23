@@ -192,20 +192,25 @@ public sealed class MacHostEnvironment(ICommandRunner? runner = null) : IHostEnv
             await commandRunner.Run("hdiutil", ["attach", "-readonly", "-nobrowse", "-mountpoint", mountPoint, isoPath], token, 60);
             var hasArm64 = File.Exists(Path.Combine(mountPoint, "efi", "boot", "bootaa64.efi"));
             var hasX64 = File.Exists(Path.Combine(mountPoint, "efi", "boot", "bootx64.efi"));
-            if (expectArm64 && !hasArm64)
-                throw new SetupException(hasX64
-                    ? "你选择的是 x64 版 Windows ISO，不能在 Apple Silicon（M 系列）上原生安装。请改选 Windows 11 ARM64 官方 ISO。"
-                    : "未在 ISO 中识别到 ARM64 UEFI 引导文件（efi/boot/bootaa64.efi）。");
-            if (!expectArm64 && !hasX64)
-                throw new SetupException(hasArm64
-                    ? "你选择的是 ARM64 版 Windows ISO，与当前 Intel Mac 不匹配。请改选 Windows 11 x64 官方 ISO。"
-                    : "未在 ISO 中识别到 x64 UEFI 引导文件（efi/boot/bootx64.efi）。");
-            return expectArm64 ? "arm64" : "x64";
+            return RequireMatchingIsoBootFiles(expectArm64, hasArm64, hasX64);
         }
         finally
         {
             try { await commandRunner.Run("hdiutil", ["detach", mountPoint, "-force"], CancellationToken.None, 20); } catch { }
             try { if (Directory.Exists(mountPoint)) Directory.Delete(mountPoint, false); } catch { }
         }
+    }
+
+    internal static string RequireMatchingIsoBootFiles(bool expectArm64, bool hasArm64, bool hasX64)
+    {
+        if (expectArm64 && !hasArm64)
+            throw new SetupException(hasX64
+                ? "你选择的是 x64 版 Windows ISO，不能在 Apple Silicon（M 系列）上原生安装。请改选 Windows 11 ARM64 官方 ISO。"
+                : "未在 ISO 中识别到 ARM64 UEFI 引导文件（efi/boot/bootaa64.efi）。");
+        if (!expectArm64 && !hasX64)
+            throw new SetupException(hasArm64
+                ? "你选择的是 ARM64 版 Windows ISO，与当前 Intel Mac 不匹配。请改选 Windows 11 x64 官方 ISO。"
+                : "未在 ISO 中识别到 x64 UEFI 引导文件（efi/boot/bootx64.efi）。");
+        return expectArm64 ? "arm64" : "x64";
     }
 }

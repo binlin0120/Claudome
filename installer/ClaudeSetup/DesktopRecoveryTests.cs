@@ -56,5 +56,33 @@ public static class DesktopRecoveryTests
             JsonFile.Write(TaskCheckpointStore.BackupPath(state.Options.StatePath),foreign);
             try{JsonFile.Read<SessionState>(state.Options.StatePath);throw new Exception("Expected recovery identity failure");}catch(SetupException){}
         }));
+        await check("checkpoint-semantically-empty-or-null-primary-recovers-backup",()=>Sync(()=>{
+            var directory=Path.Combine(root,"checkpoint-semantic-corrupt");Paths.EnsureWorkspace(directory);
+            var state=new SessionState{VmId=id,Options=new SetupOptions{Root=directory}};state.Completed.Add("machine");state.Save();state.Completed.Add("windows-started");state.Save();
+            File.WriteAllText(state.Options.StatePath,"{\"schema\":1,\"options\":null}");
+            var recoveredFromNull=JsonFile.Read<SessionState>(state.Options.StatePath);
+            Assert(recoveredFromNull.VmId==id&&recoveredFromNull.Completed.Contains("machine")&&!recoveredFromNull.Completed.Contains("windows-started")&&recoveredFromNull.Status.Contains("恢复"),"null-options primary did not trigger backup recovery");
+            File.WriteAllText(state.Options.StatePath,"{\"schema\":1,\"options\":{\"Root\":\"\",\"VmName\":\"\",\"WorkspaceId\":\"\"}}");
+            var recoveredFromBlank=JsonFile.Read<SessionState>(state.Options.StatePath);
+            Assert(recoveredFromBlank.VmId==id&&recoveredFromBlank.Completed.Contains("machine")&&recoveredFromBlank.Status.Contains("恢复"),"empty-fields primary did not trigger backup recovery");
+            File.WriteAllText(TaskCheckpointStore.BackupPath(state.Options.StatePath),"{\"schema\":1,\"options\":null}");
+            try{JsonFile.Read<SessionState>(state.Options.StatePath);throw new Exception("Expected failure when both checkpoints are semantically invalid");}catch(SetupException){}
+
+            // WX02 / C05: Recover from semantically bad primary (empty VmName), save recovered state, then corrupt primary again -> backup MUST still be intact and recoverable!
+            var d2 = Path.Combine(root, "checkpoint-double-recovery"); Paths.EnsureWorkspace(d2);
+            var s2 = new SessionState { VmId = id, Options = new SetupOptions { Root = d2, VmName = "Win11Box" } };
+            s2.Completed.Add("machine"); s2.Save();
+            s2.Completed.Add("windows-started"); s2.Save();
+            var primaryTxt = File.ReadAllText(s2.Options.StatePath).Replace("\"VmName\": \"Win11Box\"", "\"VmName\": \"\"");
+            File.WriteAllText(s2.Options.StatePath, primaryTxt);
+            var firstRecovery = JsonFile.Read<SessionState>(s2.Options.StatePath);
+            Assert(firstRecovery.Options.VmName == "Win11Box" && firstRecovery.Completed.Contains("machine"), "first recovery failed");
+            firstRecovery.Save();
+            var backupStillValid = JsonSerializer.Deserialize<SessionState>(File.ReadAllText(TaskCheckpointStore.BackupPath(s2.Options.StatePath)), JsonFile.Format);
+            Assert(backupStillValid?.Options.VmName == "Win11Box", "saving recovered state overwrote good backup with semantically invalid primary");
+            File.WriteAllText(s2.Options.StatePath, "{\"broken\":");
+            var secondRecovery = JsonFile.Read<SessionState>(s2.Options.StatePath);
+            Assert(secondRecovery.Options.VmName == "Win11Box" && secondRecovery.Completed.Contains("machine"), "second recovery failed after first save");
+        }));
     }
 }
