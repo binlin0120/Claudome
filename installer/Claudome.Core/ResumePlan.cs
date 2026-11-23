@@ -14,14 +14,14 @@ public sealed record ResumePlan(bool CreateMachine,bool InstallWindows,string Re
         var title=state.Completed.Contains("guest-ready")?"恢复任务：继续来宾配置与验收":state.Completed.Contains("windows-started")?"恢复任务：等待原 Windows 安装与来宾工具":"恢复任务：继续准备 Windows 安装";
         return new(create,install,title);
     }
-    internal static bool CanResumeBrowser(SessionState state) =>
+    internal static bool CanResumeBrowser(SessionState state, bool checkSavedNetwork = false) =>
         Guid.TryParse(state.VmId, out _) && state.Options.NetworkSource != "稍后配置" &&
         // This checkpoint selects the next phase. The guest must still verify the live network.
         state.ClashConfigured && !string.IsNullOrEmpty(state.GuestSettingsStamp) &&
         new[] { "machine", "guest-ready", "media-cleanup", "recovery-cleanup", "guest-files", "software" }.All(state.Completed.Contains) &&
         state.PendingActions.Any(action => (IsBrowserHandoff(action) && action.Id is not ("outage-validation" or "browser-reopen")) ||
-            IsGuestNetworkProbe(action)) &&
-        state.PendingActions.All(action => IsBrowserHandoff(action) || IsGuestNetworkProbe(action));
+            IsGuestNetworkProbe(action) || (checkSavedNetwork && action.Id == "resume-network")) &&
+        state.PendingActions.All(action => IsBrowserHandoff(action) || IsGuestNetworkProbe(action) || (checkSavedNetwork && action.Id == "resume-network"));
 
     internal static bool IsBrowserHandoff(UserAction action) =>
         action.Id is "adspower" or "browser-active" or "browser-runtime" or "browser-reopen" or

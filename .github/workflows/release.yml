@@ -7,9 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag name (e.g. v0.4.9)'
+        description: 'Release tag matching the Windows project version (e.g. v0.4.10)'
         required: true
-        default: 'v0.4.9'
 
 permissions:
   contents: write
@@ -46,17 +45,23 @@ jobs:
       - name: Package release ZIP and SHA-256
         id: pkg
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
-          $ver = $tag.TrimStart('v')
+          $tag = $env:RELEASE_TAG
+          if ($tag -cnotmatch '^v\d+\.\d+\.\d+$') { throw 'Expected a version tag such as v0.4.10.' }
+          $ver = $tag.Substring(1)
           $pkgName = "Claudome_${ver}_win-x64"
           $outRoot = Join-Path $env:RUNNER_TEMP 'release-pkg'
           $stage = Join-Path $outRoot $pkgName
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
           $pub = 'installer/artifacts/Claudome-publish'
-          Copy-Item -LiteralPath (Join-Path $pub 'Claudome.exe') -Destination $stage
+          $exe = Join-Path $pub 'Claudome.exe'
+          $productVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path -LiteralPath $exe).Path).ProductVersion
+          if (($productVersion -split '\+', 2)[0] -cne $ver) { throw "Windows binary version $productVersion does not match $tag." }
+          Copy-Item -LiteralPath $exe -Destination $stage
           Copy-Item -LiteralPath (Join-Path $pub 'PROJECT-LICENSE.txt') -Destination $stage
           Copy-Item -LiteralPath (Join-Path $pub 'Gateway-THIRD-PARTY-NOTICES.txt') -Destination $stage
           Copy-Item -LiteralPath 'installer/快速开始.txt' -Destination $stage
@@ -96,12 +101,13 @@ jobs:
           tag_name: ${{ steps.pkg.outputs.tag }}
           name: Claudome ${{ steps.pkg.outputs.tag }} (Windows x64)
           generate_release_notes: true
+          fail_on_unmatched_files: true
           body: |
             ### 下载与使用说明（Windows 10 2004+ / Windows 11 x64）
 
             1. 点击下方 **`Claudome_*_win-x64.zip`** 下载并**完整解压**到一个本地文件夹，双击 `Claudome.exe` 启动。
             2. 若首次打开提示「Windows 已保护你的电脑」（未购买商业代码签名），点击 **「更多信息」→「仍要运行」**。
-            3. 已有旧版任务时，在概览页选择 **「载入已有环境」** 并选中原任务目录的 `setup-state.json` 即可续装。
+            3. 已安装旧版时，可在概览页点击 **「检查在线更新」** 并确认安装。也可手动解压新版，在概览页选择 **「载入已有环境」**，打开原任务目录下的 `setup-state.json` 继续。
 
             ### 文件校验（SHA-256）
             - ZIP: `${{ steps.pkg.outputs.zip_sha256 }}`

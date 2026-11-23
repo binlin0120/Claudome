@@ -38,7 +38,9 @@ function Enable-TaskVirtualTpm($Vm) {
             if(-not(Test-VMKeyProtectorPresent $Vm)){throw 'VM_KEY_PROTECTOR_SETUP_FAILED'}
         }catch{throw 'VM_KEY_PROTECTOR_SETUP_FAILED'}
     }
-    try{Enable-VMTPM -VM $Vm}catch{throw 'VM_TPM_ENABLE_FAILED'}
+    $script:tpmErrorHResult = $null
+    try { Enable-VMTPM -VM $Vm }
+    catch { $script:tpmErrorHResult = [int]$_.Exception.GetBaseException().HResult; throw 'VM_TPM_ENABLE_FAILED' }
 }
 function Guest-Session($Data,[switch]$Default) {
     $vm=Target-VM $Data
@@ -46,6 +48,152 @@ function Guest-Session($Data,[switch]$Default) {
     if ($Default) { return New-PSSession -VMId $vm.Id -Credential $cred -ErrorAction Stop }
     New-PSSession -VMId $vm.Id -Credential $cred -ConfigurationName 'PowerShell.7' -ErrorAction Stop
 }
+function Read-GuestBootstrap($Session, $VmId, $WorkspaceId, [bool]$NamedSession) {
+    Invoke-Command -Session $Session -ScriptBlock {
+        param($vmId, $workspaceId, $namedSession)
+        $setup = Get-ItemProperty 'HKLM:\SYSTEM\Setup'
+        if ([int]$setup.SystemSetupInProgress -ne 0 -or [int]$setup.OOBEInProgress -ne 0) { return 'WindowsSetup' }
+        $root = 'C:\ProgramData\ClaudeBootstrap'
+        $identityPath = Join-Path $root 'identity.json'
+        if (!(Test-Path -LiteralPath $identityPath -PathType Leaf)) { return 'BootstrapMissing' }
+        $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+        if ($identity.vmId -ne $vmId -or $identity.workspaceId -ne $workspaceId) { throw 'VM_SCOPE' }
+
+        $lockPath = Join-Path $root 'initialize.lock'
+        $running = $false
+        if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
+            try { $handle = [IO.File]::Open($lockPath, 'Open', 'Read', 'ReadWrite'); $handle.Dispose() }
+            catch [IO.IOException] { $running = $true }
+        }
+        $statusPath = Join-Path $root 'initialize-status.json'
+        if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+            $stream = [IO.File]::Open($statusPath, 'Open', 'Read', ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            try {
+                if ($stream.Length -gt 4096) { return 'StatusUnavailable' }
+                $statusReader = [IO.StreamReader]::new($stream)
+                try { $status = $statusReader.ReadToEnd() | ConvertFrom-Json }
+                finally { $statusReader.Dispose() }
+            } finally { $stream.Dispose() }
+            if ($status.vmId -ne $vmId -or $status.workspaceId -ne $workspaceId) { throw 'VM_SCOPE' }
+            $phase = switch ($status.phase) {
+                'prepare' { 'PreparingBootstrap' }
+                'remoting' { 'PreparingRemoting' }
+                'loopback' { 'PreparingLoopback' }
+                'endpoint' { 'VerifyingEndpoint' }
+                default { 'Initializing' }
+            }
+            if ($running) { return $phase }
+            if ($status.state -ne 'ready') { return ('Failed' + $phase) }
+        } elseif ($running) { return 'Initializing' }
+        else {
+            # A legacy first-logon script has no lock or progress record.
+            $legacyFile = Join-Path $root 'Initialize.ps1'
+            $legacyExe = Join-Path $root 'pwsh\pwsh.exe'
+            $legacy = @(Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.ExecutablePath -eq $legacyExe -and
+                    $_.CommandLine -and $_.CommandLine.IndexOf($legacyFile, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+            if ($legacy.Count) { return 'Initializing' }
+        }
+        if ($namedSession -and $PSVersionTable.PSVersion.Major -ge 7) { return 'Ready' }
+        return 'EndpointUnavailable'
+    } -ArgumentList $VmId, $WorkspaceId, $NamedSession
+}
+
+function Get-GuestSessionFailure($ErrorRecord) {
+    $cause = $ErrorRecord.Exception
+    while ($cause) {
+        if (($cause -is [ComponentModel.Win32Exception] -and $cause.NativeErrorCode -eq 1326) -or
+            $cause.HResult -in @(1326, -2147023570) -or
+            ($cause.PSObject.Properties['ErrorCode'] -and $cause.ErrorCode -in @(1326, -2147023570))) { return 'CredentialsRejected' }
+        $cause = $cause.InnerException
+    }
+    if ($ErrorRecord.CategoryInfo.Category -eq 'AuthenticationError') { return 'CredentialsRejected' }
+    if ($ErrorRecord.CategoryInfo.Category -eq 'PermissionDenied') { return 'AccessDenied' }
+    return 'SessionUnavailable'
+}
+
+function Get-HyperVGuestStatus($Data) {
+    $vm = Target-VM $Data
+    $named = $null
+    try { $named = Guest-Session $Data }
+    catch {
+        $failure = Get-GuestSessionFailure $_
+        if ($failure -ne 'SessionUnavailable') { return $failure }
+    }
+    if ($named) {
+        try { return Read-GuestBootstrap $named ([string]$vm.Id) ([string]$o.WorkspaceId) $true }
+        finally { Remove-PSSession $named }
+    }
+
+    try { $fallback = Guest-Session $Data -Default }
+    catch { return Get-GuestSessionFailure $_ }
+    try { return Read-GuestBootstrap $fallback ([string]$vm.Id) ([string]$o.WorkspaceId) $false }
+    finally { Remove-PSSession $fallback }
+}
+
+function Copy-VerifiedGuestResource($Session, $Data, $Source, [string]$UserName, [string]$Temporary) {
+    if ($Data.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or [long]$Data.size -le 0) { throw 'GUEST_COPY_INVALID' }
+    $destination = [string]$Data.destination
+    $script:copyStage = 'destination'
+    $alreadyPresent = Invoke-Command -Session $Session -ScriptBlock {
+        param($path, $user, $hash, $size)
+        $root = [IO.Path]::GetFullPath("C:\Users\$user\AppData\Local\ClaudeEnvironmentSetup")
+        if (![IO.Path]::IsPathFullyQualified($path) -or [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path)) -ne $root) { throw 'VM_SCOPE' }
+        if (!(Test-Path -LiteralPath $root -PathType Container)) { throw 'GUEST_COPY_DIRECTORY' }
+        for ($part = $root; $part; $part = [IO.Path]::GetDirectoryName($part)) {
+            if ((Get-Item -LiteralPath $part -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'VM_SCOPE' }
+        }
+        if (Test-Path -LiteralPath $path) {
+            $item = Get-Item -LiteralPath $path -Force
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'VM_SCOPE' }
+            if ($item.Length -eq $size -and (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $hash) { return $true }
+        }
+        if ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($path)).AvailableFreeSpace -lt $size) { throw 'GUEST_COPY_DISK_FULL' }
+        return $false
+    } -ArgumentList $destination, $UserName, ([string]$Data.sha256), ([long]$Data.size)
+    try {
+        if ($alreadyPresent) { return }
+        $script:copyStage = 'transfer'
+        Copy-Item -LiteralPath $Source -Destination $Temporary -ToSession $Session -Force
+        $script:copyStage = 'verify'
+        Invoke-Command -Session $Session -ScriptBlock {
+            param($temp, $path, $hash, $size)
+            $item = Get-Item -LiteralPath $temp -Force
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                $item.Length -ne $size -or (Get-FileHash -LiteralPath $temp -Algorithm SHA256).Hash -ne $hash) { throw 'GUEST_COPY_HASH' }
+            [IO.File]::Move($temp, $path, $true)
+        } -ArgumentList $temporary, $destination, ([string]$Data.sha256), ([long]$Data.size)
+    } finally {
+        if ($Session.State -eq 'Opened') {
+            try {
+                Invoke-Command -Session $Session -ScriptBlock {
+                    param($path)
+                    if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
+                } -ArgumentList $temporary
+            } catch { }
+        }
+    }
+}
+
+function Send-VerifiedGuestResource($Data, $Source) {
+    $temporary = [string]$Data.destination + '.claudome-transfer-' + [guid]::NewGuid().ToString('N') + '.tmp'
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $session = $null
+        try {
+            $script:copyStage = 'session'
+            $session = Guest-Session $Data
+            Copy-VerifiedGuestResource $session $Data $Source ([string]$o.UserName) $temporary
+            return
+        } catch {
+            $transport = $_.Exception
+            while ($transport -and $transport -isnot [Management.Automation.Remoting.PSRemotingTransportException]) {
+                $transport = $transport.InnerException
+            }
+            if ($attempt -ne 0 -or !$session -or (!$transport -and $session.State -notin 'Broken','Disconnected')) { throw }
+        } finally { if ($session) { Remove-PSSession $session } }
+    }
+}
+
 function Disable-HostMetadata($Vm) {
     $service=@(Get-VMIntegrationService -VM $Vm | Where-Object {$_.Id.ToString() -match '2a34b1c2-fd73-4043-8a5b-dd2159bc743f' -or $_.Name -match 'Key-Value|Data Exchange|数据交换|键值'})
     if($service.Count -ne 1){throw 'BOUNDARY_METADATA'}
@@ -354,7 +502,7 @@ function Apply-WindowsImageToNewDisk($vm,$checkpoint,$Data) {
   <OOBE><HideOnlineAccountScreens>true</HideOnlineAccountScreens><HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE></OOBE>
   <UserAccounts><LocalAccounts><LocalAccount wcm:action="add"><Password><Value>$encoded</Value><PlainText>false</PlainText></Password><Name>$name</Name><Group>Administrators</Group></LocalAccount></LocalAccounts></UserAccounts>
   <AutoLogon><Password><Value>$encoded</Value><PlainText>false</PlainText></Password><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>$name</Username></AutoLogon>
-  <FirstLogonCommands><SynchronousCommand wcm:action="add"><Order>1</Order><Description>Prepare local VM management</Description><CommandLine>C:\ProgramData\ClaudeBootstrap\pwsh\pwsh.exe -NoLogo -NoProfile -File C:\ProgramData\ClaudeBootstrap\Initialize.ps1</CommandLine></SynchronousCommand></FirstLogonCommands>
+  <FirstLogonCommands><SynchronousCommand wcm:action="add"><Order>1</Order><Description>Prepare local VM management</Description><CommandLine>C:\ProgramData\ClaudeBootstrap\pwsh\pwsh.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File C:\ProgramData\ClaudeBootstrap\Initialize.ps1</CommandLine></SynchronousCommand></FirstLogonCommands>
  </component></settings>
 </unattend>
 "@
@@ -393,9 +541,13 @@ try {
                     $edition=(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
                     if($edition -notmatch '^(Professional|Enterprise|Education)'){throw 'HYPERV_EDITION'}
                     $feature=Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
+                    if($feature.State -in @('EnablePending','DisablePending')){throw 'HYPERV_RESTART'}
                     if($feature.State -ne 'Enabled') {Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart | Out-Null;throw 'HYPERV_RESTART'}
-                    Import-Module Hyper-V -ErrorAction Stop
-                    if((Get-Service vmms).Status -ne 'Running'){throw 'HYPERV_NOT_READY'}
+                    try { Import-Module Hyper-V -ErrorAction Stop } catch { throw 'HYPERV_MODULE_UNAVAILABLE' }
+                    $service = Get-Service vmms -ErrorAction SilentlyContinue
+                    if (!$service) { throw 'HYPERV_VMMS_MISSING' }
+                    if ($service.StartType -eq 'Disabled') { throw 'HYPERV_VMMS_DISABLED' }
+                    if ($service.Status -ne 'Running') { throw 'HYPERV_VMMS_STOPPED' }
                     $value='ready'
                 } else {
                     Import-Module Hyper-V -ErrorAction Stop
@@ -491,33 +643,45 @@ try {
                             }finally{if($session){Remove-PSSession $session}}
                         }
                         'cleanup' {$null=Target-VM $d;$value='clean'}
+                        'ready' { $value = Get-HyperVGuestStatus $d }
                         'repair-guest-session' {
                             $vm = Target-VM $d
                             Assert-NoNetworkAdapter $vm
-                            $session = Guest-Session $d -Default
+                            try { $session = Guest-Session $d -Default }
+                            catch { $value = Get-GuestSessionFailure $_; break }
                             try {
+                                $value = Read-GuestBootstrap $session ([string]$vm.Id) ([string]$o.WorkspaceId) $false
+                                if ($value -ne 'EndpointUnavailable' -and $value -notlike 'Failed*') { break }
                                 $value = [string](Invoke-Command -Session $session -ScriptBlock {
-                                    param($vmId,$workspaceId,$bootstrap)
-                                    $root = 'C:\ProgramData\ClaudeBootstrap'
-                                    $identity = Get-Content -LiteralPath (Join-Path $root 'identity.json') -Raw | ConvertFrom-Json
-                                    if ($identity.vmId -ne $vmId -or $identity.workspaceId -ne $workspaceId) { throw 'VM_SCOPE' }
-                                    if ((Get-ItemProperty 'HKLM:\SYSTEM\Setup').SystemSetupInProgress -ne 0) { return $false }
-                                    $pwsh = Join-Path $root 'pwsh\pwsh.exe'
-                                    if (-not (Test-Path -LiteralPath $pwsh -PathType Leaf)) { return $false }
+                                    param($bootstrap)
+                                    $pwsh = 'C:\ProgramData\ClaudeBootstrap\pwsh\pwsh.exe'
+                                    if (!(Test-Path -LiteralPath $pwsh -PathType Leaf)) { return 'BootstrapMissing' }
                                     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
-                                    & $pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded *> $null
-                                    return ($LASTEXITCODE -eq 0)
-                                } -ArgumentList ([string]$vm.Id),([string]$o.WorkspaceId),([string]$d.bootstrap))
-                            } finally {
-                                Remove-PSSession $session
-                            }
+                                    & $pwsh -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded *> $null
+                                    if ($LASTEXITCODE -eq 0) { return 'EndpointUnavailable' }
+                                    if ($LASTEXITCODE -eq 2) { return 'Initializing' }
+                                    return 'RepairFailed'
+                                } -ArgumentList ([string]$d.bootstrap))
+                                if ($value -eq 'RepairFailed') {
+                                    $status = Read-GuestBootstrap $session ([string]$vm.Id) ([string]$o.WorkspaceId) $false
+                                    if ($status -like 'Failed*') { $value = $status }
+                                }
+                            } finally { Remove-PSSession $session }
                         }
-                        {$_ -in @('guest','ready','copy-to','copy-from','file-exists')} {
+                        {$_ -in @('guest','copy-to','copy-from','file-exists')} {
                             $session=$null
+                            $script:copyStage = 'session'
                             try {
+                                if ($_ -eq 'copy-to' -and $d.sha256) {
+                                    $script:copyStage = 'source'
+                                    $source = Assert-LocalPath ([string]$d.source) $o.Root
+                                    if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw 'GUEST_COPY_SOURCE' }
+                                    Send-VerifiedGuestResource $d $source
+                                    $value = 'copied'
+                                    break
+                                }
                                 $session=Guest-Session $d
-                                if($_ -eq 'ready'){$value=[string](Invoke-Command -Session $session -ScriptBlock {$PSVersionTable.PSVersion.Major -ge 7 -and (Get-ItemProperty 'HKLM:\SYSTEM\Setup').SystemSetupInProgress -eq 0})}
-                                elseif($_ -eq 'file-exists'){
+                                if($_ -eq 'file-exists'){
                                     $value=[string](Invoke-Command -Session $session -ScriptBlock {
                                         param($path)
                                         Test-Path -LiteralPath $path -PathType Leaf
@@ -531,11 +695,16 @@ try {
                                     } -ArgumentList ([string]$d.executable),@($d.arguments),([string]$d.interactiveScript),([string]$o.UserName),([string]$d.vmId),([string]$o.WorkspaceId),([int]$d.seconds)
                                     $value=[string]$result
                                 }elseif($_ -eq 'copy-to') {
+                                    $script:copyStage = 'source'
                                     $source=Assert-LocalPath ([string]$d.source) $o.Root
+                                    if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw 'GUEST_COPY_SOURCE' }
+                                    $script:copyStage = 'transfer'
                                     Copy-Item -LiteralPath $source -Destination ([string]$d.destination) -ToSession $session -Force
                                     $value='copied'
                                 }else {
+                                    $script:copyStage = 'destination'
                                     $dest=Assert-LocalPath ([string]$d.destination) $o.Root
+                                    $script:copyStage = 'transfer'
                                     Copy-Item -LiteralPath ([string]$d.source) -Destination $dest -FromSession $session -Force
                                     $value='copied'
                                 }
@@ -548,8 +717,16 @@ try {
             $response=@{ok=$true;value=[string]$value;code='OK'}
         }catch {
             $code=$_.Exception.Message
-            if($code -notin @('HYPERV_RESTART','HYPERV_EDITION','HYPERV_SWITCH','HYPERV_NOT_READY','VM_SCOPE','VM_COLLISION','DISK_SCOPE','HYPERV_DISK_RECOVERY','HYPERV_DISK_MOUNTED','WINDOWS_MEDIA_UNSUPPORTED','WINDOWS_IMAGE_APPLY_FAILED','WINDOWS_BOOT_FILES_FAILED','GUEST_COMMAND_FAILED','GUEST_SHUTDOWN_PENDING','BOUNDARY_NICS','BOUNDARY_SERVICE','BOUNDARY_METADATA','HYPERV_CONSOLE_CONSENT','HYPERV_CONSOLE_SHUTDOWN','HYPERV_CONSOLE_POLICY','GUEST_LOGIN_REQUIRED','VM_SECURITY','VM_KEY_PROTECTOR_READ_FAILED','VM_KEY_PROTECTOR_SETUP_FAILED','VM_TPM_ENABLE_FAILED','UNSUPPORTED_OPERATION')){$code='HYPERV_STEP_FAILED'}
+            if($code -notmatch '^(GUEST_BRIDGE_(2[0-9]|3[01])|GUEST_COPY_(INVALID|DIRECTORY|DISK_FULL|HASH|SOURCE)|HYPERV_(MODULE_UNAVAILABLE|VMMS_MISSING|VMMS_DISABLED|VMMS_STOPPED))$' -and $code -notin @('HYPERV_RESTART','HYPERV_EDITION','HYPERV_SWITCH','HYPERV_NOT_READY','VM_SCOPE','VM_COLLISION','DISK_SCOPE','HYPERV_DISK_RECOVERY','HYPERV_DISK_MOUNTED','WINDOWS_MEDIA_UNSUPPORTED','WINDOWS_IMAGE_APPLY_FAILED','WINDOWS_BOOT_FILES_FAILED','GUEST_COMMAND_FAILED','GUEST_SHUTDOWN_PENDING','BOUNDARY_NICS','BOUNDARY_SERVICE','BOUNDARY_METADATA','HYPERV_CONSOLE_CONSENT','HYPERV_CONSOLE_SHUTDOWN','HYPERV_CONSOLE_POLICY','GUEST_LOGIN_REQUIRED','VM_SECURITY','VM_KEY_PROTECTOR_READ_FAILED','VM_KEY_PROTECTOR_SETUP_FAILED','VM_TPM_ENABLE_FAILED','UNSUPPORTED_OPERATION')){$code='HYPERV_STEP_FAILED'}
             $response=@{ok=$false;value='';code=$code}
+            if($code -eq 'HYPERV_STEP_FAILED' -and $request.operation -in @('copy-to','copy-from')){
+                $response.copyErrorStage = $script:copyStage
+                $response.copyErrorCategory=[string]$_.CategoryInfo.Category
+                $response.copyErrorHResult=[int]$_.Exception.GetBaseException().HResult
+            }
+            if($code -eq 'VM_TPM_ENABLE_FAILED' -and $null -ne $script:tpmErrorHResult){
+                $response.tpmErrorHResult = $script:tpmErrorHResult
+            }
             if($request.operation -eq 'windows' -and $script:windowsInstallStage){
                 $response.windowsStage=$script:windowsInstallStage
                 if($null -ne $script:windowsNativeCode){

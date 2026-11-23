@@ -259,7 +259,7 @@ public sealed partial class SetupWindow
             main.Children.Add(Card(Text("还没有专属虚拟机", 20, false), Text("完成安装后，这里会出现你的 Windows 环境。\n已经装过？载入原任务即可继续管理。"), Row(Action("安装一个新环境", (_, _) => Go(0), true), Action("载入已有环境", (_, _) => LoadTask())))); return;
         }
         var status = state.Status;
-        main.Children.Add(Card(Text("WINDOWS / 专属环境", 11), Text(state.Options.VmName, 23, false), Text(status, 13), Text($"{state.Options.MemoryMb / 1024d:F0} GB 内存  ·  {state.Options.CpuCount} 个 CPU  ·  {state.Options.DiskGb} GB 虚拟磁盘", 11), Row(Action("进入虚拟机", async (_, _) => await EnterOriginalWorkspace(), true), Action(state.SetupFinished ? "检测与修复" : "继续安装 / 检查", (_, _) => { if(state.SetupFinished) Navigate(5); else Go(5); }), Action("打开存储目录", (_, _) => OpenWorkspace())), Text(state.SetupFinished ? "设置已完成。日常使用从这里进入原桌面。" : "已有安装进度会保留。完成配置与防护检查后可结束设置。", 11)));
+        main.Children.Add(Card(Text("WINDOWS / 专属环境", 11), Text(state.Options.VmName, 23, false), Text(status, 13), Text($"{state.Options.MemoryMb / 1024d:F0} GB 内存  ·  {state.Options.CpuCount} 个 CPU  ·  {state.Options.DiskGb} GB 虚拟磁盘", 11), Row(Action("进入虚拟机", async (_, _) => await EnterOriginalWorkspace(), true), Action(state.SetupFinished ? "检测与修复" : "继续安装 / 检查", (_, _) => { if(state.SetupFinished) Navigate(5); else Go(5); }), Action("打开存储目录", (_, _) => OpenWorkspace()), Action("新建独立环境任务", async (_, _) => await StartIndependentTask())), Text(state.SetupFinished ? "设置已完成。日常使用从这里进入原桌面。" : "已有安装进度会保留。完成配置与防护检查后可结束设置。", 11)));
     }
     private void DrawDownloads()
     {

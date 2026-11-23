@@ -54,8 +54,20 @@ public sealed partial class SetupWindow
     private void RefreshCreationFields()
     {
         var created=!string.IsNullOrEmpty(state.VmId);
-        foreach(var field in new[]{vmName,memory,cpu,disk,user})field.IsReadOnly=created;
-        root.IsReadOnly=created;
+        foreach (var field in new[] { vmName, memory, cpu, disk, user, root })
+        {
+            field.IsReadOnly = created;
+            if (created)
+            {
+                field.Background = Pale;
+                field.ToolTip = "原虚拟机的参数已锁定。可在「虚拟机」页新建独立环境。";
+            }
+            else
+            {
+                field.ClearValue(Control.BackgroundProperty);
+                field.ClearValue(FrameworkElement.ToolTipProperty);
+            }
+        }
         useCustomVmConfig.IsEnabled=!created;
         localGuestPasswordControls.Visibility = state.Options.UsesMicrosoftGuestAccount ? Visibility.Collapsed : Visibility.Visible;
         microsoftGuestPasswordHint.Visibility = state.Options.UsesMicrosoftGuestAccount ? Visibility.Visible : Visibility.Collapsed;

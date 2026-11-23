@@ -135,7 +135,7 @@ def main():
             pwsh = shutil.which("pwsh")
             if not pwsh:
                 raise RuntimeError("Developer offline PowerShell fixtures require PowerShell 7")
-            for name in ("HyperVPolicy", "InteractivePlan", "GuestSource", "ReleaseReview", "HyperVRecovery", "Alignment", "Experience"):
+            for name in ("HyperVPolicy", "InteractivePlan", "GuestSource", "ReleaseReview", "HyperVRecovery", "HyperVInitialization", "GuestBridge", "Alignment", "Experience"):
                 run([pwsh, "-NoLogo", "-NoProfile", "-File", BASE / "tests" / (name + ".Tests.ps1"), "-OutputDirectory", ARTIFACTS / "tests"], BASE)
             run([sys.executable, BASE / "tests" / "VBoxCliContract.py", "--output-directory", ARTIFACTS / "tests"], BASE)
         if args.ui_test:

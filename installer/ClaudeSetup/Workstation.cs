@@ -40,10 +40,22 @@ public sealed class Workstation(ICommandRunner? commandRunner = null, string? te
         File.Copy(candidate, local, true);
         var hash = await Downloader.Hash(local, token); if (hash != await Downloader.Hash(candidate, token)) throw new SetupException("安装器复制校验失败。");
         JsonFile.Write(Paths.Under(o.Private, "workstation-installer-verification.json"), new { sha256 = hash, signatureValid = true, publisher = signature.RootElement.GetProperty("subject").GetString(), integrityType = "publisher signature; local fingerprint", dateUtc = DateTime.UtcNow });
-        var exit = await WindowsHostEnvironment.ElevatedInstaller(local, ["/s", "/v", "/qn EULAS_AGREED=1 REBOOT=ReallySuppress"]);
+        int exit;
+        try { exit = await WindowsHostEnvironment.ElevatedInstaller(local, ["/s", "/v", "/qn EULAS_AGREED=1 REBOOT=ReallySuppress"]); }
+        catch (System.ComponentModel.Win32Exception error) when (error.NativeErrorCode is 5 or 1223)
+        {
+            throw WorkstationInstallerHandoff(error.NativeErrorCode);
+        }
+        if (exit is 5 or 1223) throw WorkstationInstallerHandoff(exit);
         if (exit is 3010 or 1641) throw new SetupException("Workstation 安装要求重启。请保存工作并自行重启，再载入任务继续。");
         if (exit != 0 || DirectoryPath() is null) throw new SetupException("Workstation 尚未安装完成，请查看管理员提示后继续。");
     }
+    private static HandoffException WorkstationInstallerHandoff(int code) => new(new(
+        code == 1223 ? "VMware Workstation 的管理员确认已取消" : "系统拒绝启动或执行 VMware Workstation 安装器",
+        ["确认本次 VMware 安装的管理员提示，并查看 Windows 安全软件或管理策略的阻止记录。",
+         "如自动安装仍受阻，请在宿主机用已核验发布者的官方安装器手动执行安装，完成后回到原任务继续。"],
+        "workstation-install-access"));
+
     public Task<string> EnsureMachine(SessionState s, CancellationToken token)
     {
         var marker = Paths.Under(s.Options.VmDirectory, ".claude-workspace.json");

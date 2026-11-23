@@ -2,11 +2,29 @@
 $ErrorActionPreference='Stop'
 if((Get-CimInstance Win32_ComputerSystem).Manufacturer -ne 'Microsoft Corporation' -or (Get-CimInstance Win32_ComputerSystem).Model -ne 'Virtual Machine'){exit 1}
 if(-not(Test-Path -LiteralPath 'C:\ProgramData\ClaudeBootstrap\identity.json')){exit 1}
+$root = 'C:\ProgramData\ClaudeBootstrap'
+$statusPath = Join-Path $root 'initialize-status.json'
+$identity = Get-Content -LiteralPath (Join-Path $root 'identity.json') -Raw | ConvertFrom-Json
+if (-not $identity.vmId -or -not $identity.workspaceId) { exit 1 }
+try { $initializeLock = [IO.File]::Open((Join-Path $root 'initialize.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
+catch [IO.IOException] { exit 2 }
+
+function Write-InitializeStatus([string]$State, [string]$Phase) {
+    $status = @{
+        vmId = $identity.vmId; workspaceId = $identity.workspaceId
+        state = $State; phase = $Phase; timeUtc = [datetime]::UtcNow
+    } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($statusPath + '.new', $status)
+    [IO.File]::Move($statusPath + '.new', $statusPath, $true)
+}
+
 $guard = 'ClaudomeBootstrap-WinRM-Guard'
 $listenerUri = 'winrm/config/listener'
 $loopback = @('IP:127.0.0.1', 'IP:::1')
 $created = [Collections.Generic.List[string]]::new()
 try {
+    $phase = 'prepare'
+    Write-InitializeStatus 'running' $phase
     # Keep WinRM blocked while Enable-PSRemoting provisions the named endpoint.
     $rule = Get-NetFirewallRule -Name $guard -ErrorAction SilentlyContinue
     if ($rule) { $rule | Enable-NetFirewallRule }
@@ -18,7 +36,11 @@ try {
     Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name DefaultPassword -ErrorAction SilentlyContinue
     @('C:\Windows\Panther\unattend.xml','C:\Windows\Panther\Unattend\unattend.xml') | ForEach-Object {if(Test-Path -LiteralPath $_){Remove-Item -LiteralPath $_ -Force}}
     Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name AutoAdminLogon -Value '0'
+    $phase = 'remoting'
+    Write-InitializeStatus 'running' $phase
     Enable-PSRemoting -Force -SkipNetworkProfileCheck *> $null
+    $phase = 'loopback'
+    Write-InitializeStatus 'running' $phase
     Get-NetFirewallRule -Name 'WINRM*' -ErrorAction SilentlyContinue | Disable-NetFirewallRule
     Get-ChildItem WSMan:\localhost\Listener | Remove-Item -Recurse -Force
     # Named PowerShell Direct sessions use local WinRM inside the guest.
@@ -34,9 +56,15 @@ try {
     $addresses = @($listeners | ForEach-Object { [string]$_.Address })
     if ($listeners.Count -ne $loopback.Count -or $invalid.Count -or
         $addresses -notcontains $loopback[0] -or $addresses -notcontains $loopback[1]) { throw 'GUEST_WINRM_SCOPE' }
-    Remove-NetFirewallRule -Name $guard
+    $phase = 'endpoint'
+    Write-InitializeStatus 'running' $phase
+    $endpoint = Get-PSSessionConfiguration -Name 'PowerShell.7' -ErrorAction SilentlyContinue
+    if (!$endpoint -or [string]$endpoint.Enabled -eq 'False') { throw 'GUEST_PWSH_ENDPOINT' }
     $null = Test-WSMan -ComputerName localhost
+    Remove-NetFirewallRule -Name $guard
+    Write-InitializeStatus 'ready' $phase
 } catch {
+    try { Write-InitializeStatus 'failed' $phase } catch { }
     foreach ($address in $created) {
         Remove-WSManInstance -ResourceURI $listenerUri -SelectorSet @{Address=$address;Transport='HTTP'} -ErrorAction SilentlyContinue
     }
@@ -45,4 +73,6 @@ try {
         Where-Object { $_.Keys -notcontains 'Address=IP:127.0.0.1' -and $_.Keys -notcontains 'Address=IP:::1' } |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     exit 1
+} finally {
+    $initializeLock.Dispose()
 }

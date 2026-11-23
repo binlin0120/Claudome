@@ -378,19 +378,19 @@ public sealed partial class SetupWindow : Window
         }
         finally { busy = false; if (!string.IsNullOrEmpty(state.VmId)) { updatingCpuRecommendation = true; try { cpu.Text = state.Options.CpuCount.ToString(); memory.Text = state.Options.MemoryMb.ToString(); useCustomVmConfig.IsChecked = state.Options.ManualCpuConfirmed; } finally { updatingCpuRecommendation = false; } } SaveCurrentTask();progress.IsIndeterminate=false; AllowEditing(true); cancellation?.Dispose(); cancellation = null; RefreshHost(); RefreshPending(); CompleteCloseAfterPause(); }
     }
-    private async Task StartInstall(bool applyRoute = false)
+    private async Task StartInstall(bool applyRoute = false, bool checkSavedNetwork = false, bool reconfigureGuestNetwork = false)
     {
         if (installationFinished is not null || recoveringDisplay) return;
         var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         installationFinished = finished;
         try
         {
-            if (state.SetupFinished && !applyRoute)
+            if (state.SetupFinished && !applyRoute && !checkSavedNetwork && !reconfigureGuestNetwork)
             {
                 await EnterOriginalWorkspace();
                 return;
             }
-            await Perform((o, token) => InstallOriginalTask(o, token, applyRoute));
+            await Perform((o, token) => InstallOriginalTask(o, token, applyRoute, checkSavedNetwork, reconfigureGuestNetwork));
         }
         finally
         {
@@ -400,7 +400,7 @@ public sealed partial class SetupWindow : Window
         }
     }
 
-    private async Task InstallOriginalTask(SetupOptions o, CancellationToken token, bool applyRoute)
+    private async Task InstallOriginalTask(SetupOptions o, CancellationToken token, bool applyRoute, bool checkSavedNetwork, bool reconfigureGuestNetwork)
     {
         var secrets = ReadSecrets();
         secrets.BackupRoutes = [.. (pendingBackupRoutes ?? appliedSecrets?.BackupRoutes ?? [])];
@@ -456,7 +456,7 @@ public sealed partial class SetupWindow : Window
             desktopConnectionCancellation?.Cancel();
             lastConsoleWindow = null;
         }
-        await Engine().Run(state, secrets, token, preserveUnloadedSecrets: !secretsLoaded);
+        await Engine().Run(state, secrets, token, preserveUnloadedSecrets: !secretsLoaded, checkSavedNetwork: checkSavedNetwork, reconfigureGuestNetwork: reconfigureGuestNetwork);
         secretsLoaded = true;
         RememberAppliedSecrets(secrets);
         var adsPending = state.PendingActions.FirstOrDefault(action => action.Id is "adspower" or "browser-active" or CustomerGuide.ManualAdsPowerId);
@@ -551,6 +551,35 @@ public sealed partial class SetupWindow : Window
         }
         catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
     }
+    private async Task StartIndependentTask()
+    {
+        if (busy || installationFinished is not null || recoveringDisplay || string.IsNullOrEmpty(state.VmId)) return;
+        var previous = state;
+        if (MessageBox.Show(this,
+            "将保存当前任务并暂停其受控连接，然后打开独立的新建向导。旧虚拟机、磁盘和任务记录会保留。若原 ISO 仍在，将预填路径供重新核验。继续吗？",
+            "新建独立环境任务", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        if (!SaveCurrentTask(showFailure: true)) return;
+
+        busy = true;
+        try
+        {
+            desktopTimer.Stop();
+            desktopConnectionCancellation?.Cancel();
+            await BoundaryRuntime.StopFor(previous);
+            var options = new SetupOptions();
+            var suffix = options.WorkspaceId[..8];
+            options.Root = Path.Combine(Path.GetDirectoryName(previous.Options.Root) ?? options.Root, $"ClaudeWorkspace-{suffix}");
+            options.VmName = $"Claude-Workspace-{suffix}";
+            if (File.Exists(previous.Options.IsoPath)) options.IsoPath = previous.Options.IsoPath;
+            ApplyLoadedTask(new SessionState { Options = options }, loadSecrets: false);
+            log.Clear();
+            Go(0);
+            banner.Text = "已打开新任务。请选择独立目录并重新核对镜像和安装选项。";
+        }
+        catch (Exception error) { Notice(Redaction.SafeError(error)); }
+        finally { busy = false; CompleteCloseAfterPause(); }
+    }
+
     private void LoadTask(string? selectedPath = null, bool loadSecrets = true, bool interactive = true)
     {
         try

@@ -42,7 +42,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         }
     }
     private void Stage(SessionState state, string title) { state.Stage = title; state.Status = "进行中"; state.Save(); messages.Report(title); installation?.Report(new(title)); }
-    public async Task Run(SessionState state, Secrets secrets, CancellationToken token, bool preserveUnloadedSecrets = false)
+    public async Task Run(SessionState state, Secrets secrets, CancellationToken token, bool preserveUnloadedSecrets = false, bool checkSavedNetwork = false, bool reconfigureGuestNetwork = false)
     {
         var o = state.Options;
         try { IsolationPolicy.RequireSupportedPlatform(state); }
@@ -50,8 +50,8 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         var previousBackend=BoundaryRuntime.BackendFor(state);
         var box = previousBackend ?? Backends.Create(o.PlatformId, installation); var retained = previousBackend is not null; BridgeSpec? bridge = null; BusPacketRelay? relay = null;
         var plan=ResumePlan.For(state);
-        var browserCheckpoint = ResumePlan.CanResumeBrowser(state);
-        var recheckNetworkFirst = o.ManualAdsPower || state.PendingActions.Any(ResumePlan.IsGuestNetworkProbe);
+        var browserCheckpoint = ResumePlan.CanResumeBrowser(state, checkSavedNetwork);
+        var recheckNetworkFirst = checkSavedNetwork || o.ManualAdsPower || state.PendingActions.Any(ResumePlan.IsGuestNetworkProbe);
         o.Validate(plan.InstallWindows);
         if(plan.InstallWindows) WindowsMedia.RequireSelected(o,o.IsoSha256);
         if (!o.AcceptChanges || (plan.InstallWindows && !o.AcceptWindowsLicense)) throw new SetupException("开始前请确认安装范围，以及所选 Windows 的许可与授权。");
@@ -154,8 +154,10 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 else await BusBoundary.VerifyOffline(box, state, token);
             }
             var settingsStamp = ResumePlan.SettingsStamp(o, state.CoreConfigSha256);
-            var resumeNetwork = !state.DeferCheckpoint && state.ClashConfigured && state.GuestSettingsStamp == settingsStamp;
+            var resumeNetwork = !reconfigureGuestNetwork && !state.DeferCheckpoint && state.ClashConfigured && state.GuestSettingsStamp == settingsStamp;
             var resumeBrowser = state.BrowserProfileConfigured && state.GuestSettingsStamp == settingsStamp;
+            if (checkSavedNetwork && (!browserCheckpoint || !resumeNetwork))
+                throw new SetupException("本任务缺少可回读的网络检查点，请使用「重新配置本任务网络」。");
             var continueBrowser = browserCheckpoint && resumeNetwork;
             var refreshGuestScripts = continueBrowser || state.GuestFilesStamp != resourceStamp || !state.Completed.Contains("guest-files");
             if (plan.InstallWindows)
@@ -174,7 +176,10 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 var ready = false; var waiting = System.Diagnostics.Stopwatch.StartNew();
                 var runningLoss = 0; var authFailures = 0; var unreadableStatusChecks = 0;
                 var additionsNotified = false; var loginCheckReported = false;
-                for (var i = 0; i < 240; i++)
+                var repairAttempted = false;
+                var hyperVStatus = HyperVGuestStatus.StatusUnavailable;
+                var postRepairChecks = 0;
+                for (var i = 0; i < 240 && (box is not HyperV || waiting.Elapsed < TimeSpan.FromMinutes(40)); i++)
                 {
                     token.ThrowIfCancellationRequested();
                     if(o.NetworkSource!="稍后配置")BoundaryRuntime.Require(state);
@@ -243,31 +248,57 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                             await Task.Delay(TimeSpan.FromSeconds(10), token);
                             continue;
                         }
-                        else
+                        else if (box is HyperV hyperV)
                         {
-                            if (await box.GuestReady(state, secrets, token)) { ready = true; break; }
-                            if (i == 0 && !plan.InstallWindows && box is HyperV hyperV &&
-                                await hyperV.TryRepairGuestSession(state, secrets, token) &&
-                                await box.GuestReady(state, secrets, token))
+                            hyperVStatus = await hyperV.ReadGuestStatus(state, secrets, token);
+                            if (hyperVStatus == HyperVGuestStatus.Ready) { ready = true; break; }
+                            var detail = HyperV.DescribeGuestStatus(hyperVStatus);
+                            installation?.Report(new($"4 / 7  {detail} · 已等待 {waiting.Elapsed.TotalMinutes:F1} 分钟"));
+
+                            if (hyperVStatus == HyperVGuestStatus.CredentialsRejected)
+                                throw new HandoffException(new("需要同步虚拟机 Windows 登录账号与密码",
+                                    [detail + "。请在来宾内核对原 Windows 登录账号，再使用左侧「同步虚拟机账号密码」。"], "guest-auth-sync"));
+                            if (hyperVStatus is HyperVGuestStatus.AccessDenied or HyperVGuestStatus.BootstrapMissing)
+                                break;
+
+                            if (HyperV.CanRepairGuestStatus(hyperVStatus))
                             {
-                                ready = true;
+                                if (!repairAttempted)
+                                {
+                                    repairAttempted = true;
+                                    installation?.Report(new("4 / 7  正在修复原虚拟机的 PowerShell.7 会话"));
+                                    hyperVStatus = await hyperV.TryRepairGuestSession(state, secrets, token);
+                                    if (hyperVStatus == HyperVGuestStatus.CredentialsRejected)
+                                        throw new HandoffException(new("需要同步虚拟机 Windows 登录账号与密码",
+                                            ["来宾 Windows 登录凭据未通过验证，请使用左侧「同步虚拟机账号密码」。"], "guest-auth-sync"));
+                                    if (hyperVStatus is not (HyperVGuestStatus.EndpointUnavailable or HyperVGuestStatus.Initializing))
+                                        break;
+                                }
+                                else if (++postRepairChecks >= 2)
+                                {
+                                    break;
+                                }
+                            }
+                            else if (!plan.InstallWindows && hyperVStatus == HyperVGuestStatus.SessionUnavailable &&
+                                     waiting.Elapsed >= TimeSpan.FromMinutes(2))
+                            {
                                 break;
                             }
                         }
+                        else if (await box.GuestReady(state, secrets, token)) { ready = true; break; }
                     }
                     else if (++runningLoss >= 3)
                         throw new OperationCanceledException("连续三次未检测到虚拟机运行，任务已保存并暂停。");
                     else
                         installation?.Report(new("4 / 7  暂未检测到虚拟机运行，正在等待重新启动或继续。"));
-                    if(i%3==0) installation?.Report(new($"4 / 7  等待 Windows 和来宾工具 · 已等待 {waiting.Elapsed.TotalMinutes:F1} 分钟，可在虚拟机窗口查看安装进度"));
+                    if(box is not HyperV && i%3==0) installation?.Report(new($"4 / 7  等待 Windows 和来宾工具 · 已等待 {waiting.Elapsed.TotalMinutes:F1} 分钟，可在虚拟机窗口查看安装进度"));
                     await Task.Delay(TimeSpan.FromSeconds(10), token);
                 }
                 state.AwaitingGuestTools = false;
                 if (!ready && box is HyperV)
-                    throw new HandoffException(new("Hyper-V 来宾会话尚未就绪",
-                        ["请在原虚拟机中确认 Windows 已完成首次设置并进入桌面。",
-                         "如由手动设置创建了不同账号，先同步来宾 Windows 账号和密码，再继续原任务。",
-                         "如果仍然停在本步骤，请检查来宾的 Hyper-V PowerShell Direct 服务和 PowerShell.7 会话。"], "guest-wait"));
+                    throw new HandoffException(new("Hyper-V 来宾初始化尚未完成",
+                        [HyperV.DescribeGuestStatus(hyperVStatus) + "。",
+                         "请在原虚拟机中确认 Windows 首次设置及来宾 PowerShell Direct 状态，再继续原任务。"], "guest-wait"));
                 if(!ready)throw new HandoffException(new("Windows 或来宾工具尚未就绪",["打开程序内的虚拟机桌面，确认 Windows 安装是否完成。安装中继续等待，不要反复重建虚拟机。","如已进入桌面但尚未安装来宾工具，请在虚拟机内打开「此电脑」双击 VirtualBox Guest Additions 运行 VBoxWindowsAdditions.exe。","如手动设置了不同的账号密码，点击左侧「同步虚拟机账号密码」后继续。"],"guest-wait"));
                 state.PendingActions.RemoveAll(a => a.Id is "guest-wait" or "guest-auth-sync" or "guest-status-unreadable");
                 if (!state.Completed.Contains("guest-ready")) state.Completed.Add("guest-ready"); state.Save();
@@ -297,15 +328,32 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             var resources = await PrepareGuestPackages(box, state, secrets, guestRoot, continueBrowser, token);
             if (bridge is not null) {
                 Stage(state, "5 / 7  安装并验证来宾受控网络通道");
-                try { await BusBoundary.InstallGuest(box, state, secrets, bridge, token); }
-                catch (HandoffException) { throw; }
-                catch (SetupException) { throw new HandoffException(new("确认来宾网络组件安装", ["打开本任务的虚拟机，处理仍在等待的管理员确认。", "确认 VMware Tools 或 Hyper-V 来宾服务已完成启动，再回到助手继续；程序会保留原环境并重试。"], "guest-bridge")); }
+                if (await BusBoundary.TryReuseConnectedGuest(box, state, secrets, () => relay?.IsConnected == true, token))
+                    messages.Report("已核验并复用原来宾网络组件。");
+                else
+                {
+                    try { await BusBoundary.InstallGuest(box, state, secrets, bridge, token); }
+                    catch (HandoffException) { throw; }
+                    catch (SetupException error)
+                    {
+                        var detail = Redaction.SafeError(error);
+                        messages.Report(detail);
+                        throw new HandoffException(new("来宾网络组件安装未完成",
+                            [detail, "请按提示检查原虚拟机，处理完成后继续原任务。"], "guest-bridge"));
+                    }
+                }
                 for (var i=0; relay?.IsConnected != true && i<15; i++) await Task.Delay(1000,token);
                 if (relay?.IsConnected != true) throw new SetupException("来宾网络通道尚未完成双向认证，未继续配置代理。");
                 await BoundaryRuntime.VerifyCurrent(state, token);
             }
             TimeZoneInfo.TryConvertWindowsIdToIanaId(o.TimeZoneId, o.Country, out var ianaTimeZone);
-            if(state.GuestSettingsStamp!=settingsStamp) { state.OutagePassed=false;state.RestartPassed=false;state.RestartBootBefore=""; }
+            if(state.GuestSettingsStamp!=settingsStamp || reconfigureGuestNetwork) { state.OutagePassed=false;state.RestartPassed=false;state.RestartBootBefore=""; }
+            if (reconfigureGuestNetwork)
+            {
+                state.SetupFinished = false;
+                state.ApplicationAccepted = false;
+                state.Save();
+            }
             var runId=Guid.NewGuid().ToString("N");
             var guestPayload = guestRoot + $@"\payload-{runId}.json";
             var payload = JsonSerializer.Serialize(new { runId, platformId = o.PlatformId, workspaceId = o.WorkspaceId, sharedClipboardEnabled = o.SharedClipboardEnabled, manualAdsPower = o.ManualAdsPower, adsPowerApiKey = o.ManualAdsPower ? "" : secrets.AdsPowerApiKey, ianaTimeZone, vmId = state.VmId, country = o.Country, timeZoneId = o.TimeZoneId, networkEnabled = o.NetworkSource != "稍后配置", externalGateway = true, transportKind = o.PlatformId == "virtualbox" ? "ethernet" : "bus", coreConfig = config, endpointAddresses = addresses, endpointPort = port, expectedExitIp = secrets.ExpectedExitIp, testOutage = o.TestOutage && !state.OutagePassed, resumeNetwork, resumeBrowser, browserOnly = continueBrowser, resumeReopenPassed=state.BrowserReopenPassed, coreConfigSha256=state.CoreConfigSha256, resources = resources.Select(r => new { id = r.Id, fileName = r.FileName, sha256 = r.Sha256 }) });
@@ -374,6 +422,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                     "VC_RUNTIME_INSTALL_FAILED" => "来宾微软 VC++ x64 运行库安装失败",
                     "VC_RUNTIME_READBACK_FAILED" => "来宾微软 VC++ x64 安装已返回，但运行库回读仍未通过",
                     "CLASH_SERVICE_INSTALL_WAITING" => "Clash 后台服务登记尚未结束，请检查虚拟机内的提示",
+                    "RESUME_NETWORK_REVIEW_REQUIRED" => "已保存的来宾网络需要检查，请查看待办中的具体原因",
                     "CLASH_SERVICE_INSTALLER_MISSING" => "已检测到 Clash Verge，但其后台服务安装组件缺失",
                     "CLASH_SERVICE_INSTALL_REQUIRED" => "应用安装已完成，Clash 后台服务登记失败",
                     "CLASH_SERVICE_START_FAILED" or "CLASH_SERVICE_NOT_RUNNING" => "Clash 后台服务未进入运行状态",

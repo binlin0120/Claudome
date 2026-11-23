@@ -24,7 +24,16 @@ public sealed partial class Deployment
             messages.Report("来宾缺少已核验的 " + resource.Name + "，正在补传。");
             var localFile = fetchPackage is null ? await downloader.Get(resource, options.Cache, downloads, token)
                 : await fetchPackage(resource, token);
-            await box.CopyTo(state, secrets, localFile, guestRoot + "\\" + resource.FileName, token);
+            var destination = guestRoot + "\\" + resource.FileName;
+            try
+            {
+                if (box is HyperV hyperV)
+                    await hyperV.CopyVerifiedResource(state, secrets, localFile, destination, resource, token);
+                else
+                    await box.CopyTo(state, secrets, localFile, destination, token);
+            }
+            catch (HandoffException) { throw; }
+            catch (SetupException error) { throw new SetupException($"补传 {resource.Name} 失败。{Redaction.SafeError(error)}"); }
         }
 
         messages.Report("正在核对原来宾的 PowerShell 和安装资源。");

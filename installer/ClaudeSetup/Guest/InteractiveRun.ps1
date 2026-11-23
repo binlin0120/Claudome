@@ -57,7 +57,14 @@ try{
     while([datetime]::UtcNow -lt $end){
         if(Test-Path -LiteralPath $resultFile){
             $result=Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
-            if($result.vmId -ne $VmId -or $result.workspaceId -ne $WorkspaceId -or $result.exitCode -ne 0){throw 'GUEST_COMMAND_FAILED'}
+            if($result.vmId -ne $VmId -or $result.workspaceId -ne $WorkspaceId){throw 'GUEST_COMMAND_FAILED'}
+            if($result.exitCode -ne 0){
+                if((Split-Path -Leaf $plan.arguments[([array]::IndexOf($plan.arguments,'-File')+1)]) -eq 'BridgeInstall.ps1' -and
+                    $result.exitCode -in (20..31)){
+                    throw ('GUEST_BRIDGE_'+[string]$result.exitCode)
+                }
+                throw 'GUEST_COMMAND_FAILED'
+            }
             return
         }
         if((Get-ScheduledTask -TaskName $task).State -eq 'Running'){$started=$true}

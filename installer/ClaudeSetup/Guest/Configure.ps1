@@ -124,7 +124,20 @@ try {
         }
         if($payload.resumeNetwork){
             try{Assert-ClashRuntime;$report.clashConfigured=$true;$report.clashServiceRunning=$true;$report.networkConfigured=$true;$report.regionConfigured=$true}
-            catch{Add-Pending '已保存网络配置需要处理' @('已有安装步骤保留，本次没有自动重写网络。请检查专用配置、服务模式、TUN 与地区。','需要重新配置时使用助手的重新配置网络入口，再执行验收。') 'resume-network';throw 'RESUME_NETWORK_REVIEW_REQUIRED'}
+            catch {
+                $detail = switch ($_.Exception.Message) {
+                    'CLASH_SERVICE_NOT_RUNNING' { 'Clash 后台服务尚未运行。' }
+                    'PERSISTED_PROFILE_CHANGED' { '已保存的专用配置与本任务记录不一致。' }
+                    'PERSISTED_PROFILE_NOT_SELECTED' { 'Clash 当前未选中本任务的专用配置。' }
+                    'RUNTIME_NETWORK_SETTINGS_MISMATCH' { 'Clash 生效的端口、模式或 TUN 配置与本任务要求不符。' }
+                    'RUNTIME_ROUTE_MISMATCH' { 'Clash 生效线路或规则与本任务记录不一致。' }
+                    'CLASH_TUN_REQUIRED' { '没有检测到可用的 ClaudeTun 网卡。' }
+                    'CLASH_CONTROLLER_UNAVAILABLE' { 'Clash 本地控制接口暂时不可用。' }
+                    default { '来宾未能完整核对已保存的网络配置。' }
+                }
+                Add-Pending '已保存网络配置需要处理' @($detail,'处理后可重试检查。也可选择重新配置本任务网络，再核对生效配置与出口。') 'resume-network'
+                throw 'RESUME_NETWORK_REVIEW_REQUIRED'
+            }
         }else{Configure-Clash}
         if(-not $browserOnly){
             # Recheck installer-created outbound permissions after both applications exist.
