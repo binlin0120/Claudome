@@ -31,7 +31,7 @@ public static class CommandFailure
             "VERR_DISK_FULL"=>"磁盘空间不足，请释放空间后继续原任务。",
             "VERR_NO_MEMORY"=>"可用内存不足，请关闭闲置应用后继续。",
             "E_INVALIDARG" or "VERR_INVALID_PARAMETER"=>"组件拒绝了命令参数，请使用修正版后继续原任务。",
-            _=>Regex.IsMatch(error,@"(?im)(?:error:|syntax error:)[^\r\n]*(?:invalid|unknown|unrecognized|syntax)")?"组件拒绝了命令参数，请使用修正版后继续原任务。":"原任务已保留，请检查组件和虚拟机状态后继续。"
+            _=>Regex.IsMatch(error,@"(?im)(?:error:|syntax error:)[^\r\n]*\b(?:invalid|unknown|unrecognized|syntax)\b")?"组件拒绝了命令参数，请使用修正版后继续原任务。":"原任务已保留，请检查组件和虚拟机状态后继续。"
         };
         var guestExit = isBox && operation == "guestcontrol" && arguments.ElementAtOrDefault(2) == "run" &&
             exitCode is >= 33 and <= 125 ? $"，来宾程序退出码 {exitCode - 32}" : "";

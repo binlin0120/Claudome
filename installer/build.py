@@ -71,8 +71,8 @@ def guest_network(dotnet):
         output.write((destination / "LICENSE.txt").read_text(encoding="utf-8"))
 
 
-def desktop_notices(project):
-    assets = json.loads((project.parent / "obj" / "project.assets.json").read_text(encoding="utf-8"))
+def desktop_notices(project, obj_dir):
+    assets = json.loads((obj_dir / "project.assets.json").read_text(encoding="utf-8"))
     roots = [Path(p) for p in assets["packageFolders"]]
     dependencies = {}
     for framework in assets["project"]["frameworks"].values():
@@ -104,18 +104,55 @@ def desktop_notices(project):
         output.write("\n\n=== YamlDotNet 18.1.0 ===\n" + license_file.read_text(encoding="utf-8"))
 
 
+def verify_published_zip(zip_path: Path, expected_product: str, expected_version: str, expected_sidecars: list[str], temp_root: Path):
+    verify_dir = temp_root / ("verify-" + zip_path.stem)
+    if verify_dir.exists():
+        shutil.rmtree(verify_dir)
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(verify_dir)
+        exe_path = verify_dir / "Claudome.exe"
+        if not exe_path.is_file():
+            raise RuntimeError(f"Claudome.exe missing in ZIP: {zip_path}")
+        for sidecar in expected_sidecars:
+            if not (verify_dir / sidecar).is_file():
+                raise RuntimeError(f"Missing sidecar '{sidecar}' in ZIP: {zip_path}")
+        ps_cmd = (
+            "$vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($env:CHECK_EXE); "
+            "Write-Output ($vi.ProductName + '|' + $vi.FileVersion + '|' + $vi.ProductVersion)"
+        )
+        env = dict(os.environ, CHECK_EXE=str(exe_path))
+        meta = subprocess.check_output(["powershell", "-NoLogo", "-NoProfile", "-Command", ps_cmd], env=env, text=True, encoding="utf-8").strip()
+        product_name, file_version, product_version = meta.split("|", 2)
+        if product_name != expected_product:
+            raise RuntimeError(f"Unexpected ProductName '{product_name}', expected '{expected_product}'")
+        if not file_version.startswith(expected_version + ".") and not product_version.startswith(expected_version):
+            raise RuntimeError(f"Unexpected version '{file_version}' / '{product_version}', expected '{expected_version}'")
+    finally:
+        if verify_dir.exists():
+            shutil.rmtree(verify_dir, ignore_errors=True)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--dotnet", default=shutil.which("dotnet"))
     parser.add_argument("--go", default=shutil.which("go"))
+    parser.add_argument("--edition", choices=["standard", "hyperv"], default="standard")
+    parser.add_argument("--version", default=None)
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--ui-test", action="store_true", help="Render WPF and run synthetic UI scenarios without VM actions")
     parser.add_argument("--publish", action="store_true")
     args = parser.parse_args()
+    edition = args.edition
+    version = args.version or ("0.5.0" if edition == "hyperv" else "0.4.10")
+    edition_props = [f"-p:ClaudomeEdition={edition}", f"-p:Version={version}"]
+    is_hyperv = edition == "hyperv"
+    edition_artifacts = ARTIFACTS / "hyperv" if is_hyperv else ARTIFACTS
+    edition_artifacts.mkdir(parents=True, exist_ok=True)
     ARTIFACTS.mkdir(exist_ok=True)
-    logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(ARTIFACTS / "build.log", encoding="utf-8"), logging.StreamHandler()])
+    logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(edition_artifacts / "build.log", encoding="utf-8"), logging.StreamHandler()])
     try:
         if os.name != "nt" or not args.go or not args.dotnet:
             raise RuntimeError("Windows developer build needs Go and .NET 10 SDK. Specify --go / --dotnet if they are not on PATH.")
@@ -126,27 +163,55 @@ def main():
         notices(args.go)
         guest_network(args.dotnet)
         project = BASE / "ClaudeSetup" / "ClaudeSetup.csproj"
-        run([args.dotnet, "restore", project, "--nologo"], BASE)
-        desktop_notices(project)
-        run([args.dotnet, "build", project, "-c", "Release", "--nologo"], BASE)
-        executable = BASE / "ClaudeSetup" / "bin" / "Release" / "net10.0-windows" / "win-x64" / "Claudome.exe"
+        run([args.dotnet, "restore", project, *edition_props, "--nologo"], BASE)
+        obj_dir = (ARTIFACTS / "build" / "hyperv" / "obj" / "ClaudeSetup") if is_hyperv else (project.parent / "obj")
+        desktop_notices(project, obj_dir)
+        run([args.dotnet, "build", project, "-c", "Release", *edition_props, "--nologo"], BASE)
+        executable = (ARTIFACTS / "build" / "hyperv" / "bin" / "ClaudeSetup" / "Release" / "net10.0-windows" / "win-x64" / "Claudome.exe") if is_hyperv else (BASE / "ClaudeSetup" / "bin" / "Release" / "net10.0-windows" / "win-x64" / "Claudome.exe")
+        tests_out = edition_artifacts / "tests"
+        ui_tests_out = edition_artifacts / "ui-tests"
         if args.test:
-            run([executable, "--self-test", ARTIFACTS / "tests"], BASE)
+            run([executable, "--self-test", tests_out], BASE)
+            self_report = json.loads((tests_out / "installer-tests.json").read_text(encoding="utf-8"))
+            if self_report.get("failed", 1) != 0:
+                raise RuntimeError("Desktop self-tests reported failures")
             pwsh = shutil.which("pwsh")
             if not pwsh:
                 raise RuntimeError("Developer offline PowerShell fixtures require PowerShell 7")
             for name in ("HyperVPolicy", "InteractivePlan", "GuestSource", "ReleaseReview", "HyperVRecovery", "HyperVInitialization", "GuestBridge", "Alignment", "Experience"):
-                run([pwsh, "-NoLogo", "-NoProfile", "-File", BASE / "tests" / (name + ".Tests.ps1"), "-OutputDirectory", ARTIFACTS / "tests"], BASE)
-            run([sys.executable, BASE / "tests" / "VBoxCliContract.py", "--output-directory", ARTIFACTS / "tests"], BASE)
+                run([pwsh, "-NoLogo", "-NoProfile", "-File", BASE / "tests" / (name + ".Tests.ps1"), "-OutputDirectory", tests_out], BASE)
+            run([sys.executable, BASE / "tests" / "VBoxCliContract.py", "--output-directory", tests_out], BASE)
         if args.ui_test:
-            run([executable, "--preview", ARTIFACTS / "ui-tests"], BASE)
-            report = json.loads((ARTIFACTS / "ui-tests" / "customer-feedback-ui-tests.json").read_text(encoding="utf-8"))
+            run([executable, "--preview", ui_tests_out], BASE)
+            report = json.loads((ui_tests_out / "customer-feedback-ui-tests.json").read_text(encoding="utf-8"))
             if report["failed"]:
                 raise RuntimeError("WPF UI regression tests failed")
         if args.publish:
-            run([args.dotnet, "publish", project, "-c", "Release", "--no-restore", "--nologo", "-o", ARTIFACTS / "Claudome-publish"], BASE)
-            shutil.copy2(ARTIFACTS / "Gateway-THIRD-PARTY-NOTICES.txt", ARTIFACTS / "Claudome-publish")
-            shutil.copy2(BASE.parent / "LICENSE", ARTIFACTS / "Claudome-publish" / "PROJECT-LICENSE.txt")
+            publish_dir = edition_artifacts / ("Claudome-HyperV-publish" if is_hyperv else "Claudome-publish")
+            if publish_dir.exists():
+                shutil.rmtree(publish_dir)
+            run([args.dotnet, "publish", project, "-c", "Release", "--no-restore", *edition_props, "--nologo", "-o", publish_dir], BASE)
+            shutil.copy2(ARTIFACTS / "Gateway-THIRD-PARTY-NOTICES.txt", publish_dir)
+            shutil.copy2(BASE.parent / "LICENSE", publish_dir / "PROJECT-LICENSE.txt")
+            quickstart_name = "快速开始-HyperV.txt" if is_hyperv else "快速开始.txt"
+            shutil.copy2(BASE / quickstart_name, publish_dir / quickstart_name)
+            pkg_prefix = "Claudome-HyperV" if is_hyperv else "Claudome"
+            zip_name = f"{pkg_prefix}_{version}_win-x64.zip"
+            zip_path = edition_artifacts / zip_name
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+                for p in sorted(publish_dir.rglob("*")):
+                    if p.is_file():
+                        zf.write(p, p.relative_to(publish_dir).as_posix())
+            zip_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest().lower()
+            (edition_artifacts / "SHA256SUMS.txt").write_text(f"{zip_sha}  {zip_name}\n", encoding="utf-8")
+            verify_published_zip(
+                zip_path,
+                "Claudome Hyper-V" if is_hyperv else "Claudome",
+                version,
+                ["Gateway-THIRD-PARTY-NOTICES.txt", "PROJECT-LICENSE.txt", quickstart_name],
+                edition_artifacts,
+            )
+            logging.info("Published verified package: %s (%s)", zip_path, zip_sha)
         logging.info("Build complete. Live boundary checks are required before VM start; physical VM acceptance has not been run.")
         return 0
     except Exception:

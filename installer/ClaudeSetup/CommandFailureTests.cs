@@ -18,6 +18,12 @@ public static class CommandFailureTests
             var text=CommandFailure.Describe("VBoxManage.exe",["startvm",secret],1,"VBOX_E_INVALID_VM_STATE\ncredential="+secret);
             Assert(text.Contains("启动原虚拟机")&&text.Contains("VBOX_E_INVALID_VM_STATE")&&text.Contains("状态")&&!text.Contains(secret),"state cause lost");
         }));
+        await check("VirtualBox-COM-callee-IUnknown-is-not-misdiagnosed-as-invalid-parameter", () => Sync(() => {
+            var text = CommandFailure.Describe("VBoxManage.exe", ["startvm", secret], 1,
+                "VBoxManage.exe: error: Code E_FAIL (0x80004005) - SessionMachine, callee IUnknown");
+            Assert(!text.Contains("组件拒绝了命令参数") && text.Contains("原任务已保留"),
+                "callee IUnknown falsely triggered invalid-parameter diagnosis: " + text);
+        }));
         await check("VirtualBox-guest-exit-identifies-extraction-and-keeps-raw-arguments-private", () => Sync(() => {
             var run = CommandFailure.Describe("VBoxManage.exe",
                 ["guestcontrol", secret, "run", "--exe", @"C:\Windows\System32\tar.exe", "--", secret], 33, secret);
