@@ -1,5 +1,5 @@
 #requires -Version 7.0
-param([string]$Executable,[string[]]$Arguments,[string]$UserName,[string]$VmId,[string]$WorkspaceId,[int]$TimeoutSeconds=1800)
+param([string]$Executable,[string[]]$Arguments,[string]$UserName,[string]$VmId,[string]$WorkspaceId,[int]$TimeoutSeconds=1800,[ValidateSet('hyperv','utm')][string]$Platform='hyperv')
 $ErrorActionPreference='Stop'
 # Executed only inside the identity-checked guest. InteractiveToken uses an
 # existing Windows desktop without storing a password or enabling remoting.
@@ -24,7 +24,8 @@ function Get-GuestInteractivePlan($Executable,$Arguments,$UserName,$VmId,$Worksp
 $plan=Get-GuestInteractivePlan $Executable $Arguments $UserName $VmId $WorkspaceId
 $system=Get-CimInstance Win32_ComputerSystem
 $identity=Get-Content -LiteralPath 'C:\ProgramData\ClaudeBootstrap\identity.json' -Raw | ConvertFrom-Json
-if($system.Manufacturer -ne 'Microsoft Corporation' -or $system.Model -ne 'Virtual Machine' -or $identity.vmId -ne $VmId -or $identity.workspaceId -ne $WorkspaceId){throw 'VM_SCOPE'}
+$expectedMachine=if($Platform -eq 'utm'){$system.Manufacturer -match 'QEMU|UTM|Bochs'}else{$system.Manufacturer -eq 'Microsoft Corporation' -and $system.Model -eq 'Virtual Machine'}
+if(!$expectedMachine -or $identity.vmId -ne $VmId -or $identity.workspaceId -ne $WorkspaceId){throw 'VM_SCOPE'}
 $timeout=[Math]::Clamp($TimeoutSeconds,30,1800)
 $id=[guid]::NewGuid().ToString('N');$bundle='C:\ProgramData\ClaudeBootstrap\interactive\'+$id;$task='ClaudomeInteractive-'+$id
 $walk=$bundle;while($walk){if((Test-Path -LiteralPath $walk) -and ((Get-Item -LiteralPath $walk -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'VM_SCOPE'};$walk=[IO.Path]::GetDirectoryName($walk)}
@@ -48,7 +49,7 @@ exit $code
 '@ | Set-Content -LiteralPath $runnerFile -Encoding utf8NoBOM
 $registered=$false
 try{
-    $action=New-ScheduledTaskAction -Execute $Executable -Argument ('-NoLogo -NoProfile -File "'+$runnerFile+'"') -WorkingDirectory $plan.root
+    $action=New-ScheduledTaskAction -Execute $Executable -Argument ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File "'+$runnerFile+'"') -WorkingDirectory $plan.root
     $principal=New-ScheduledTaskPrincipal -UserId ($env:COMPUTERNAME+'\'+$UserName) -LogonType Interactive -RunLevel Highest
     $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromSeconds($timeout+30)) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     Register-ScheduledTask -TaskName $task -Action $action -Principal $principal -Settings $settings -Force | Out-Null;$registered=$true
