@@ -17,7 +17,8 @@ public sealed record ReleaseManifest(
     string ZipSha256,
     string ExeSha256,
     string Notes,
-    string PublishedAtUtc);
+    string PublishedAtUtc,
+    string Channel = "standard");
 
 public sealed record UpdateCheckResult(
     bool HasUpdate,
@@ -159,7 +160,7 @@ public static class SelfUpdater
     public static bool IsValidSha256(string? hex) =>
         !string.IsNullOrWhiteSpace(hex) && Regex.IsMatch(hex, "^[0-9a-f]{64}$", RegexOptions.IgnoreCase);
 
-    public static ReleaseManifest ParseAndValidateManifest(string json)
+    public static ReleaseManifest ParseAndValidateManifest(string json, string? expectedChannel = null)
     {
         if (string.IsNullOrWhiteSpace(json))
             throw new SetupException("更新清单为空，无法校验版本。");
@@ -179,17 +180,26 @@ public static class SelfUpdater
         var exeSha = ReadRequired("exeSha256").ToLowerInvariant();
         var notes = root.TryGetProperty("notes", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() ?? "" : "";
         var published = root.TryGetProperty("publishedAtUtc", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() ?? "" : "";
+        var channel = root.TryGetProperty("channel", out var ch) && ch.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(ch.GetString())
+            ? ch.GetString()!.Trim().ToLowerInvariant()
+            : "standard";
+        var targetChannel = string.IsNullOrWhiteSpace(expectedChannel) ? ProductProfile.ChannelId : expectedChannel.Trim().ToLowerInvariant();
+        if (!string.Equals(channel, targetChannel, StringComparison.OrdinalIgnoreCase))
+            throw new SetupException($"更新清单通道不匹配（当前需要「{targetChannel}」，清单为「{channel}」）。");
 
         if (!TryParseVersion(version, out _))
             throw new SetupException("更新清单版本号格式无效。");
-        if (!Regex.IsMatch(tag, @"^v[0-9]+\.[0-9]+\.[0-9]+$"))
+        var tagPattern = targetChannel == "hyperv"
+            ? @"^(?:v|hyperv-v?|hyperv-preview-)[0-9]+\.[0-9]+\.[0-9]+$"
+            : @"^v[0-9]+\.[0-9]+\.[0-9]+$";
+        if (!Regex.IsMatch(tag, tagPattern))
             throw new SetupException("更新清单 tag 格式无效。");
         if (!Regex.IsMatch(zipName, @"^[A-Za-z0-9._-]+\.zip$"))
             throw new SetupException("更新清单压缩包名称不合法。");
         if (!IsValidSha256(zipSha) || !IsValidSha256(exeSha))
             throw new SetupException("更新清单缺少有效的 SHA-256 校验值。");
 
-        return new ReleaseManifest(version, tag, zipName, zipSha, exeSha, notes, published);
+        return new ReleaseManifest(version, tag, zipName, zipSha, exeSha, notes, published, channel);
     }
 
     public static string BuildDownloadUrl(ReleaseManifest manifest, string? releaseBaseUrl = null)
@@ -204,11 +214,18 @@ public static class SelfUpdater
         string? releaseBaseUrl = null,
         CancellationToken token = default)
     {
+        if (string.IsNullOrWhiteSpace(manifestUrl) && !ProductProfile.OnlineUpdatesEnabled)
+        {
+            return new UpdateCheckResult(false, null, ProductProfile.PreReleasePageUrl,
+                $"在线更新暂未开放（当前为 {ProductProfile.WindowTitle} v{currentVersion.ToString(3)}），请前往预发布页手动下载新版或使用本地 ZIP 更新。");
+        }
         var url = string.IsNullOrWhiteSpace(manifestUrl) ? DefaultManifestUrl : manifestUrl;
         using var client = CreateHttpClient(TimeSpan.FromSeconds(10));
         using var response = await client.GetAsync(url, token);
         if ((int)response.StatusCode == 404)
         {
+            if (ProductProfile.IsHyperVStandalone)
+                throw new SetupException("在线更新暂未开放（远端未提供专版清单），请前往预发布页手动下载。");
             return new UpdateCheckResult(false, null, "", $"当前已是最新版本（v{currentVersion.ToString(3)}）。");
         }
         response.EnsureSuccessStatusCode();
@@ -272,7 +289,8 @@ public static class SelfUpdater
         string? expectedZipSha256,
         string? expectedExeSha256,
         bool allowSameVersion,
-        CancellationToken token)
+        CancellationToken token,
+        string? expectedProductName = null)
     {
         if (!File.Exists(zipPath))
             throw new SetupException("未找到更新压缩包。");
@@ -316,8 +334,16 @@ public static class SelfUpdater
             throw new SetupException("Claudome.exe 校验失败（SHA-256 不匹配），已放弃安装。");
 
         var versionInfo = FileVersionInfo.GetVersionInfo(exePath);
-        if (!string.Equals(versionInfo.ProductName?.Trim(), "Claudome", StringComparison.Ordinal))
-            throw new SetupException("更新文件不是合法的 Claudome 程序，已拒绝替换。");
+        var requiredProduct = string.IsNullOrWhiteSpace(expectedProductName) ? ProductProfile.ProductName : expectedProductName.Trim();
+        var actualProduct = versionInfo.ProductName?.Trim() ?? "";
+        if (!string.Equals(actualProduct, requiredProduct, StringComparison.Ordinal))
+        {
+            var crossEdition = string.Equals(actualProduct, "Claudome", StringComparison.Ordinal) ||
+                               string.Equals(actualProduct, "Claudome Hyper-V", StringComparison.Ordinal);
+            throw new SetupException(crossEdition
+                ? $"更新包产品类型不匹配（当前为「{requiredProduct}」，所选包为「{actualProduct}」），已拒绝跨版替换。"
+                : $"更新文件不是合法的 {requiredProduct} 程序，已拒绝替换。");
+        }
 
         var rawVersion = !string.IsNullOrWhiteSpace(versionInfo.ProductVersion)
             ? versionInfo.ProductVersion

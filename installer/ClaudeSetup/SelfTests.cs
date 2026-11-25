@@ -1118,7 +1118,8 @@ public static class SelfTests
                 zipSha256 = zipHash,
                 exeSha256 = exeHash,
                 notes = "fixture",
-                publishedAtUtc = "2026-11-22T08:00:00Z"
+                publishedAtUtc = "2026-11-22T08:00:00Z",
+                channel = ProductProfile.ChannelId
             });
             using var serverCts = new CancellationTokenSource();
             var serverTask = Task.Run(async () =>
@@ -1406,6 +1407,77 @@ public static class SelfTests
                 serverCts.Cancel();
                 listener.Stop();
                 try { await serverTask; } catch { }
+            }
+        });
+        await Check("product-profile-isolates-directories-and-rejects-cross-edition-packages", async () =>
+        {
+            var expectedFolder = ProductProfile.IsHyperVStandalone ? "ClaudomeHyperVSetup" : "ClaudeEnvironmentSetup";
+            var expectedWorkspace = ProductProfile.IsHyperVStandalone ? "ClaudomeHyperVWorkspace" : "ClaudeWorkspace";
+            var expectedProduct = ProductProfile.IsHyperVStandalone ? "Claudome Hyper-V" : "Claudome";
+            Assert(ProductProfile.AppDataFolderName == expectedFolder &&
+                   ProductProfile.DefaultWorkspaceFolderName == expectedWorkspace &&
+                   ProductProfile.ProductName == expectedProduct &&
+                   Appearance.DefaultPath.Contains(expectedFolder, StringComparison.OrdinalIgnoreCase) &&
+                   CleanupSettings.DefaultPath.Contains(expectedFolder, StringComparison.OrdinalIgnoreCase) &&
+                   StorageCleanupContext.DefaultRegistryPath.Contains(expectedFolder, StringComparison.OrdinalIgnoreCase) &&
+                   new SetupOptions().Root.EndsWith(expectedWorkspace, StringComparison.OrdinalIgnoreCase),
+                "ProductProfile paths did not match active edition");
+
+            var currentExe = Environment.ProcessPath;
+            Assert(!string.IsNullOrWhiteSpace(currentExe) && File.Exists(currentExe), "Missing host process path");
+            var actualInfo = System.Diagnostics.FileVersionInfo.GetVersionInfo(currentExe!);
+            Assert(string.Equals(actualInfo.ProductName?.Trim(), ProductProfile.ProductName, StringComparison.Ordinal),
+                $"EXE ProductName '{actualInfo.ProductName}' did not match ProductProfile '{ProductProfile.ProductName}'");
+
+            var stageRoot = Path.Combine(root, "cross-edition-fixture");
+            var srcDir = Path.Combine(stageRoot, "pkg", $"{ProductProfile.PackagePrefix}_99.0.0_win-x64");
+            Directory.CreateDirectory(srcDir);
+            File.Copy(currentExe!, Path.Combine(srcDir, "Claudome.exe"), overwrite: true);
+            File.WriteAllText(Path.Combine(srcDir, "PROJECT-LICENSE.txt"), "lic");
+            File.WriteAllText(Path.Combine(srcDir, "Gateway-THIRD-PARTY-NOTICES.txt"), "not");
+            var pkgZip = Path.Combine(stageRoot, $"{ProductProfile.PackagePrefix}_99.0.0_win-x64.zip");
+            System.IO.Compression.ZipFile.CreateFromDirectory(Path.GetDirectoryName(srcDir)!, pkgZip);
+
+            var oppositeProduct = ProductProfile.IsHyperVStandalone ? "Claudome" : "Claudome Hyper-V";
+            var rejectedCross = false;
+            try
+            {
+                await SelfUpdater.ExtractAndVerifyPackageAsync(
+                    pkgZip, Path.Combine(stageRoot, "extract-opposite"), new Version(0, 1, 0), null, null,
+                    allowSameVersion: false, CancellationToken.None, expectedProductName: oppositeProduct);
+            }
+            catch (SetupException ex) when (ex.Message.Contains("产品类型不匹配", StringComparison.Ordinal))
+            {
+                rejectedCross = true;
+            }
+            Assert(rejectedCross, "Opposite edition verifier accepted cross-edition ZIP");
+
+            var sameAccepted = await SelfUpdater.ExtractAndVerifyPackageAsync(
+                pkgZip, Path.Combine(stageRoot, "extract-same"), new Version(0, 1, 0), null, null,
+                allowSameVersion: true, CancellationToken.None);
+            Assert(File.Exists(sameAccepted.ExePath), "Same edition package failed verification");
+
+            var stdManifest = JsonSerializer.Serialize(new
+            {
+                version = "9.9.9", tag = "v9.9.9", zipName = "Claudome_9.9.9_win-x64.zip",
+                zipSha256 = new string('a', 64), exeSha256 = new string('b', 64), channel = "standard"
+            });
+            var hvManifest = JsonSerializer.Serialize(new
+            {
+                version = "9.9.9", tag = "hyperv-preview-9.9.9", zipName = "Claudome-HyperV_9.9.9_win-x64.zip",
+                zipSha256 = new string('a', 64), exeSha256 = new string('b', 64), channel = "hyperv"
+            });
+            Assert(SelfUpdater.ParseAndValidateManifest(stdManifest, "standard").Channel == "standard", "Standard manifest failed");
+            Assert(SelfUpdater.ParseAndValidateManifest(hvManifest, "hyperv").Channel == "hyperv", "Hyper-V manifest failed");
+            await RejectAsync(() => Task.FromResult(SelfUpdater.ParseAndValidateManifest(stdManifest, "hyperv")), "Hyper-V accepted standard manifest");
+            await RejectAsync(() => Task.FromResult(SelfUpdater.ParseAndValidateManifest(hvManifest, "standard")), "Standard accepted Hyper-V manifest");
+
+            if (!ProductProfile.OnlineUpdatesEnabled)
+            {
+                var disabled = await SelfUpdater.CheckForUpdateAsync(SelfUpdater.CurrentVersion());
+                Assert(!disabled.HasUpdate && disabled.StatusMessage.Contains("在线更新暂未开放", StringComparison.Ordinal) &&
+                       disabled.DownloadUrl == ProductProfile.PreReleasePageUrl,
+                    $"Unexpected Hyper-V default update status: {disabled.StatusMessage}");
             }
         });
         await StorageCleanupTests.Run(Check, output);

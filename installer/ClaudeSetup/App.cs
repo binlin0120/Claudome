@@ -727,8 +727,12 @@ public sealed partial class SetupWindow : Window
         if (overviewUpdateCard is null)
         {
             var current = SelfUpdater.CurrentVersion().ToString(3);
-            updateStatusText.Text = $"当前版本：Claudome v{current}。支持联网检查最新版（SHA-256 校验后本地原地替换重启），也支持直接选取收到的 .zip 压缩包原地升级，不改动任务与虚拟机。";
-            checkUpdateButton = Action("检查在线更新", async (_, _) => await CheckForUpdatesAsync(interactive: true));
+            updateStatusText.Text = ProductProfile.OnlineUpdatesEnabled
+                ? $"当前版本：{ProductProfile.WindowTitle} v{current}。支持联网检查最新版（SHA-256 校验后本地原地替换重启），也支持直接选取收到的 .zip 压缩包原地升级，不改动任务与虚拟机。"
+                : $"当前版本：{ProductProfile.WindowTitle} v{current}。在线更新暂未开放，请前往预发布页手动下载更新包，或直接选取收到的同版系 .zip 压缩包本地原地升级，不改动任务与虚拟机。";
+            checkUpdateButton = ProductProfile.OnlineUpdatesEnabled
+                ? Action("检查在线更新", async (_, _) => await CheckForUpdatesAsync(interactive: true))
+                : Action("打开预发布页", (_, _) => OpenUrl(ProductProfile.PreReleasePageUrl));
             applyUpdateButton = Action("一键更新并重启", async (_, _) => await ApplyPendingOnlineUpdateAsync(), true);
             applyUpdateButton.Visibility = Visibility.Collapsed;
             localZipUpdateButton = Action("从本地 ZIP 更新", async (_, _) => await ApplyLocalZipUpdateAsync());
@@ -751,6 +755,12 @@ public sealed partial class SetupWindow : Window
     }
     private async Task CheckForUpdatesAsync(bool interactive)
     {
+        if (!ProductProfile.OnlineUpdatesEnabled)
+        {
+            if (interactive)
+                updateStatusText.Text = $"在线更新暂未开放（当前为 {ProductProfile.WindowTitle} v{SelfUpdater.CurrentVersion().ToString(3)}），请前往预发布页手动下载或使用下方“从本地 ZIP 更新”。";
+            return;
+        }
         if (checkingUpdates) return;
         checkingUpdates = true;
         SetUpdateButtonsEnabled(false);
@@ -940,7 +950,7 @@ public sealed partial class SetupWindow : Window
             Notice(blockerMsg);
             return;
         }
-        var dialog = new OpenFileDialog { Filter = "Claudome 更新包|Claudome_*_win-x64.zip|ZIP 压缩包|*.zip", Title = "选择新版 Claudome 安装包" };
+        var dialog = new OpenFileDialog { Filter = $"{ProductProfile.WindowTitle} 更新包|{ProductProfile.PackagePrefix}_*_win-x64.zip|ZIP 压缩包|*.zip", Title = $"选择新版 {ProductProfile.WindowTitle} 安装包" };
         if (dialog.ShowDialog() != true) return;
         var current = SelfUpdater.CurrentVersion();
         var stagingDir = Path.Combine(Path.GetTempPath(), "claudome-stage-" + Guid.NewGuid().ToString("N"));
@@ -1023,7 +1033,7 @@ public sealed partial class SetupWindow : Window
         }
         catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
     }
-    private void Notice(string text) => MessageBox.Show(this, text, "Claudome", MessageBoxButton.OK, MessageBoxImage.Information);
+    private void Notice(string text) => MessageBox.Show(this, text, ProductProfile.WindowTitle, MessageBoxButton.OK, MessageBoxImage.Information);
     private static void OpenUrl(string url) => Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     private sealed record ChoiceItem(string Id, string Label);
 }

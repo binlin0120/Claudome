@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup>
+    <ClaudomeEdition Condition="'$(ClaudomeEdition)' == ''">standard</ClaudomeEdition>
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**</DefaultItemExcludes>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ClaudomeEdition)' == 'hyperv'">
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)artifacts\build\hyperv\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)artifacts\build\hyperv\bin\$(MSBuildProjectName)\</BaseOutputPath>
+    <DefineConstants>$(DefineConstants);CLAUDOME_HYPERV</DefineConstants>
+  </PropertyGroup>
+</Project>

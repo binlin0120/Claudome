@@ -11,7 +11,7 @@ public sealed record DownloadProgress(string Name, long Received, long? Total, d
 }
 public sealed class SetupOptions
 {
-    public string Root { get; set; } = Directory.Exists("D:\\") ? "D:\\ClaudeWorkspace" : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeWorkspace");
+    public string Root { get; set; } = ProductProfile.DefaultWorkspaceRoot;
     public string VmName { get; set; } = "Claude-Workspace";
     public int MemoryMb { get; set; } = 4096;
     public int CpuCount { get; set; } = 2;

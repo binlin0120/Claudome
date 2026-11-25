@@ -7,11 +7,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>Claudome</AssemblyName>
+    <ClaudomeEdition Condition="'$(ClaudomeEdition)' == ''">standard</ClaudomeEdition>
     <Title>Claudome</Title>
     <Product>Claudome</Product>
     <Description>Claude 独立环境部署助手</Description>
     <Authors>李诗恩;林琛</Authors>
-    <Version>0.4.10</Version>
+    <Version Condition="'$(Version)' == ''">0.4.10</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Brand\Claudome.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
@@ -20,6 +21,11 @@
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <DebugType>embedded</DebugType>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ClaudomeEdition)' == 'hyperv'">
+    <Title>Claudome Hyper-V 版</Title>
+    <Product>Claudome Hyper-V</Product>
+    <Description>Claude 独立环境部署助手（Hyper-V 独立版）</Description>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Claudome.Core\Claudome.Core.csproj" />

@@ -71,7 +71,7 @@ public sealed class CleanupSettings
     public CleanupExecutionResult? LastAutoCleanup { get; set; }
 
     public static string DefaultPath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeEnvironmentSetup", "storage-cleanup-settings.json");
+        Path.Combine(ProductProfile.AppDataDirectory, "storage-cleanup-settings.json");
 
     public bool IsAutoCleanEnabled(BackupCategory category) => category switch
     {
@@ -163,7 +163,7 @@ public sealed record StorageCleanupContext(
     string? PreviousRouteRevision = null)
 {
     public static string DefaultRegistryPath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeEnvironmentSetup", "backup-registry.json");
+        Path.Combine(ProductProfile.AppDataDirectory, "backup-registry.json");
 
     public string EffectiveSettingsPath => SettingsPath ?? CleanupSettings.DefaultPath;
     public string EffectiveRegistryPath => RegistryPath ?? DefaultRegistryPath;

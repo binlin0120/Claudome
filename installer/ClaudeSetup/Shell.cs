@@ -33,7 +33,7 @@ public sealed partial class SetupWindow
 
     private (Button Previous, Button Next) BuildShell()
     {
-        Title = "Claudome"; Width = 1180; Height = 860; MinWidth = 980; MinHeight = 720; WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        Title = ProductProfile.WindowTitle; Width = 1180; Height = 860; MinWidth = 980; MinHeight = 720; WindowStartupLocation = WindowStartupLocation.CenterScreen;
         FontFamily = new FontFamily("Microsoft YaHei UI"); FontSize = 14; Foreground = Ink; Background = Canvas;
         Content = ContentRoot; ContentRoot.Background = Canvas;
         SourceInitialized += (_, _) => UpdateNativeCaption();
@@ -48,7 +48,7 @@ public sealed partial class SetupWindow
         var brandIcon = new Image { Name = "WorkspaceBrandIcon", Source = mark, Width = 40, Height = 40 };
         RenderOptions.SetBitmapScalingMode(brandIcon, BitmapScalingMode.HighQuality);
         brandRow.Children.Add(brandIcon);
-        var brandText = new StackPanel { Margin = new Thickness(11, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center }; brandText.Children.Add(new TextBlock { Text = "Claudome", FontWeight = FontWeights.SemiBold, FontSize = 17 }); brandText.Children.Add(new TextBlock { Text = "给 Claude 一个独立的空间", FontSize = 10, Foreground = Muted, Margin = new Thickness(0, 3, 0, 0) }); brandRow.Children.Add(brandText); brand.Children.Add(brandRow);
+        var brandText = new StackPanel { Margin = new Thickness(11, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center }; brandText.Children.Add(new TextBlock { Text = ProductProfile.WindowTitle, FontWeight = FontWeights.SemiBold, FontSize = 17 }); brandText.Children.Add(new TextBlock { Text = ProductProfile.BrandTagline, FontSize = 10, Foreground = Muted, Margin = new Thickness(0, 3, 0, 0) }); brandRow.Children.Add(brandText); brand.Children.Add(brandRow);
         sidebarBrand = brand;
         var sidebarHeader = new DockPanel();
         desktopSidebarToggle = Action("‹", (_, _) =>
@@ -84,7 +84,7 @@ public sealed partial class SetupWindow
             var button = Action("", (_, _) => { if (!busy || index==7) Navigate(index); }); button.Content = row; button.HorizontalContentAlignment = HorizontalAlignment.Left; button.Padding = new Thickness(14, 13, 10, 13); button.Margin = new Thickness(0, 0, 0, 6); button.BorderThickness = new Thickness(0); navigationButtons.Add(button); navigation.Children.Add(button);
         }
         var sideBottom = new StackPanel(); sidebarFooter = sideBottom; Grid.SetRow(sideBottom, 2); sideGrid.Children.Add(sideBottom);
-        sideBottom.Children.Add(Action("⟳  检查与本地更新", async (_, _) => { Navigate(0); await CheckForUpdatesAsync(interactive: true); }));
+        sideBottom.Children.Add(Action(ProductProfile.OnlineUpdatesEnabled ? "⟳  检查与本地更新" : "⟳  预发布与本地更新", async (_, _) => { Navigate(0); if (ProductProfile.OnlineUpdatesEnabled) await CheckForUpdatesAsync(interactive: true); }));
         sideBottom.Children.Add(Action("◐  外观与配色", (_, _) => AppearanceDialog()));
         var groupPanel = new StackPanel(); groupPanel.Children.Add(Text("一起交流", 11));
         var group = Action("交流群  1129410798", (_, _) => { Clipboard.SetText("1129410798"); banner.Text = "群号已复制"; }); group.FontSize = 11; group.Background = Pale; group.Foreground = Accent; group.BorderThickness = new Thickness(0); groupPanel.Children.Add(group);
@@ -187,7 +187,7 @@ public sealed partial class SetupWindow
         var disabled = new Trigger { Property = UIElement.IsEnabledProperty, Value = false }; disabled.Setters.Add(new Setter(UIElement.OpacityProperty, .45)); template.Triggers.Add(disabled);
         return template;
     }
-    private static string PreferencesPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeEnvironmentSetup", "preferences.json");
+    private static string PreferencesPath => Path.Combine(ProductProfile.AppDataDirectory, "preferences.json");
     private void RememberTask() => JsonFile.Write(PreferencesPath, new LastTask(state.Options.StatePath));
     private void RestoreLastTask()
     {
