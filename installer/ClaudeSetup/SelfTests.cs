@@ -247,7 +247,7 @@ public static class SelfTests
             var notices=Catalog.EmbeddedText("Gateway-THIRD-PARTY-NOTICES.txt");foreach(var name in new[]{"Wintun","YamlDotNet","Microsoft.WindowsDesktop.App.Runtime.win-x64","Microsoft.NETCore.App.Runtime.win-x64"})Assert(notices.Contains(name),"bundled dependency license missing: "+name);
         }));
         const string SharingInfo = "clipboard=\"disabled\"\ndraganddrop=\"disabled\"\nclipboard_file_transfers=\"off\"\nusb=\"off\"\nehci=\"off\"\nxhci=\"off\"\nvrde=\"off\"\n";
-        SessionState OwnedVm(string folder) => new() { VmId = "11111111-1111-1111-1111-111111111111", Options = new() { Root = Path.Combine(root, folder) } };
+        SessionState OwnedVm(string folder) => new() { VmId = "11111111-1111-1111-1111-111111111111", Options = new() { Root = Path.Combine(root, folder), PlatformId = "virtualbox" } };
         string VmInfo(SessionState state, string mode, bool offline) =>
             SharingInfo + $"UUID=\"{state.VmId}\"\nVMState=\"{mode}\"\nCfgFile=\"{Path.Combine(state.Options.VmDirectory, state.Options.VmName + ".vbox").Replace("\\", "\\\\")}\"\n" +
             (offline ? "nic1=\"none\"\n" : "nic1=\"generic\"\ngeneric1=\"UDPTunnel\"\nmacaddress1=\"021122334455\"\ncableconnected1=\"on\"\n") + string.Concat(Enumerable.Range(2, 7).Select(i => $"nic{i}=\"none\"\n"));
@@ -424,12 +424,41 @@ public static class SelfTests
             {
                 Assert(Machine.IsHomeEdition(edition), $"Home edition was not detected: {edition}");
                 var home = Platforms.Recommend(fresh with { Edition = edition });
-                Assert(home[0].Id == "virtualbox" && !home.Single(x => x.Id == "hyperv").Compatible, $"Home recommendation was wrong: {edition}");
+                if (ProductProfile.IsHyperVStandalone)
+                {
+                    Assert(home.Count == 1 && home[0].Id == "hyperv" && !home[0].Compatible, $"Standalone Home recommendation was wrong: {edition}");
+                }
+                else
+                {
+                    Assert(home[0].Id == "virtualbox" && !home.Single(x => x.Id == "hyperv").Compatible, $"Home recommendation was wrong: {edition}");
+                }
             }
             Assert(!Machine.IsHomeEdition("Professional") && !Machine.IsHomeEdition(null), "non-Home edition should not show the Home notice");
-            var pro = Platforms.Recommend(fresh with { Edition = "Professional" }); Assert(pro[0].Id == "hyperv", "Pro should prefer original supported route");
+            var pro = Platforms.Recommend(fresh with { Edition = "Professional" }); Assert(pro[0].Id == "hyperv" && pro[0].Compatible, "Pro should prefer original supported route");
             Assert(Platforms.Recommend(fresh with { Architecture = "arm64" }).All(x => !x.Compatible), "Windows ARM offered unsupported automatic install");
             Assert(Platforms.Recommend(fresh with { VirtualizationReady = false }).All(x => !x.Compatible), "disabled virtualization accepted");
+        }));
+        await Check("hyperv-standalone-host-preflight-blocks-home-and-win10", () => Sync(() => {
+            var proFacts = new PlatformFacts("Windows", "x64", "Professional", true, true, 16, true, false);
+            var homeHost = new HostInfo("CoreCountrySpecific", 16L * 1024 * 1024 * 1024, 8L * 1024 * 1024 * 1024, 8, true, 26100, null);
+            var win10Host = homeHost with { Edition = "Professional", Build = 19045 };
+            var armHost = homeHost with { Edition = "Professional", Is64Bit = false };
+            var noVirtFacts = proFacts with { VirtualizationReady = false };
+            var proHost = homeHost with { Edition = "Professional" };
+
+            if (ProductProfile.IsHyperVStandalone)
+            {
+                Assert(Machine.HyperVStandaloneIneligibilityReason(homeHost, proFacts) is { Length: > 0 }, "Home host was not blocked in Hyper-V standalone");
+                Assert(Machine.HyperVStandaloneIneligibilityReason(win10Host, proFacts) is { Length: > 0 }, "Windows 10 host was not blocked in Hyper-V standalone");
+                Assert(Machine.HyperVStandaloneIneligibilityReason(armHost, proFacts) is { Length: > 0 }, "non-x64 host was not blocked in Hyper-V standalone");
+                Assert(Machine.HyperVStandaloneIneligibilityReason(proHost, noVirtFacts) is { Length: > 0 }, "disabled virtualization was not blocked in Hyper-V standalone");
+                Assert(Machine.HyperVStandaloneIneligibilityReason(proHost, proFacts) is null, "eligible Win11 Pro host was blocked unexpectedly");
+                Reject(() => Machine.RequireHyperVStandaloneHostEligible(homeHost, proFacts), "Home host passed RequireHyperVStandaloneHostEligible");
+            }
+            else
+            {
+                Assert(Machine.HyperVStandaloneIneligibilityReason(homeHost, proFacts) is null, "Standard edition must not trigger standalone Hyper-V block");
+            }
         }));
         await Check("mac-recommendation-does-not-claim-windows-exe-support", () => Sync(() => {
             var mac = new PlatformFacts("macOS", "arm64", "", true, true, 16, false, false);

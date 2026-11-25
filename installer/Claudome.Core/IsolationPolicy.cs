@@ -27,7 +27,9 @@ public static class IsolationPolicy
         var isMac = isMacOverride ?? OperatingSystem.IsMacOS();
         var supported = isMac
             ? state.Options.PlatformId is "fusion" or "utm"
-            : state.Options.PlatformId is "virtualbox" or "hyperv" or "workstation";
+            : ProductProfile.IsHyperVStandalone
+                ? state.Options.PlatformId == "hyperv"
+                : state.Options.PlatformId is "virtualbox" or "hyperv" or "workstation";
         if (supported) return;
         throw new HandoffException(new("所选平台没有可用的受控通道", ["请选择已实现的平台。", "不会切换到普通 NAT、桥接或主机代理来跳过边界检查。"], "isolation-platform"));
     }

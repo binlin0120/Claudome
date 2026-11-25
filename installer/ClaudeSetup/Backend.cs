@@ -25,6 +25,7 @@ public static class Backends
     public static async Task Open(SessionState state, CancellationToken token)
     {
         IsolationPolicy.RequireSupportedPlatform(state);
+        Machine.RequireHyperVStandaloneHostEligible();
         if (!Guid.TryParseExact(state.VmId, "D", out _)) throw new SetupException("请先载入本任务的虚拟机。");
         if (state.Options.NetworkSource != "稍后配置") {
             await BoundaryRuntime.VerifyCurrent(state, token);

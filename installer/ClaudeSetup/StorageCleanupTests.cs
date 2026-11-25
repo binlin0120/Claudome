@@ -2322,6 +2322,90 @@ public static class StorageCleanupTests
                 }
                 return Task.CompletedTask;
             });
+
+            await check("cleanup-b22-hyperv-edition-isolates-archives-and-legacy-workspaces", () =>
+            {
+                var caseDir = Path.Combine(baseDir, "b22");
+                var archiveDir = Path.Combine(caseDir, "archives");
+                var tmpDir = Path.Combine(caseDir, "tmp");
+                var vboxWorkspace = Path.Combine(caseDir, "vbox-task");
+                var runningHyperVWorkspace = Path.Combine(caseDir, "hyperv-running");
+                var settingsPath = Path.Combine(caseDir, "cleanup-settings.json");
+                var regPath = Path.Combine(caseDir, "registry.json");
+                Directory.CreateDirectory(archiveDir);
+                Directory.CreateDirectory(tmpDir);
+                Paths.EnsureWorkspace(vboxWorkspace);
+                Paths.EnsureWorkspace(runningHyperVWorkspace);
+                new CleanupSettings().Save(settingsPath);
+
+                // Mixed standard + Hyper-V standalone ZIPs in the same user folder
+                var standardOldZip = Path.Combine(archiveDir, "Claudome_0.4.9_win-x64.zip");
+                var standardNewZip = Path.Combine(archiveDir, "Claudome_0.4.10_win-x64.zip");
+                var hypervOldZip = Path.Combine(archiveDir, "Claudome-HyperV_0.4.8_win-x64.zip");
+                var hypervNewZip = Path.Combine(archiveDir, "Claudome-HyperV_0.5.0_win-x64.zip");
+                void CreateDummyPackageZip(string zipPath, string entryPayload)
+                {
+                    using var archive = System.IO.Compression.ZipFile.Open(zipPath, System.IO.Compression.ZipArchiveMode.Create);
+                    var entry = archive.CreateEntry("Claudome.exe");
+                    using var writer = new StreamWriter(entry.Open());
+                    writer.Write(entryPayload);
+                }
+                CreateDummyPackageZip(standardOldZip, "std-049");
+                CreateDummyPackageZip(standardNewZip, "std-0410");
+                CreateDummyPackageZip(hypervOldZip, "hv-048");
+                CreateDummyPackageZip(hypervNewZip, "hv-050");
+                File.SetLastWriteTimeUtc(hypervOldZip, DateTime.UtcNow.AddHours(-2));
+                File.SetLastWriteTimeUtc(hypervNewZip, DateTime.UtcNow.AddHours(-1));
+
+                // Legacy VirtualBox workspace containing a previous checkpoint & protected disk
+                var vboxState = new SessionState
+                {
+                    VmId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    Options = new() { Root = vboxWorkspace, PlatformId = "virtualbox", VmName = "LegacyVBox", WorkspaceId = "cccccccccccccccccccccccccccccccc" }
+                };
+                new CleanupSettings { AutoCleanTaskCheckpoint = false }.Save(settingsPath);
+                TaskCheckpointStore.Write(vboxState, settingsPath, regPath);
+                vboxState.Completed.Add("step1");
+                TaskCheckpointStore.Write(vboxState, settingsPath, regPath);
+                vboxState.Completed.Add("step2");
+                TaskCheckpointStore.Write(vboxState, settingsPath, regPath);
+
+                // Running Hyper-V standalone workspace (must retain its active files)
+                var hvRunningState = new SessionState
+                {
+                    VmId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    Options = new() { Root = runningHyperVWorkspace, PlatformId = "hyperv", VmName = "LiveHyperV", WorkspaceId = "dddddddddddddddddddddddddddddddd" }
+                };
+                TaskCheckpointStore.Write(hvRunningState, settingsPath, regPath);
+
+                var ctx = new StorageCleanupContext(
+                    PlatformId: "windows",
+                    AppDirectory: caseDir,
+                    TempDirectory: tmpDir,
+                    WorkspaceRoots: [vboxWorkspace, runningHyperVWorkspace],
+                    SettingsPath: settingsPath,
+                    RegistryPath: regPath,
+                    ArchiveDirectory: archiveDir,
+                    ActiveWorkspaceId: hvRunningState.Options.WorkspaceId,
+                    ExpectedPlatformId: "hyperv",
+                    ExpectedPackagePrefix: "Claudome-HyperV");
+
+                var report = StorageCleanupService.Inspect(ctx);
+                var cleanablePaths = report.Items.Where(c => c.CanSelect && c.Status == CleanupItemStatus.Cleanable).Select(c => Path.GetFullPath(c.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var retainedPaths = report.Items.Where(c => c.Status == CleanupItemStatus.Retained && !c.CanSelect).Select(c => Path.GetFullPath(c.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                Assert(cleanablePaths.Contains(Path.GetFullPath(hypervOldZip)), "B22 old same-edition Hyper-V ZIP should be cleanable");
+                Assert(!cleanablePaths.Contains(Path.GetFullPath(hypervNewZip)), "B22 newest same-edition Hyper-V ZIP must not be cleanable");
+                Assert(!cleanablePaths.Contains(Path.GetFullPath(standardOldZip)) && !cleanablePaths.Contains(Path.GetFullPath(standardNewZip)),
+                    "B22 standard Claudome ZIPs must NEVER be offered as cleanable in Hyper-V context");
+                Assert(retainedPaths.Contains(Path.GetFullPath(standardOldZip)) && retainedPaths.Contains(Path.GetFullPath(standardNewZip)),
+                    "B22 standard Claudome ZIPs must be Retained");
+                Assert(!cleanablePaths.Any(p => p.StartsWith(Path.GetFullPath(vboxWorkspace), StringComparison.OrdinalIgnoreCase)),
+                    "B22 legacy VirtualBox workspace files must NOT be marked cleanable in Hyper-V standalone context");
+                Assert(report.Items.Any(c => Path.GetFullPath(c.Path) == Path.GetFullPath(hvRunningState.Options.StatePath) && c.Status == CleanupItemStatus.InUse && !c.CanSelect),
+                    "B22 active Hyper-V task state must be marked InUse");
+                return Task.CompletedTask;
+            });
         }
 
         static SessionState Clone(SessionState s) =>

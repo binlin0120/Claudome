@@ -12,6 +12,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
     private readonly CommandRunner runner = new();
     public async Task PrepareWindowsMedia(SetupOptions o, CancellationToken token)
     {
+        Machine.RequireHyperVStandaloneHostEligible();
         Paths.EnsureWorkspace(o.Root);
         using var downloader = new Downloader();
         var resource = Catalog.Resources.Single(r => r.Id == "windows-media");
@@ -23,6 +24,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
     }
     public async Task<string> DownloadIso(SetupOptions o, CancellationToken token)
     {
+        Machine.RequireHyperVStandaloneHostEligible();
         Paths.EnsureWorkspace(o.Root);
         if (!Uri.TryCreate(o.IsoUrl, UriKind.Absolute, out var uri) || uri.Scheme != "https" || !new[] { "microsoft.com", "microsoftonline.com", "windowsupdate.com" }.Any(d => uri.Host.Equals(d, StringComparison.OrdinalIgnoreCase) || uri.Host.EndsWith("." + d, StringComparison.OrdinalIgnoreCase))) throw new SetupException("请输入微软官方下载的 HTTPS 直链。链接过期时请重新获取，也可以选择已有 ISO。");
         if (!Regex.IsMatch(o.IsoSha256, "^[a-fA-F0-9]{64}$")) throw new SetupException("请填写微软公布的 SHA-256，再下载镜像。");
@@ -31,6 +33,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
     }
     public async Task DownloadResources(SetupOptions o, CancellationToken token)
     {
+        Machine.RequireHyperVStandaloneHostEligible();
         Paths.EnsureWorkspace(o.Root);
         using var downloader = new Downloader();
         foreach (var resource in Catalog.Resources)
@@ -44,6 +47,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
     private void Stage(SessionState state, string title) { state.Stage = title; state.Status = "进行中"; state.Save(); messages.Report(title); installation?.Report(new(title)); }
     public async Task Run(SessionState state, Secrets secrets, CancellationToken token, bool preserveUnloadedSecrets = false, bool checkSavedNetwork = false, bool reconfigureGuestNetwork = false)
     {
+        Machine.RequireHyperVStandaloneHostEligible();
         var o = state.Options;
         try { IsolationPolicy.RequireSupportedPlatform(state); }
         catch (HandoffException handoff) { Paths.EnsureWorkspace(o.Root); using var handoffLock = WorkspaceLock.Acquire(state); state.PendingActions = [handoff.Action]; state.Status = "所选平台尚不支持受控通道"; state.Save(); throw; }

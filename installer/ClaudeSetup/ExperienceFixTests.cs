@@ -49,7 +49,11 @@ public static class ExperienceFixTests
         await check("Windows10-x64-accepted-and-host-label-correct",()=>Sync(()=> {
             HostCompatibility.Require("Windows","x64",19045);Assert(!HostCompatibility.IsSupported("Windows","arm64",19045),"ARM accepted by x64 package");
             Assert(new HostInfo("Professional",1,1,4,true,19045,null).Summary.StartsWith("Windows 10 专业版"),"Windows 10 shown as 11");
-            var choices=Platforms.Recommend(new("Windows","x64","Core",true,true,16,false,false,Build:19045));Assert(choices.First().Id=="virtualbox"&&choices.First().Compatible,"Windows 10 Home route wrong");
+            var choices=Platforms.Recommend(new("Windows","x64","Core",true,true,16,false,false,Build:19045));
+            if (ProductProfile.IsHyperVStandalone)
+                Assert(choices.Count == 1 && choices[0].Id == "hyperv" && !choices[0].Compatible, "Windows 10 Home must be rejected in Hyper-V standalone");
+            else
+                Assert(choices.First().Id=="virtualbox"&&choices.First().Compatible,"Windows 10 Home route wrong");
         }));
         await check("resume-keeps-created-and-started-milestones",()=>Sync(()=> {
             var s=State("resume");s.Completed=["machine","windows-started"];var plan=ResumePlan.For(s);

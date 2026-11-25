@@ -21,7 +21,7 @@ public sealed partial class SetupWindow
     private TextBlock? consolePlaceholder,softwareChecklist,guideStepText;
     private ComboBox? guideStepChoice;
     private string guidePhase="";
-    private Button? desktopContinue, desktopSyncAuth, desktopRecoverDisplay, desktopForceRepair, desktopManualAdsPower;
+    private Button? desktopContinue, desktopSyncAuth, desktopRecoverDisplay, desktopForceRepair, desktopRecoverDisplayMenuItem, desktopForceRepairMenuItem, desktopManualAdsPower;
     private Border? desktopForceRepairBanner;
     private TextBlock? desktopManualAdsGuide, desktopFinishHint;
     private Button? desktopConfirmAdsExit, desktopFinish;
@@ -96,6 +96,13 @@ public sealed partial class SetupWindow
             desktopRecoverDisplay = Action("保存状态并恢复显示", async (_, _) => await RecoverVirtualBoxDisplay(), true);
             desktopRecoverDisplay.Visibility = Visibility.Collapsed;
             desktopForceRepair = Action("强制关闭并恢复 1 核", async (_, _) => await ForceRepairVirtualBoxDialog(), true);
+            desktopRecoverDisplayMenuItem = Action("保存状态并恢复显示", async (_, _) => await RecoverVirtualBoxDisplay());
+            desktopForceRepairMenuItem = Action("强制关闭无响应虚拟机并修复", async (_, _) => await ForceRepairVirtualBoxDialog());
+            if (ProductProfile.IsHyperVStandalone)
+            {
+                desktopRecoverDisplayMenuItem.Visibility = Visibility.Collapsed;
+                desktopForceRepairMenuItem.Visibility = Visibility.Collapsed;
+            }
             var forceRepairText = Text("检测到多核虚拟机长时间停留在 0×0 无画面状态，可能触发了 NEM 跨核死锁。建议强制关闭并自动恢复为 1 核（保留原磁盘与进度）。", 11, false);
             forceRepairText.Margin = new Thickness(0, 0, 0, 6);
             desktopForceRepairBanner = new Border
@@ -120,8 +127,8 @@ public sealed partial class SetupWindow
                     Action("同步虚拟机账号密码",async(_,_)=>await SyncGuestCredentialsDialog()),
                 Action("检查 Clash / AdsPower",async(_,_)=>await RunValidation(false,false)),
                 Action("查看黑屏与启动诊断",async(_,_)=>await ReadVmDiagnostic()),
-                Action("保存状态并恢复显示", async (_, _) => await RecoverVirtualBoxDisplay()),
-                Action("强制关闭无响应虚拟机并修复",async(_,_)=>await ForceRepairVirtualBoxDialog()),
+                desktopRecoverDisplayMenuItem,
+                desktopForceRepairMenuItem,
                 Action("关机后调整 CPU / 内存",(_,_)=>ResourceDialog()),
                 Action("打开网络配置", (_, _) => Navigate(3)),
                 Text("关闭本程序会收起本任务的控制台。虚拟机、磁盘和安装进度仍会保留。",10) }}}));
@@ -563,11 +570,16 @@ public sealed partial class SetupWindow
         }
         if (desktopRecoverDisplay is not null)
         {
-            desktopRecoverDisplay.Visibility = !string.IsNullOrEmpty(framebufferConflictVm) &&
+            desktopRecoverDisplay.Visibility = !ProductProfile.IsHyperVStandalone && !string.IsNullOrEmpty(framebufferConflictVm) &&
                 framebufferConflictVm == state.VmId ? Visibility.Visible : Visibility.Collapsed;
             desktopRecoverDisplay.IsEnabled = !recoveringDisplay && !connectingConsole && (!busy || CanPauseForDisplayRecovery);
         }
-        var offerMultiCoreRecovery = ShouldOfferMultiCoreBlankRecovery(
+        var hideVBoxRecovery = ProductProfile.IsHyperVStandalone;
+        if (desktopRecoverDisplayMenuItem is not null)
+            desktopRecoverDisplayMenuItem.Visibility = hideVBoxRecovery ? Visibility.Collapsed : Visibility.Visible;
+        if (desktopForceRepairMenuItem is not null)
+            desktopForceRepairMenuItem.Visibility = hideVBoxRecovery ? Visibility.Collapsed : Visibility.Visible;
+        var offerMultiCoreRecovery = !hideVBoxRecovery && ShouldOfferMultiCoreBlankRecovery(
             state.Options.PlatformId, state.Options.CpuCount,
             waitingForGuestFrame && consoleHost?.IsAttached == true && !string.IsNullOrEmpty(state.VmId),
             waitingForGuestFrameSinceUtc is { } since ? DateTime.UtcNow - since : TimeSpan.Zero);
@@ -661,6 +673,11 @@ public sealed partial class SetupWindow
 
     private async Task ResumeDesktopTask()
     {
+        if (Machine.HyperVStandaloneIneligibilityReason() is { } ineligibility)
+        {
+            Notice(ineligibility);
+            return;
+        }
         if (busy) return;
         if (state.SetupFinished)
         {

@@ -17,6 +17,11 @@ public static class Platforms
         using var vmware = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\VMware, Inc.\VMware Workstation");
         return new("Windows", RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(), host.Edition, firmware || hypervisor, true, host.TotalMemory / 1073741824, host.VBoxPath is not null, vmware is not null,Build:host.Build);
     }
+    internal static bool IsHyperVSupportedEdition(string? edition) =>
+        edition is not null &&
+        (edition.StartsWith("Professional", StringComparison.OrdinalIgnoreCase) ||
+         edition.StartsWith("Enterprise", StringComparison.OrdinalIgnoreCase));
+
     public static List<PlatformChoice> Recommend(PlatformFacts host)
     {
         if (host.System == "macOS")
@@ -27,9 +32,27 @@ public static class Platforms
                 new("utm", "UTM", 3, true, false, "开源备选；" + arch, ["按项目 Mac 流程核验 UTM、Windows 架构及应用兼容性。", "按操作指引手动安装。"] )}.OrderBy(x => x.Rank).ToList();
         }
         var supported = HostCompatibility.IsSupported(host.System,host.Architecture,host.Build);
-        var pro = host.Edition.StartsWith("Professional") || host.Edition.StartsWith("Enterprise") || host.Edition.StartsWith("Education");
+        var pro = ProductProfile.IsHyperVStandalone
+            ? IsHyperVSupportedEdition(host.Edition)
+            : host.Edition.StartsWith("Professional") || host.Edition.StartsWith("Enterprise") || host.Edition.StartsWith("Education");
         var hardware = !host.VirtualizationKnown || host.VirtualizationReady;
         var note = !hardware ? "固件虚拟化尚未检测为可用，请先在 BIOS/UEFI 开启并重检。" : host.MemoryGb < 8 ? "总内存不足 8 GB，不建议启动完整 Windows 环境。" : "启动前仍会核对空闲内存和磁盘。";
+        if (ProductProfile.IsHyperVStandalone)
+        {
+            var win11Host = host.System == "Windows" && host.Architecture.Equals("x64", StringComparison.OrdinalIgnoreCase) && host.Build >= 22000;
+            var reason = !win11Host
+                ? "此 Hyper-V 独立版仅支持 Windows 11 x64 专业版或企业版宿主机。"
+                : !pro
+                    ? "当前系统版本不支持 Hyper-V 独立版（家庭版请先通过官方渠道升级为 Windows 11 专业版/企业版，或改用支持该系统的电脑；旧任务请继续用原版 Claudome 打开）。"
+                    : "符合 Hyper-V 独立版系统条件；功能与服务启用状态将在预检确认。" + note;
+            return
+            [
+                new("hyperv", "Hyper-V", 1, win11Host && pro && hardware, true, reason,
+                    ["检查 Windows 11 专业版/企业版、管理员权限、Hyper-V 功能与 vmms 服务；如需启用，保存进度并由本人确认重启后继续。",
+                     "创建 Generation 2 虚拟机、启用安全启动与虚拟 TPM，关闭普通网卡，经受控总线通道联网并完成四维网络验收。",
+                     "旧 VirtualBox / VMware 任务仍由原版 Claudome 管理，本专版不会覆盖或迁移旧磁盘。"])
+            ];
+        }
         var list = new List<PlatformChoice>
         {
             new("hyperv", "Hyper-V", pro ? 1 : 3, supported && pro && hardware, true, (pro ? "符合项目原有完整路线的版本条件；功能启用状态还需确认。" : "家庭版不支持本项目 Hyper-V 路线，优先升级专业版可沿用完整方案。") + note,

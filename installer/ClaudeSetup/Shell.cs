@@ -264,6 +264,8 @@ public sealed partial class SetupWindow
     private void DrawDownloads()
     {
         subtitle.Text = "需要什么再下载，已有文件会先校验后复用。";
+        if (Machine.HyperVStandaloneIneligibilityReason() is { } ineligibility)
+            main.Children.Add(Card(Text("当前系统受限 · 下载已禁用", 15, false), Text(ineligibility, 12)));
         downloadFeatureInfo = Text("等待开始", 11); downloadFeatureBar = new ProgressBar { Height = 7, Maximum = 100, Foreground = Accent, Margin = new Thickness(0, 6, 0, 10) };
         main.Children.Add(Card(Text("下载到你的任务目录", 15, false), Text(root.Text, 11), Row(Action("下载 / 继续获取资源", async (_, _) => await Perform(async (o, token) => await Engine().DownloadResources(o, token)), true), Action("暂停", (_, _) => cancellation?.Cancel()), Action("Windows 镜像", (_, _) => Go(2)), Action("打开目录", (_, _) => OpenWorkspace())), downloadFeatureBar, downloadFeatureInfo));
         foreach (var resource in Catalog.Resources)
@@ -278,7 +280,14 @@ public sealed partial class SetupWindow
         subtitle.Text = "先看清状态，再处理需要调整的地方。";
         main.Children.Add(Card(Text("双重防护", 17, false), Text("外层网关在启动或恢复时核对配置，仅在检查通过后建立受控连接。", 12), Text("内层：保留原有 Clash 服务、TUN、来宾防火墙及检测。", 12), Text("当前内层记录：" + (state.NetworkPassed ? "出口检测有通过记录" : "出口尚未通过") + "；" + (state.OutagePassed ? "断线与恢复有通过记录" : "断线与恢复尚未通过") + "。历史记录不代表当前状态。", 11), Text("外层、内层与浏览器业务验收必须分别确认；任何一项待处理，都不标记环境就绪。", 11)));
         var host = Machine.Read();
-        main.Children.Add(Card(Text("黑屏与启动诊断",16,false),Text("只读检查原虚拟机的运行状态、来宾工具与 NEM 兼容模式；若虚拟机已定格或白屏无响应，可使用下方受控入口强制关机并切换为单核防死锁兼容配置（不改主机安全功能）。",11),Row(Action("读取虚拟机诊断",async(_,_)=>await ReadVmDiagnostic()),Action("强制关闭无响应虚拟机并修复",async(_,_)=>await ForceRepairVirtualBoxDialog()),Action("打开程序内桌面",(_,_)=>Navigate(7)))));
+        if (ProductProfile.IsHyperVStandalone)
+        {
+            main.Children.Add(Card(Text("黑屏与启动诊断", 16, false), Text("只读检查原 Hyper-V 虚拟机的运行状态、集成服务与主机配置。", 11), Row(Action("读取虚拟机诊断", async (_, _) => await ReadVmDiagnostic()), Action("打开程序内桌面", (_, _) => Navigate(7)))));
+        }
+        else
+        {
+            main.Children.Add(Card(Text("黑屏与启动诊断",16,false),Text("只读检查原虚拟机的运行状态、来宾工具与 NEM 兼容模式；若虚拟机已定格或白屏无响应，可使用下方受控入口强制关机并切换为单核防死锁兼容配置（不改主机安全功能）。",11),Row(Action("读取虚拟机诊断",async(_,_)=>await ReadVmDiagnostic()),Action("强制关闭无响应虚拟机并修复",async(_,_)=>await ForceRepairVirtualBoxDialog()),Action("打开程序内桌面",(_,_)=>Navigate(7)))));
+        }
         foreach (var action in state.PendingActions) main.Children.Add(PendingCard(action));
         main.Children.Add(BuildProtectionCard());
         main.Children.Add(BuildValidationCard());

@@ -10,6 +10,11 @@ public sealed partial class SetupWindow
 {
     private async Task EnterOriginalWorkspace(bool networkOnly = false)
     {
+        if (Machine.HyperVStandaloneIneligibilityReason() is { } ineligibility)
+        {
+            Notice(ineligibility);
+            return;
+        }
         if (enteringWorkspace || busy || recoveringDisplay) return;
         var hasNetwork = Deployment.HasConfiguredWorkspaceNetwork(state);
         if (networkOnly && !hasNetwork)

@@ -93,32 +93,35 @@ public sealed partial class SetupWindow
         {
             if (escDialog.IsVisible) escDialog.Close();
         }
-        var resourceDialog = BuildResourceDialog(out var resCpu, out _, out var resWarning, hostNemOverride: true, hostEditionOverride: "CoreCountrySpecific");
-        resourceDialog.ShowActivated = false;
-        resourceDialog.ShowInTaskbar = false;
-        resourceDialog.Show();
-        try
+        if (!ProductProfile.IsHyperVStandalone)
         {
-            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
-            resourceDialog.UpdateLayout();
-            var bannerBorder = Descendants<Border>(resourceDialog).Single(b => b.Name == "ResourceNemWarningBanner");
-            resCpu.Text = "2";
-            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
-            resourceDialog.UpdateLayout();
-            var shownForMultiCore = bannerBorder.Visibility == Visibility.Visible && resWarning.Text.Contains("家庭版") && resWarning.Text.Contains("0x0");
-            resCpu.Text = "1";
-            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
-            resourceDialog.UpdateLayout();
-            var hiddenForSingleCore = bannerBorder.Visibility == Visibility.Collapsed;
-            var applyButton = Descendants<Button>(resourceDialog).Single(b => b.Content as string == "关机后应用并回读");
-            var applyBottom = applyButton.TranslatePoint(new Point(0, applyButton.ActualHeight), resourceDialog).Y;
-            var resourceOk = shownForMultiCore && hiddenForSingleCore && applyButton.IsVisible && applyBottom <= resourceDialog.ActualHeight;
-            if (!resourceOk) failed++;
-            rows.Add(new { name = "resource-dialog-warns-on-home-nem-multicore-and-keeps-actions-visible", passed = resourceOk });
-        }
-        finally
-        {
-            if (resourceDialog.IsVisible) resourceDialog.Close();
+            var resourceDialog = BuildResourceDialog(out var resCpu, out _, out var resWarning, hostNemOverride: true, hostEditionOverride: "CoreCountrySpecific");
+            resourceDialog.ShowActivated = false;
+            resourceDialog.ShowInTaskbar = false;
+            resourceDialog.Show();
+            try
+            {
+                await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                resourceDialog.UpdateLayout();
+                var bannerBorder = Descendants<Border>(resourceDialog).Single(b => b.Name == "ResourceNemWarningBanner");
+                resCpu.Text = "2";
+                await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                resourceDialog.UpdateLayout();
+                var shownForMultiCore = bannerBorder.Visibility == Visibility.Visible && resWarning.Text.Contains("家庭版") && resWarning.Text.Contains("0x0");
+                resCpu.Text = "1";
+                await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                resourceDialog.UpdateLayout();
+                var hiddenForSingleCore = bannerBorder.Visibility == Visibility.Collapsed;
+                var applyButton = Descendants<Button>(resourceDialog).Single(b => b.Content as string == "关机后应用并回读");
+                var applyBottom = applyButton.TranslatePoint(new Point(0, applyButton.ActualHeight), resourceDialog).Y;
+                var resourceOk = shownForMultiCore && hiddenForSingleCore && applyButton.IsVisible && applyBottom <= resourceDialog.ActualHeight;
+                if (!resourceOk) failed++;
+                rows.Add(new { name = "resource-dialog-warns-on-home-nem-multicore-and-keeps-actions-visible", passed = resourceOk });
+            }
+            finally
+            {
+                if (resourceDialog.IsVisible) resourceDialog.Close();
+            }
         }
         var lightCaption = WorkspaceCaptionColor();
         var lightApplied = UpdateNativeCaption();
@@ -130,7 +133,7 @@ public sealed partial class SetupWindow
             ReferenceEquals(Icon, brandIcon.Source);
         if (!brandingReady) failed++;
         rows.Add(new { name = "native-window-and-sidebar-use-the-packaged-product-icon", passed = brandingReady });
-        var captionReady = Title == "Claudome" && lightCaption != darkCaption &&
+        var captionReady = Title == ProductProfile.WindowTitle && lightCaption != darkCaption &&
             Appearance.Contrast(darkCaption, Appearance.Legible(darkCaption)) >= 4.5 &&
             (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) || lightApplied && darkApplied);
         if (!captionReady) failed++;
@@ -354,32 +357,35 @@ public sealed partial class SetupWindow
         var visibleFailure=consolePlaceholder!.Text.Contains("BOOTSTRAP_DNS_TLS_FAILED")&&desktopActivity!.Text.Contains("BOOTSTRAP_DNS_TLS_FAILED")&&desktopContinue!.IsEnabled&&desktopActivityProgress!.Visibility==Visibility.Collapsed;
         if(!visibleFailure)failed++;rows.Add(new{name="network-failure-remains-visible-instead-of-infinite-connecting",passed=visibleFailure});
         taskFaulted = false;
-        framebufferConflictVm = state.VmId;
-        busy = true;
-        installationFinished = new TaskCompletionSource();
-        using (var installToken = new CancellationTokenSource())
+        if (!ProductProfile.IsHyperVStandalone)
         {
-            cancellation = installToken;
-            SetDesktopConnectionStatus("检测到 VirtualBox 显示缓冲冲突。可在左侧直接恢复画面。");
-            UpdateDesktopActivity();
-            var otherStepBlocked = desktopRecoverDisplay is { Visibility: Visibility.Visible, IsEnabled: false };
-            state.AwaitingGuestTools = true;
-            UpdateDesktopActivity();
-            await SaveAlignmentView("desktop-framebuffer-recovery");
-            var enabledWhileWaiting = desktopRecoverDisplay is { Visibility: Visibility.Visible, IsEnabled: true } &&
-                desktopContinue is { IsEnabled: false };
-            installToken.Cancel();
-            UpdateDesktopActivity();
-            var blockedWhileCancelling = desktopRecoverDisplay is { IsEnabled: false };
-            var passed = otherStepBlocked && enabledWhileWaiting && blockedWhileCancelling;
-            if (!passed) failed++;
-            rows.Add(new { name = "framebuffer-recovery-offered-during-guest-wait-and-blocked-during-other-stages", passed });
+            framebufferConflictVm = state.VmId;
+            busy = true;
+            installationFinished = new TaskCompletionSource();
+            using (var installToken = new CancellationTokenSource())
+            {
+                cancellation = installToken;
+                SetDesktopConnectionStatus("检测到 VirtualBox 显示缓冲冲突。可在左侧直接恢复画面。");
+                UpdateDesktopActivity();
+                var otherStepBlocked = desktopRecoverDisplay is { Visibility: Visibility.Visible, IsEnabled: false };
+                state.AwaitingGuestTools = true;
+                UpdateDesktopActivity();
+                await SaveAlignmentView("desktop-framebuffer-recovery");
+                var enabledWhileWaiting = desktopRecoverDisplay is { Visibility: Visibility.Visible, IsEnabled: true } &&
+                    desktopContinue is { IsEnabled: false };
+                installToken.Cancel();
+                UpdateDesktopActivity();
+                var blockedWhileCancelling = desktopRecoverDisplay is { IsEnabled: false };
+                var passed = otherStepBlocked && enabledWhileWaiting && blockedWhileCancelling;
+                if (!passed) failed++;
+                rows.Add(new { name = "framebuffer-recovery-offered-during-guest-wait-and-blocked-during-other-stages", passed });
+            }
+            cancellation = null;
+            installationFinished = null;
+            state.AwaitingGuestTools = false;
+            framebufferConflictVm = "";
+            busy = false;
         }
-        cancellation = null;
-        installationFinished = null;
-        state.AwaitingGuestTools = false;
-        framebufferConflictVm = "";
-        busy = false;
         latestTaskActivity="";latestTaskDownload="";state.VmId=savedDesktopVm;state.Status=savedDesktopStatus;UpdateDesktopActivity();SetDesktopConnectionStatus(DesktopWaitingText());
         state.Completed.Add("guest-ready");UpdateDesktopGuide();
         var checklistText=string.Join("\n",guideStepChoice!.Items.Cast<CustomerGuideStep>().Select(x=>x.Instructions));
@@ -448,19 +454,27 @@ public sealed partial class SetupWindow
         if(!fieldsLocked)failed++;rows.Add(new{name="existing-vm-creation-fields-explicitly-locked",passed=fieldsLocked});
         state.VmId=savedVmId;RefreshCreationFields();
         await VerifyNativeHostFixture(rows,directory);
+        var hasForceRepairItem = Descendants<Expander>(desktopGuidePanel!).Any(control => control.Header?.ToString() == "检查与维护" &&
+            (control.Content as Panel)?.Children.OfType<Button>().Any(button => button.Content?.ToString() == "强制关闭无响应虚拟机并修复" &&
+                button.Visibility == (ProductProfile.IsHyperVStandalone ? Visibility.Collapsed : Visibility.Visible)) == true);
         var desktopInputControls = desktopGuidePanel is not null &&
             Descendants<Expander>(desktopGuidePanel).Any(control => control.Header?.ToString() == "手动传送纯文本") &&
             Descendants<Button>(desktopGuidePanel).All(button => button.Content?.ToString() != "聚焦虚拟机键盘") &&
-            Descendants<Expander>(desktopGuidePanel).Any(control => control.Header?.ToString() == "检查与维护" &&
-                (control.Content as Panel)?.Children.OfType<Button>().Any(button => button.Content?.ToString() == "强制关闭无响应虚拟机并修复") == true);
+            hasForceRepairItem;
         if (!desktopInputControls) failed++;
         rows.Add(new { name = "desktop-exposes-text-sharing-and-keyboard-controls", passed = desktopInputControls });
         var previousVm = state.VmId;
         var previousPlatform = state.Options.PlatformId;
         state.VmId = "11111111-1111-1111-1111-111111111111";
-        UpdateNativeClipboardControl();
-        var defaultClipboard = nativeClipboardButton?.Content?.ToString() == "关闭双向剪贴板" &&
-            nativeClipboardStatus?.Text.Contains("自动开启") == true;
+        if (!ProductProfile.IsHyperVStandalone)
+        {
+            state.Options.PlatformId = "virtualbox";
+            UpdateNativeClipboardControl();
+            var defaultClipboard = nativeClipboardButton?.Content?.ToString() == "关闭双向剪贴板" &&
+                nativeClipboardStatus?.Text.Contains("自动开启") == true;
+            if (!defaultClipboard) failed++;
+            rows.Add(new { name = "virtualbox-desktop-shows-clipboard-on-by-default", passed = defaultClipboard });
+        }
         state.Options.PlatformId = "hyperv";
         state.Options.SharedClipboardEnabled = true;
         state.Options.HyperVBasicConsoleConfirmed = false;
@@ -476,8 +490,6 @@ public sealed partial class SetupWindow
         state.Options.PlatformId = previousPlatform;
         state.VmId = previousVm;
         UpdateNativeClipboardControl();
-        if (!defaultClipboard) failed++;
-        rows.Add(new { name = "virtualbox-desktop-shows-clipboard-on-by-default", passed = defaultClipboard });
         if (!hypervDefaultClipboard || !hypervOptOutClipboard) failed++;
         rows.Add(new { name = "hyperv-desktop-shows-clipboard-on-by-default-and-toggle", passed = hypervDefaultClipboard && hypervOptOutClipboard });
         var clickFocus = new[] { 0x0201, 0x0204, 0x0207, 0x020B, 0x0246 }.All(NativeConsoleHost.IsPointerPress) &&
@@ -487,7 +499,8 @@ public sealed partial class SetupWindow
         var cpuPolicyVerified = SetupOptions.RecommendedCpuCount("virtualbox", true) == 1 &&
             SetupOptions.RecommendedCpuCount("virtualbox", false) == 2 &&
             SetupOptions.RecommendedCpuCount("hyperv", true) == 2 &&
-            Descendants<CheckBox>(pages[1]).Contains(useCustomVmConfig);
+            Descendants<CheckBox>(pages[1]).Contains(useCustomVmConfig) &&
+            useCustomVmConfig.Visibility == (ProductProfile.IsHyperVStandalone ? Visibility.Collapsed : Visibility.Visible);
         if (!cpuPolicyVerified) failed++;
         rows.Add(new { name = "nem-cpu-policy-defaults-to-1-core-and-exposes-custom-resource-toggle", passed = cpuPolicyVerified });
         country.SelectedValue = "JP";
@@ -593,11 +606,13 @@ public sealed partial class SetupWindow
         if (!matchesManualChecklist) failed++;
         rows.Add(new { name = "manual-adspower-checklist-replaces-stale-socks5-handoff", passed = matchesManualChecklist });
         Navigate(0);
-        var hasLocalUpdaterControls = Descendants<Button>(main).Any(b => b.Content?.ToString() == "检查在线更新") &&
+        var expectedCheckLabel = ProductProfile.OnlineUpdatesEnabled ? "检查在线更新" : "打开预发布页";
+        var hasLocalUpdaterControls = Descendants<Button>(main).Any(b => b.Content?.ToString() == expectedCheckLabel) &&
             Descendants<Button>(main).Any(b => b.Content?.ToString() == "从本地 ZIP 更新") &&
             updateStatusText.Text.Contains($"v{SelfUpdater.CurrentVersion().ToString(3)}") &&
+            (ProductProfile.OnlineUpdatesEnabled || updateStatusText.Text.Contains("在线更新暂未开放")) &&
             globalUpdateBanner?.Visibility == Visibility.Collapsed;
-        var fakeManifest = new ReleaseManifest("9.9.9", "v9.9.9", "Claudome_9.9.9_win-x64.zip", new string('a', 64), new string('b', 64), "fixture", "");
+        var fakeManifest = new ReleaseManifest("9.9.9", ProductProfile.OnlineUpdatesEnabled ? "v9.9.9" : "hyperv-preview-9.9.9", $"{ProductProfile.PackagePrefix}_9.9.9_win-x64.zip", new string('a', 64), new string('b', 64), "fixture", "", ProductProfile.ChannelId);
         ShowAvailableUpdateNotice(new UpdateCheckResult(true, fakeManifest, "https://example.invalid/Claudome_9.9.9_win-x64.zip", "fixture"), fakeManifest);
         hasLocalUpdaterControls &= globalUpdateBanner?.Visibility == Visibility.Visible &&
             globalUpdateBannerText?.Text.Contains("v9.9.9") == true &&
@@ -677,6 +692,51 @@ public sealed partial class SetupWindow
         Navigate(0);
         if (!storageUiReady) failed++;
         rows.Add(new { name = "storage-and-cleanup-page-exposes-overview-auto-policy-and-manual-preview", passed = storageUiReady });
+
+        if (ProductProfile.IsHyperVStandalone)
+        {
+            var legacyDir = Path.Combine(directory, "legacy-vbox-reject-fixture");
+            Directory.CreateDirectory(legacyDir);
+            var legacyState = new SessionState
+            {
+                VmId = "99999999-9999-9999-9999-999999999999",
+                Stage = "旧任务保留阶段",
+                Status = "未改动",
+                Options = new() { Root = legacyDir, PlatformId = "virtualbox", VmName = "OldVBoxVm" }
+            };
+            JsonFile.Write(legacyState.Options.StatePath, legacyState);
+            var rawBefore = File.ReadAllText(legacyState.Options.StatePath);
+            var activeBefore = state;
+            var rootBefore = root.Text;
+            var homeHost = new HostInfo("CoreCountrySpecific", 16L * 1024 * 1024 * 1024, 8L * 1024 * 1024 * 1024, 8, true, 26100, null);
+            var hypervHomeRejected = TryRejectUnsupportedTaskForEdition(
+                new SessionState { Options = new() { Root = legacyDir, PlatformId = "hyperv" } },
+                out var homeRejectMsg,
+                homeHost,
+                new PlatformFacts("Windows", "x64", "CoreCountrySpecific", true, true, 16, true, false))
+                && homeRejectMsg.Contains("家庭");
+
+            banner.Text = "";
+            LoadTask(legacyState.Options.StatePath, loadSecrets: false, interactive: false);
+            var legacyAbortedCleanly = ReferenceEquals(state, activeBefore) &&
+                root.Text == rootBefore &&
+                banner.Text.Contains("virtualbox") &&
+                File.ReadAllText(legacyState.Options.StatePath) == rawBefore;
+            Directory.Delete(legacyDir, true);
+
+            Go(1);
+            UpdateLayout();
+            Navigate(7);
+            UpdateLayout();
+            var vboxControlsHidden = useCustomVmConfig.Visibility == Visibility.Collapsed &&
+                cpuNemWarning.Visibility == Visibility.Collapsed &&
+                desktopRecoverDisplayMenuItem?.Visibility == Visibility.Collapsed &&
+                desktopForceRepairMenuItem?.Visibility == Visibility.Collapsed;
+            var standaloneChecksOk = hypervHomeRejected && legacyAbortedCleanly && vboxControlsHidden;
+            if (!standaloneChecksOk) failed++;
+            rows.Add(new { name = "hyperv-standalone-rejects-legacy-tasks-early-and-hides-vbox-controls", passed = standaloneChecksOk });
+            Navigate(0);
+        }
 
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);

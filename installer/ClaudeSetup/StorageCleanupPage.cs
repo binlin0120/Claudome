@@ -14,15 +14,24 @@ public sealed partial class SetupWindow
     internal StorageCleanupContext BuildStorageCleanupContext(string? archiveDirOverride = null)
     {
         var appDir = Path.GetDirectoryName(Environment.ProcessPath ?? "") ?? AppContext.BaseDirectory;
+        var expectedPlatform = ProductProfile.IsHyperVStandalone ? "hyperv" : null;
+        var expectedPrefix = ProductProfile.IsHyperVStandalone ? ProductProfile.PackagePrefix : null;
         var roots = new List<string>();
-        if (!string.IsNullOrWhiteSpace(state.Options.Root)) roots.Add(state.Options.Root);
-        if (!string.IsNullOrWhiteSpace(root.Text)) roots.Add(root.Text);
+        if (!string.IsNullOrWhiteSpace(state.Options.Root) &&
+            StorageCleanupService.IsWorkspaceOwnedByEdition(state.Options.Root, expectedPlatform))
+            roots.Add(state.Options.Root);
+        if (!ProductProfile.IsHyperVStandalone &&
+            !string.IsNullOrWhiteSpace(root.Text) &&
+            StorageCleanupService.IsWorkspaceOwnedByEdition(root.Text, null))
+            roots.Add(root.Text);
         return new StorageCleanupContext(
             PlatformId: "windows",
             AppDirectory: appDir,
             TempDirectory: Path.GetTempPath(),
             WorkspaceRoots: roots.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-            ArchiveDirectory: archiveDirOverride ?? (string.IsNullOrWhiteSpace(storageArchivePreviewDir) ? null : storageArchivePreviewDir));
+            ArchiveDirectory: archiveDirOverride ?? (string.IsNullOrWhiteSpace(storageArchivePreviewDir) ? null : storageArchivePreviewDir),
+            ExpectedPlatformId: expectedPlatform,
+            ExpectedPackagePrefix: expectedPrefix);
     }
 
     private void DrawStorageCleanup()
@@ -177,7 +186,7 @@ public sealed partial class SetupWindow
 
     private void PickArchiveDirectoryForPreview()
     {
-        var dialog = new OpenFolderDialog { Title = "选择历史 Claudome 交付包目录以预览可清理项" };
+        var dialog = new OpenFolderDialog { Title = $"选择历史 {ProductProfile.WindowTitle} 交付包目录以预览可清理项" };
         if (dialog.ShowDialog() != true || string.IsNullOrWhiteSpace(dialog.FolderName)) return;
         storageArchivePreviewDir = dialog.FolderName;
         Navigate(8);

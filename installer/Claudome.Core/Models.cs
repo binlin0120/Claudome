@@ -68,7 +68,7 @@ public sealed class SetupOptions
     public bool TestOutage { get; set; }
     public bool ManualAdsPower { get; set; }
     public string WorkspaceId { get; set; } = Guid.NewGuid().ToString("N");
-    public string PlatformId { get; set; } = "virtualbox";
+    public string PlatformId { get; set; } = ProductProfile.IsHyperVStandalone ? "hyperv" : "virtualbox";
     public bool VmwareSecurityConfirmed { get; set; }
     public bool HyperVBasicConsoleConfirmed { get; set; }
     public bool SharedClipboardEnabled { get; set; } = true;
@@ -87,6 +87,8 @@ public sealed class SetupOptions
             throw new SetupException("微软账号同步仅适用于已安装的 VirtualBox 来宾，请在原虚拟机桌面重新同步。");
         if (!string.IsNullOrEmpty(GuestLocalAppData) && (PlatformId != "virtualbox" || !IsGuestLocalAppData(GuestLocalAppData)))
             throw new SetupException("已保存的来宾配置目录无效，请重新同步账号。");
+        if (ProductProfile.IsHyperVStandalone && PlatformId != "hyperv")
+            throw new SetupException("Claudome Hyper-V 独立版仅支持创建和继续 Hyper-V 任务；请使用原版 Claudome 打开其他虚拟机任务。");
         var minCpu = PlatformId == "virtualbox" ? 1 : 2;
         if (MemoryMb < 4096 || MemoryMb > 32768 || CpuCount < minCpu || CpuCount > Environment.ProcessorCount || DiskGb < 80 || DiskGb > 1024) throw new SetupException($"请核对内存、CPU 和磁盘分配。要求至少 4 GB 来宾内存、{minCpu} 个 CPU、80 GB 磁盘。");
         if (WindowsImageIndex < 1 || WindowsImageIndex > 20) throw new SetupException("Windows 镜像索引应为 1–20。");

@@ -186,7 +186,11 @@ public sealed partial class SetupWindow : Window
         pages[0].Children.Add(Card(Text("这次会做什么", 16, false), Text("创建独立的 Windows 虚拟机，准备网络代理与 AdsPower 环境。你可以继续使用已有订阅，自行选择节点。"), Text("客户无需安装 Codex。安装到哪些目录、哪些步骤需要管理员确认，都会在开始前说明。已有虚拟机不会被覆盖。"), Text("当前为开发试用版：Windows 10 与内嵌控制台尚需干净机器端到端验收，程序会如实显示待处理项。", 12), Row(Action("查看组件来源与许可", (_, _) => ShowLicenses()))));
         pages[1].Children.Add(Card(Text("已有虚拟机？", 16, false), Text("先查看当前电脑已注册的环境，再决定新建还是载入原任务。", 12), Row(Action("扫描本机已有虚拟机", async (_, _) => await ScanMachines()), Action("载入已有安装任务", (_, _) => LoadTask())), inventoryPanel));
         cpuNemWarning.Foreground = Accent;
-        pages[1].Children.Add(Card(Field("数据与虚拟磁盘目录", root, "建议至少预留 95 GB；可选择本地磁盘，无需强制使用 D 盘。"), Row(Action("选择文件夹", (_, _) => { if(!string.IsNullOrEmpty(state.VmId)){Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。");return;}var d = new OpenFolderDialog(); if (d.ShowDialog() == true) root.Text = d.FolderName; })), Field("虚拟机名称", vmName, "使用英文字母、数字、短横线或下划线。"), Field("来宾内存（MB）", memory), Field("虚拟 CPU 数量", cpu, "开启虚拟化安全（Hyper-V 兼容模式）的电脑上 VirtualBox 默认推荐 1 核以彻底避免多核跨核中断死锁；若你自行修改核数或勾选下方自定义开关，程序将按你选择的配置运行，不自动启用防卡死降核。"), useCustomVmConfig, cpuNemWarning, Field("虚拟磁盘最大容量（GB）", disk),creationNote));
+        useCustomVmConfig.Visibility = ProductProfile.IsHyperVStandalone ? Visibility.Collapsed : Visibility.Visible;
+        var cpuFieldHint = ProductProfile.IsHyperVStandalone
+            ? "Hyper-V 独立版默认推荐 2 核；如需调整可在创建前直接修改。"
+            : "开启虚拟化安全（Hyper-V 兼容模式）的电脑上 VirtualBox 默认推荐 1 核以彻底避免多核跨核中断死锁；若你自行修改核数或勾选下方自定义开关，程序将按你选择的配置运行，不自动启用防卡死降核。";
+        pages[1].Children.Add(Card(Field("数据与虚拟磁盘目录", root, "建议至少预留 95 GB；可选择本地磁盘，无需强制使用 D 盘。"), Row(Action("选择文件夹", (_, _) => { if(!string.IsNullOrEmpty(state.VmId)){Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。");return;}var d = new OpenFolderDialog(); if (d.ShowDialog() == true) root.Text = d.FolderName; })), Field("虚拟机名称", vmName, "使用英文字母、数字、短横线或下划线。"), Field("来宾内存（MB）", memory), Field("虚拟 CPU 数量", cpu, cpuFieldHint), useCustomVmConfig, cpuNemWarning, Field("虚拟磁盘最大容量（GB）", disk),creationNote));
         iso.IsReadOnly = true;
         pages[2].Children.Add(Card(Text("由程序准备下载工具", 17, false), Text("此按钮下载的是微软媒体创建工具，不是 Windows 系统镜像。打开工具后需由本人确认许可、选择 ISO 文件并保存；完成后回来选择生成的 ISO。", 12), Row(Action("下载并打开微软镜像工具", async (_, _) => await Perform(async (o, token) => { await Engine().PrepareWindowsMedia(o, token); Notice("微软工具已打开。确认许可 → 选择 ISO 文件（不要选 U 盘）→ 保存镜像。下载完成后回到这里选择该 ISO，再继续部署。"); }), true)), Field("Windows 11 x64 镜像", iso), Row(Action("选择已下载的 ISO", (_, _) => { var d = new OpenFileDialog { Filter = "Windows ISO|*.iso" }; if (d.ShowDialog() == true) { iso.Text = d.FileName; isoHash.Clear(); } })), Text("程序会自动计算并记录文件指纹，用于后续检测文件变化；这不等同于与微软公布的校验值比对。请使用微软工具生成的正版介质。", 11)));
         windowsImages.DisplayMemberPath="Label";windowsImages.SelectedValuePath="Index";
@@ -302,9 +306,18 @@ public sealed partial class SetupWindow : Window
             var memoryNote = host.FreeMemory < 6L * 1024 * 1024 * 1024
                 ? "可以先下载资源。启动 4 GB 虚拟机前，请至少空出约 6 GB 内存。程序不会自动关闭你的应用。"
                 : "当前空闲内存满足默认 4 GB 来宾的启动余量，实际启动前还会重新检查。";
-            hostNote.Text = Machine.IsHomeEdition(host.Edition)
-                ? Machine.HomeEditionHyperVNotice + "\n\n" + memoryNote
-                : memoryNote;
+            if (ProductProfile.IsHyperVStandalone)
+            {
+                hostNote.Text = Machine.HyperVStandaloneIneligibilityReason(host) is { } reason
+                    ? reason + "\n\n" + memoryNote
+                    : "当前电脑符合 Hyper-V 独立版要求（Windows 11 专业版 / 企业版 x64）。\n\n" + memoryNote;
+            }
+            else
+            {
+                hostNote.Text = Machine.IsHomeEdition(host.Edition)
+                    ? Machine.HomeEditionHyperVNotice + "\n\n" + memoryNote
+                    : memoryNote;
+            }
         }
         catch (Exception ex) { hostText.Text = "当前检查未完成"; hostNote.Text = Redaction.SafeError(ex); }
     }
@@ -323,6 +336,12 @@ public sealed partial class SetupWindow : Window
     }
     private void UpdateCreationCpuNemWarning()
     {
+        if (ProductProfile.IsHyperVStandalone)
+        {
+            cpuNemWarning.Text = "";
+            cpuNemWarning.Visibility = Visibility.Collapsed;
+            return;
+        }
         var selectedPlatform = platform.SelectedValue?.ToString() ?? state.Options.PlatformId;
         var warning = string.IsNullOrEmpty(state.VmId) && int.TryParse(cpu.Text.Trim(), out var parsed)
             ? SetupOptions.MultiCoreNemWarning(selectedPlatform, parsed)
@@ -370,6 +389,11 @@ public sealed partial class SetupWindow : Window
     }
     private async Task Perform(Func<SetupOptions, CancellationToken, Task> operation, bool useSavedOptions = false)
     {
+        if (Machine.HyperVStandaloneIneligibilityReason() is { } ineligibility)
+        {
+            Notice(ineligibility);
+            return;
+        }
         if (busy) { Notice("请等待当前操作完成，或先暂停。"); return; }
         try { taskFaulted=false;installationNetworkFailed=false;latestTaskDownload="";RecordTaskActivity("正在核对原任务与所选节点…"); var o = useSavedOptions ? state.Options : Options(); busy = true; AllowEditing(false);SetDesktopConnectionStatus(DesktopWaitingText()); cancellation = new(); await operation(o, cancellation.Token); }
         catch(OperationCanceledException){state.Status="已暂停，可继续原任务";RecordTaskActivity("任务已暂停，原任务与磁盘保留。");SetDesktopConnectionStatus("任务已暂停，点击继续原任务后恢复。");SaveCurrentTask();}
@@ -592,13 +616,45 @@ public sealed partial class SetupWindow : Window
         finally { busy = false; CompleteCloseAfterPause(); }
     }
 
+    internal static bool TryRejectUnsupportedTaskForEdition(SessionState loaded, out string message,
+        HostInfo? hostOverride = null, PlatformFacts? factsOverride = null)
+    {
+        if (!ProductProfile.IsHyperVStandalone)
+        {
+            message = "";
+            return false;
+        }
+        var platformId = loaded.Options?.PlatformId ?? "";
+        if (!string.Equals(platformId, "hyperv", StringComparison.OrdinalIgnoreCase))
+        {
+            message = $"此任务使用的是「{platformId}」方案，不属于 {ProductProfile.WindowTitle}。程序已保留原任务目录、虚拟机和凭据未作任何改动；请继续使用原版 Claudome 打开该任务。";
+            return true;
+        }
+        if (Machine.HyperVStandaloneIneligibilityReason(hostOverride, factsOverride) is { } hostReason)
+        {
+            message = hostReason;
+            return true;
+        }
+        message = "";
+        return false;
+    }
+
     private void LoadTask(string? selectedPath = null, bool loadSecrets = true, bool interactive = true)
     {
         try
         {
             if (selectedPath is null) { var dialog = new OpenFileDialog { Filter = "安装状态|setup-state.json" }; if (dialog.ShowDialog() != true) return; selectedPath = dialog.FileName; }
-            var loaded = JsonFile.Read<SessionState>(selectedPath); loaded.Options.Validate(false);
-            if (!Path.GetFullPath(selectedPath).Equals(Path.GetFullPath(loaded.Options.StatePath), StringComparison.OrdinalIgnoreCase)) throw new SetupException("状态文件位置与任务目录不一致，请选择原目录中的文件。");
+            var loaded = JsonFile.Read<SessionState>(selectedPath);
+            if (loaded.Options is null || string.IsNullOrWhiteSpace(loaded.Options.Root))
+                throw new SetupException("状态文件缺少有效的任务目录。");
+            if (!Path.GetFullPath(selectedPath).Equals(Path.GetFullPath(loaded.Options.StatePath), StringComparison.OrdinalIgnoreCase))
+                throw new SetupException("状态文件位置与任务目录不一致，请选择原目录中的文件。");
+            if (TryRejectUnsupportedTaskForEdition(loaded, out var rejectReason))
+            {
+                if (interactive) Notice(rejectReason); else banner.Text = rejectReason;
+                return;
+            }
+            loaded.Options.Validate(false);
             _ = BoundaryRuntime.Replace(null, "");
             var credentialsNote = ApplyLoadedTask(loaded, loadSecrets, interactive);
             RememberTask();

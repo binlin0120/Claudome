@@ -1,4 +1,5 @@
 using System.IO;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -160,7 +161,9 @@ public sealed record StorageCleanupContext(
     string? ActiveArchivePath = null,
     string? ActiveWorkspaceId = null,
     string? ActiveRouteRevision = null,
-    string? PreviousRouteRevision = null)
+    string? PreviousRouteRevision = null,
+    string? ExpectedPlatformId = null,
+    string? ExpectedPackagePrefix = null)
 {
     public static string DefaultRegistryPath =>
         Path.Combine(ProductProfile.AppDataDirectory, "backup-registry.json");
@@ -755,6 +758,45 @@ public static class StorageCleanupService
         }
     }
 
+    public static bool IsWorkspaceOwnedByEdition(string root, string? expectedPlatformId)
+    {
+        if (string.IsNullOrWhiteSpace(root)) return false;
+        try
+        {
+            var full = SafeNormalizePath(root);
+            if (!Directory.Exists(full) || IsReparsePointPath(full)) return false;
+            var marker = Path.Combine(full, ".claude-setup-workspace.json");
+            if (!File.Exists(marker) || IsReparsePointPath(marker)) return false;
+            using var markerDoc = JsonDocument.Parse(File.ReadAllText(marker));
+            if (!markerDoc.RootElement.TryGetProperty("application", out var appProp) ||
+                appProp.GetString() != "claude-environment-setup")
+                return false;
+            if (string.IsNullOrWhiteSpace(expectedPlatformId)) return true;
+
+            foreach (var stateFile in new[] { Path.Combine(full, "setup-state.json"), TaskCheckpointStore.BackupPath(Path.Combine(full, "setup-state.json")) })
+            {
+                if (!File.Exists(stateFile) || IsReparsePointPath(stateFile)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(File.ReadAllText(stateFile));
+                    if (doc.RootElement.TryGetProperty("Options", out var opts) &&
+                        opts.TryGetProperty("PlatformId", out var plat) &&
+                        plat.ValueKind == JsonValueKind.String &&
+                        !string.IsNullOrWhiteSpace(plat.GetString()))
+                    {
+                        return string.Equals(plat.GetString(), expectedPlatformId, StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+                catch { }
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static void InspectWorkspaceItems(
         StorageCleanupContext context,
         IReadOnlyList<BackupRegistryRecord> registry,
@@ -764,6 +806,9 @@ public static class StorageCleanupService
         {
             var root = SafeNormalizePath(rawRoot);
             if (!Directory.Exists(root)) continue;
+            if (!string.IsNullOrWhiteSpace(context.ExpectedPlatformId) &&
+                !IsWorkspaceOwnedByEdition(root, context.ExpectedPlatformId))
+                continue;
             var scopeId = TryReadWorkspaceId(root) ?? root;
             var scopeLabel = TryReadVmName(root) ?? Path.GetFileName(root);
 
@@ -876,6 +921,23 @@ public static class StorageCleanupService
         }
     }
 
+    private static bool MatchesExpectedArchivePackage(string zipPath, string? expectedPackagePrefix)
+    {
+        if (string.IsNullOrWhiteSpace(expectedPackagePrefix)) return true;
+        var name = Path.GetFileName(zipPath);
+        if (!name.StartsWith(expectedPackagePrefix + "_", StringComparison.OrdinalIgnoreCase))
+            return false;
+        try
+        {
+            using var archive = ZipFile.OpenRead(zipPath);
+            return archive.Entries.Any(e => Path.GetFileName(e.FullName).Equals("Claudome.exe", StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static void InspectUserArchiveDirectory(
         StorageCleanupContext context,
         CleanupSettings settings,
@@ -886,7 +948,7 @@ public static class StorageCleanupService
 
         var activeArchive = string.IsNullOrWhiteSpace(context.ActiveArchivePath) ? "" : SafeNormalizePath(context.ActiveArchivePath);
         var zips = SafeEnumerateFiles(dir, "*.zip").OrderByDescending(File.GetLastWriteTimeUtc).ToList();
-        var latestPath = zips.FirstOrDefault();
+        var latestOwnedPath = zips.FirstOrDefault(z => MatchesExpectedArchivePackage(z, context.ExpectedPackagePrefix));
 
         foreach (var zip in zips)
         {
@@ -896,6 +958,12 @@ public static class StorageCleanupService
             {
                 add(MakeFileCandidate(BackupCategory.UserArchives, "用户选择的交付目录", dir, Path.GetFileName(dir), full, len, mtime,
                     CleanupItemStatus.Retained, "路径为符号链接，跳过", canSelect: false, dir));
+                continue;
+            }
+            if (!MatchesExpectedArchivePackage(full, context.ExpectedPackagePrefix))
+            {
+                add(MakeFileCandidate(BackupCategory.UserArchives, "用户选择的交付目录", dir, Path.GetFileName(dir), full, len, mtime,
+                    CleanupItemStatus.Retained, "非当前专版确认归属的交付包（普通版或其他压缩包），已隔离保留", canSelect: false, dir));
                 continue;
             }
             if (full.Equals(activeArchive, StringComparison.OrdinalIgnoreCase))
@@ -910,7 +978,7 @@ public static class StorageCleanupService
                     CleanupItemStatus.Retained, "已标记保留的历史交付包", canSelect: false, dir));
                 continue;
             }
-            if (latestPath is not null && full.Equals(SafeNormalizePath(latestPath), StringComparison.OrdinalIgnoreCase))
+            if (latestOwnedPath is not null && full.Equals(SafeNormalizePath(latestOwnedPath), StringComparison.OrdinalIgnoreCase))
             {
                 add(MakeFileCandidate(BackupCategory.UserArchives, "用户选择的交付目录", dir, Path.GetFileName(dir), full, len, mtime,
                     CleanupItemStatus.Retained, "默认保留该目录最近一份可用交付包；仅手动或取消保留后处理更早版本", canSelect: false, dir));
