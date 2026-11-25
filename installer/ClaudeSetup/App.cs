@@ -69,7 +69,7 @@ public sealed partial class SetupWindow : Window
     private readonly TextBlock title = new(), subtitle = new(), hostText = new(), hostNote = new(), banner = new();
     private readonly List<StackPanel> pages = [];
     private readonly List<Button> navigationButtons = [];
-    private readonly ComboBox platform = Choice([]);
+    private readonly ComboBox platform = Choice([]), fixedNtfsDrives = Choice([]), candidateIsos = Choice([]);
     private readonly TextBlock platformReason = new() { TextWrapping = TextWrapping.Wrap, Foreground = Muted, LineHeight = 22 };
     private readonly TextBox root = Input(), vmName = Input("Claude-Workspace"), memory = Input("4096"), cpu = Input("2"), disk = Input("80"), iso = Input(), isoUrl = Input(), isoHash = Input(), imageIndex = Input("1"), user = Input("ClaudeUser"), subscription = Input(), expectedIp = Input();
     private readonly TextBox networkText = Input("", true), passwordVisible = Input(), log = Input("", true);
@@ -178,7 +178,10 @@ public sealed partial class SetupWindow : Window
         for (int i = 0; i < 6; i++) pages.Add(new StackPanel());
         hostText.FontSize = 16; hostText.TextWrapping = TextWrapping.Wrap; hostText.LineHeight = 29; hostText.Margin = new Thickness(0, 0, 0, 14);
         hostNote.TextWrapping = TextWrapping.Wrap; hostNote.Foreground = Muted; hostNote.LineHeight = 23;
-        pages[0].Children.Add(Card(Text("当前电脑", 16, false), hostText, hostNote, Row(Action("重新检查", (_, _) => RefreshHost()), Action("载入已有安装任务", (_, _) => LoadTask()))));
+        var hostActions = Row(Action("重新检查", (_, _) => RefreshHost()), Action("载入已有安装任务", (_, _) => LoadTask()));
+        if (ProductProfile.IsHyperVStandalone)
+            hostActions.Children.Add(Action("启用 / 核对 Hyper-V 功能", async (_, _) => await EnableHyperVHostFeatureAsync()));
+        pages[0].Children.Add(Card(Text("当前电脑", 16, false), hostText, hostNote, hostActions));
         platform.DisplayMemberPath = "Label"; platform.SelectedValuePath = "Id";
         platform.SelectionChanged += (_, _) => { if(hyperVConsoleCard is not null) hyperVConsoleCard.Visibility = platform.SelectedValue?.ToString() == "hyperv" ? Visibility.Visible : Visibility.Collapsed; ApplyRecommendedCpuIfNotCustom(); UpdateCreationCpuNemWarning(); if (platform.SelectedItem is PlatformChoice choice) { platformReason.Text = choice.Reason + "\n" + string.Join("\n", choice.Instructions); RefreshConsent(); } };
         RefreshPlatforms();
@@ -190,9 +193,41 @@ public sealed partial class SetupWindow : Window
         var cpuFieldHint = ProductProfile.IsHyperVStandalone
             ? "Hyper-V 独立版默认推荐 2 核；如需调整可在创建前直接修改。"
             : "开启虚拟化安全（Hyper-V 兼容模式）的电脑上 VirtualBox 默认推荐 1 核以彻底避免多核跨核中断死锁；若你自行修改核数或勾选下方自定义开关，程序将按你选择的配置运行，不自动启用防卡死降核。";
-        pages[1].Children.Add(Card(Field("数据与虚拟磁盘目录", root, "建议至少预留 95 GB；可选择本地磁盘，无需强制使用 D 盘。"), Row(Action("选择文件夹", (_, _) => { if(!string.IsNullOrEmpty(state.VmId)){Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。");return;}var d = new OpenFolderDialog(); if (d.ShowDialog() == true) root.Text = d.FolderName; })), Field("虚拟机名称", vmName, "使用英文字母、数字、短横线或下划线。"), Field("来宾内存（MB）", memory), Field("虚拟 CPU 数量", cpu, cpuFieldHint), useCustomVmConfig, cpuNemWarning, Field("虚拟磁盘最大容量（GB）", disk),creationNote));
+        fixedNtfsDrives.DisplayMemberPath = "DisplayLabel";
+        fixedNtfsDrives.SelectedValuePath = "SuggestedWorkspacePath";
+        var driveQuickRow = Row(Action("使用所选 NTFS 盘建议目录", (_, _) =>
+        {
+            if (!string.IsNullOrEmpty(state.VmId)) { Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。"); return; }
+            if (fixedNtfsDrives.SelectedValue is string suggested && !string.IsNullOrWhiteSpace(suggested)) root.Text = suggested;
+        }));
+        pages[1].Children.Add(Card(
+            Field("数据与虚拟磁盘目录", root, "建议至少预留 95 GB；可选择本机任意固定 NTFS 盘（无需强制 C/D 盘）。"),
+            Field("快速选择本机可用 NTFS 分区", fixedNtfsDrives),
+            Row(Action("选择文件夹", (_, _) => { if(!string.IsNullOrEmpty(state.VmId)){Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。");return;}var d = new OpenFolderDialog(); if (d.ShowDialog() == true) root.Text = d.FolderName; }), driveQuickRow),
+            Field("虚拟机名称", vmName, "使用英文字母、数字、短横线或下划线。"),
+            Field("来宾内存（MB）", memory),
+            Field("虚拟 CPU 数量", cpu, cpuFieldHint),
+            useCustomVmConfig, cpuNemWarning, Field("虚拟磁盘最大容量（GB）", disk), creationNote));
         iso.IsReadOnly = true;
-        pages[2].Children.Add(Card(Text("由程序准备下载工具", 17, false), Text("此按钮下载的是微软媒体创建工具，不是 Windows 系统镜像。打开工具后需由本人确认许可、选择 ISO 文件并保存；完成后回来选择生成的 ISO。", 12), Row(Action("下载并打开微软镜像工具", async (_, _) => await Perform(async (o, token) => { await Engine().PrepareWindowsMedia(o, token); Notice("微软工具已打开。确认许可 → 选择 ISO 文件（不要选 U 盘）→ 保存镜像。下载完成后回到这里选择该 ISO，再继续部署。"); }), true)), Field("Windows 11 x64 镜像", iso), Row(Action("选择已下载的 ISO", (_, _) => { var d = new OpenFileDialog { Filter = "Windows ISO|*.iso" }; if (d.ShowDialog() == true) { iso.Text = d.FileName; isoHash.Clear(); } })), Text("程序会自动计算并记录文件指纹，用于后续检测文件变化；这不等同于与微软公布的校验值比对。请使用微软工具生成的正版介质。", 11)));
+        candidateIsos.DisplayMemberPath = "DisplayLabel";
+        candidateIsos.SelectedValuePath = "IsoPath";
+        pages[2].Children.Add(Card(
+            Text("方式一：选择本机已有或扫描到的 Windows 11 ISO", 17, false),
+            Text("如本机已有官方 Windows 11 x64 ISO，可直接浏览选择，或点击扫描本机常见下载目录/NTFS 分区。", 12),
+            Field("Windows 11 x64 镜像路径", iso),
+            Row(Action("选择已下载的 ISO", (_, _) => { var d = new OpenFileDialog { Filter = "Windows ISO|*.iso" }; if (d.ShowDialog() == true) { iso.Text = d.FileName; isoHash.Clear(); } }),
+                Action("扫描本机已有 ISO", (_, _) => ScanCandidateIsos())),
+            Field("扫描到的本机候选 ISO", candidateIsos),
+            Row(Action("采用所选候选 ISO", (_, _) => { if (candidateIsos.SelectedValue is string foundIso && !string.IsNullOrWhiteSpace(foundIso)) { iso.Text = foundIso; isoHash.Clear(); banner.Text = "已选中候选 ISO，请点击下方「读取镜像版本」。"; } }))));
+        pages[2].Children.Add(Card(
+            Text("方式二：粘贴微软官网下载链接，由程序自主下载", 17, false),
+            Text("前往微软官网选择「Windows 11（多版本 ISO）」→ 选择简体中文或英文 → 右键「立即下载（64位）」复制链接粘贴到下方，即可由程序高速下载并记录指纹（也可再按传统方式下载微软媒体创建工具）。", 12),
+            Field("微软官网 ISO 下载直链（HTTPS）", isoUrl, "仅接受微软官方下载域（*.microsoft.com / windowsupdate.com），支持断点续传。"),
+            Field("微软官网公布的 SHA-256（可选，建议填写以严格校验）", isoHash, "填写后下载完成立即核验；留空则在下载完成后由程序自动计算并记录指纹。"),
+            Row(Action("打开微软 Windows 11 官网下载页", (_, _) => OpenUrl("https://www.microsoft.com/software-download/windows11")),
+                Action("从官网链接下载 ISO", async (_, _) => await DownloadIsoFromUrlAsync(), true),
+                Action("暂停下载", (_, _) => cancellation?.Cancel())),
+            Row(Action("改用微软媒体创建工具下载", async (_, _) => await Perform(async (o, token) => { await Engine().PrepareWindowsMedia(o, token); Notice("微软工具已打开。确认许可 → 选择 ISO 文件（不要选 U 盘）→ 保存镜像。下载完成后回到上方选择该 ISO。"); })))));
         windowsImages.DisplayMemberPath="Label";windowsImages.SelectedValuePath="Index";
         windowsImages.SelectionChanged+=(_,_)=>{license.IsChecked=false;RefreshConsent();};
         iso.TextChanged+=(_,_)=>ClearMedia();
@@ -308,9 +343,11 @@ public sealed partial class SetupWindow : Window
                 : "当前空闲内存满足默认 4 GB 来宾的启动余量，实际启动前还会重新检查。";
             if (ProductProfile.IsHyperVStandalone)
             {
-                hostNote.Text = Machine.HyperVStandaloneIneligibilityReason(host) is { } reason
-                    ? reason + "\n\n" + memoryNote
-                    : "当前电脑符合 Hyper-V 独立版要求（Windows 11 专业版 / 企业版 x64）。\n\n" + memoryNote;
+                var preflight = Machine.ReadHyperVPreflight(host);
+                hostNote.Text = (Machine.HyperVStandaloneIneligibilityReason(host) is { } reason
+                    ? reason
+                    : "当前电脑符合 Hyper-V 独立版要求（Windows 11 专业版 / 企业版 x64）。") +
+                    "\n" + preflight.SummaryLine + "\n\n" + memoryNote;
             }
             else
             {
@@ -318,8 +355,53 @@ public sealed partial class SetupWindow : Window
                     ? Machine.HomeEditionHyperVNotice + "\n\n" + memoryNote
                     : memoryNote;
             }
+            var drives = Machine.GetFixedNtfsDrives();
+            fixedNtfsDrives.ItemsSource = drives;
+            if (drives.Count > 0 && fixedNtfsDrives.SelectedIndex < 0)
+                fixedNtfsDrives.SelectedIndex = 0;
         }
         catch (Exception ex) { hostText.Text = "当前检查未完成"; hostNote.Text = Redaction.SafeError(ex); }
+    }
+
+    private void ScanCandidateIsos()
+    {
+        try
+        {
+            var found = WindowsMedia.DiscoverCandidateIsos();
+            candidateIsos.ItemsSource = found;
+            if (found.Count > 0)
+            {
+                candidateIsos.SelectedIndex = 0;
+                if (string.IsNullOrWhiteSpace(iso.Text)) iso.Text = found[0].IsoPath;
+                Notice($"已扫描到 {found.Count} 个候选 ISO 镜像（大于 1 GB）。请确认后点击下方「读取镜像版本」。");
+            }
+            else
+            {
+                Notice("常见目录（下载、桌面及各 NTFS 盘根目录/ISO 文件夹）中暂未发现大于 1 GB 的 ISO 镜像，可手动浏览选择或粘贴官网链接下载。");
+            }
+        }
+        catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
+    }
+
+    private async Task EnableHyperVHostFeatureAsync()
+    {
+        await Perform(async (_, token) =>
+        {
+            await Engine().EnableHyperVFeatureAsync(state, token);
+            RefreshHost();
+            Notice("Hyper-V 功能与虚拟机管理服务（vmms）均已就绪，可以继续下一步配置。");
+        });
+    }
+
+    private async Task DownloadIsoFromUrlAsync()
+    {
+        await Perform(async (o, token) =>
+        {
+            var (path, computedSha) = await Engine().DownloadIso(o, token);
+            iso.Text = path;
+            isoHash.Text = computedSha;
+            Notice($"Windows ISO 已下载完成并记录 SHA-256 指纹：\n{path}\n\n请接着点击下方「读取镜像版本」选择要安装的版本（如 Windows 11 专业版）。");
+        });
     }
     private void ApplyRecommendedCpuIfNotCustom()
     {

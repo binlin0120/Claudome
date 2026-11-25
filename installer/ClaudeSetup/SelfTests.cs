@@ -460,6 +460,53 @@ public static class SelfTests
                 Assert(Machine.HyperVStandaloneIneligibilityReason(homeHost, proFacts) is null, "Standard edition must not trigger standalone Hyper-V block");
             }
         }));
+        await Check("hyperv-preflight-and-ntfs-drive-discovery", () => Sync(() => {
+            var proHost = new HostInfo("Professional", 16L * 1024 * 1024 * 1024, 8L * 1024 * 1024 * 1024, 8, true, 26100, null);
+            var homeHost = proHost with { Edition = "CoreCountrySpecific" };
+            var proFacts = new PlatformFacts("Windows", "x64", "Professional", true, true, 16, true, false);
+            var prePro = Machine.ReadHyperVPreflight(proHost, proFacts);
+            var preHome = Machine.ReadHyperVPreflight(homeHost, proFacts);
+            Assert(prePro.EditionEligible && prePro.VirtualizationReady && !preHome.EditionEligible && !preHome.CanOfferEnableHyperV,
+                "Hyper-V preflight misclassified Pro vs Home host eligibility");
+            var drives = Machine.GetFixedNtfsDrives();
+            Assert(drives.Count >= 1 && drives.All(d => !string.IsNullOrWhiteSpace(d.SuggestedWorkspacePath)),
+                "Fixed NTFS drive discovery returned no usable drives");
+        }));
+        await Check("iso-official-url-validation-and-optional-sha-download", async () => {
+            Assert(Deployment.IsOfficialMicrosoftDownloadUri("https://software.download.prss.microsoft.com/dbazure/Win11_24H2_x64.iso"),
+                "Official Microsoft ISO CDN URL rejected");
+            Assert(!Deployment.IsOfficialMicrosoftDownloadUri("http://software.download.prss.microsoft.com/Win11.iso"),
+                "Insecure HTTP Microsoft URL accepted");
+            Assert(!Deployment.IsOfficialMicrosoftDownloadUri("https://mirror.example.invalid/Win11.iso"),
+                "Non-Microsoft domain URL accepted");
+
+            if (!ProductProfile.IsHyperVStandalone)
+            {
+                var isoDir = Path.Combine(root, "iso-url-dl");
+                var opts = new SetupOptions
+                {
+                    Root = isoDir,
+                    PlatformId = "virtualbox",
+                    IsoUrl = "https://software.download.prss.microsoft.com/dbazure/Win11_Fixture.iso"
+                };
+                var payload = Encoding.UTF8.GetBytes("synthetic-official-iso-stream-payload-0123456789");
+                var expectedSha = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+                using var http = new HttpClient(new Handler(req => Reply(req, payload)));
+                var dep = new Deployment(new Progress<string>(_ => { }), new Progress<DownloadProgress>(_ => { }));
+                var (path, computed) = await dep.DownloadIso(opts, CancellationToken.None, http);
+                Assert(File.Exists(path) && computed == expectedSha && opts.IsoSha256 == expectedSha && opts.IsoPath == path,
+                    "Optional SHA official ISO download did not record computed hash");
+            }
+        });
+        await Check("hyperv-restart-checkpoint-persists-hyperv-restart-action", () => Sync(() => {
+            var ws = Path.Combine(root, "hv-restart-checkpoint");
+            Paths.EnsureWorkspace(ws);
+            var st = new SessionState { Options = new() { Root = ws, PlatformId = "hyperv" } };
+            Deployment.RecordHyperVRestartPending(st);
+            var reloaded = JsonFile.Read<SessionState>(st.Options.StatePath);
+            Assert(reloaded.PendingActions.Any(a => a.Id == "hyperv-restart") && reloaded.Stage.Contains("重启"),
+                "Hyper-V restart checkpoint was not persisted");
+        }));
         await Check("mac-recommendation-does-not-claim-windows-exe-support", () => Sync(() => {
             var mac = new PlatformFacts("macOS", "arm64", "", true, true, 16, false, false);
             Assert(Platforms.Recommend(mac)[0].Id == "fusion" && Platforms.Recommend(mac).All(x => !x.Automatic), "Mac claimed Windows EXE automation");

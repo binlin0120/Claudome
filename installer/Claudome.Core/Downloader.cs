@@ -15,22 +15,43 @@ public sealed class Downloader(HttpClient? client = null) : IDisposable
         await using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, true);
         return Convert.ToHexString(await SHA256.HashDataAsync(file, token)).ToLowerInvariant();
     }
-    public async Task<string> Get(Resource resource, string directory, IProgress<DownloadProgress>? progress, CancellationToken token)
+    public Task<string> Get(Resource resource, string directory, IProgress<DownloadProgress>? progress, CancellationToken token)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(resource.Sha256, "^[a-fA-F0-9]{64}$"))
+            throw new SetupException("资源缺少可信的 SHA-256，已停止下载。");
+        return DownloadCoreAsync(resource, directory, requireSha256: true, progress, token);
+    }
+
+    public Task<string> GetOfficialOptionalHashAsync(Resource resource, string directory, IProgress<DownloadProgress>? progress, CancellationToken token)
+    {
+        if (!string.IsNullOrWhiteSpace(resource.Sha256) &&
+            !System.Text.RegularExpressions.Regex.IsMatch(resource.Sha256, "^[a-fA-F0-9]{64}$"))
+            throw new SetupException("SHA-256 应为 64 位十六进制字符。");
+        return DownloadCoreAsync(resource, directory, requireSha256: !string.IsNullOrWhiteSpace(resource.Sha256), progress, token);
+    }
+
+    private async Task<string> DownloadCoreAsync(Resource resource, string directory, bool requireSha256, IProgress<DownloadProgress>? progress, CancellationToken token)
     {
         if (!Uri.TryCreate(resource.Url, UriKind.Absolute, out var uri) || uri.Scheme != "https") throw new SetupException("下载来源必须是 HTTPS。");
-        if (!System.Text.RegularExpressions.Regex.IsMatch(resource.Sha256, "^[a-fA-F0-9]{64}$")) throw new SetupException("资源缺少可信的 SHA-256，已停止下载。");
+        var expectedHash = requireSha256 ? resource.Sha256.ToLowerInvariant() : "";
         Directory.CreateDirectory(directory);
         if (Path.GetFileName(resource.FileName) != resource.FileName) throw new SetupException("资源文件名不合法。");
         var target = Paths.Under(directory, resource.FileName);
         if (File.Exists(target))
         {
-            if (await Hash(target, token) == resource.Sha256.ToLowerInvariant())
+            if (requireSha256)
             {
-                var size = new FileInfo(target).Length;
-                progress?.Report(new(resource.Name, size, size, 0, FromCache: true));
-                return target;
+                if (await Hash(target, token) == expectedHash)
+                {
+                    var size = new FileInfo(target).Length;
+                    progress?.Report(new(resource.Name, size, size, 0, FromCache: true));
+                    return target;
+                }
+                throw new SetupException($"已有 {resource.Name} 校验不匹配，请在下载目录中移开该文件后重试。");
             }
-            throw new SetupException($"已有 {resource.Name} 校验不匹配，请在下载目录中移开该文件后重试。");
+            var existingSize = new FileInfo(target).Length;
+            progress?.Report(new(resource.Name, existingSize, existingSize, 0, FromCache: true));
+            return target;
         }
         var part = target + ".part"; var metaPath = part + ".json";
         Paths.RejectLinks(part); Paths.RejectLinks(metaPath);
@@ -42,7 +63,7 @@ public sealed class Downloader(HttpClient? client = null) : IDisposable
                 var offset = File.Exists(part) ? new FileInfo(part).Length : 0L;
                 DownloadMeta? metadata = null;
                 if (File.Exists(metaPath)) metadata = JsonFile.Read<DownloadMeta>(metaPath);
-                if (offset > 0 && (metadata?.Sha256 != resource.Sha256 || (resource.Size > 0 && offset > resource.Size)))
+                if (offset > 0 && ((requireSha256 && metadata?.Sha256 != resource.Sha256) || (!requireSha256 && metadata?.Url != resource.Url) || (resource.Size > 0 && offset > resource.Size)))
                     throw new SetupException("已有下载分片与本次版本不一致，请移开对应分片后重试。");
                 using var request = new HttpRequestMessage(HttpMethod.Get, uri);
                 request.Headers.UserAgent.ParseAdd("Claudome/0.1");
@@ -57,7 +78,7 @@ public sealed class Downloader(HttpClient? client = null) : IDisposable
                 if (response.RequestMessage?.RequestUri?.Scheme != "https") throw new SetupException("下载发生了不安全的协议跳转。");
                 if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable && offset > 0)
                 {
-                    if (await Hash(part, token) == resource.Sha256.ToLowerInvariant()) { File.Move(part, target); File.Delete(metaPath); return target; }
+                    if (!requireSha256 || await Hash(part, token) == expectedHash) { File.Move(part, target); File.Delete(metaPath); return target; }
                     throw new SetupException("下载分片不完整且服务器无法继续，请移开该分片后重试。");
                 }
                 response.EnsureSuccessStatusCode();
@@ -67,7 +88,7 @@ public sealed class Downloader(HttpClient? client = null) : IDisposable
                 if (!resume) offset = 0;
                 var total = response.Content.Headers.ContentRange?.Length ?? (response.Content.Headers.ContentLength is long length ? length + offset : null);
                 if (resource.Size > 0 && total.HasValue && total != resource.Size) throw new SetupException("资源大小与版本清单不一致。");
-                JsonFile.Write(metaPath, new DownloadMeta(resource.Sha256, response.Headers.ETag?.ToString()));
+                JsonFile.Write(metaPath, new DownloadMeta(resource.Sha256, response.Headers.ETag?.ToString(), resource.Url));
                 await using var output = new FileStream(part, resume ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, true);
                 await using var input = await response.Content.ReadAsStreamAsync(token);
                 var buffer = new byte[256 * 1024]; long added = 0; var watch = Stopwatch.StartNew(); var last = TimeSpan.Zero;
@@ -83,7 +104,8 @@ public sealed class Downloader(HttpClient? client = null) : IDisposable
                 await output.FlushAsync(token);
                 await output.DisposeAsync();
                 if (resource.Size > 0 && new FileInfo(part).Length != resource.Size) throw new IOException("Incomplete download");
-                if (await Hash(part, token) != resource.Sha256.ToLowerInvariant()) throw new SetupException($"{resource.Name} 的 SHA-256 不匹配，未安装该文件。");
+                if (total.HasValue && new FileInfo(part).Length != total.Value) throw new IOException("Incomplete download");
+                if (requireSha256 && await Hash(part, token) != expectedHash) throw new SetupException($"{resource.Name} 的 SHA-256 不匹配，未安装该文件。");
                 File.Move(part, target); File.Delete(metaPath);
                 progress?.Report(new(resource.Name, offset + added, offset + added, added / Math.Max(watch.Elapsed.TotalSeconds, .01)));
                 return target;
@@ -94,7 +116,7 @@ public sealed class Downloader(HttpClient? client = null) : IDisposable
         throw new SetupException($"{resource.Name} 下载未完成，已保留进度。请检查网络后继续。");
     }
     public void Dispose() { if (owned) http.Dispose(); }
-    private sealed record DownloadMeta(string Sha256, string? ETag);
+    private sealed record DownloadMeta(string Sha256, string? ETag, string? Url = null);
 }
 
 public interface ICommandRunner

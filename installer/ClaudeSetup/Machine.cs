@@ -83,4 +83,113 @@ public static class Machine
         if (host.FreeMemory < (options.MemoryMb + 2048L) * 1024 * 1024) throw new SetupException($"请先空出约 {(options.MemoryMb + 2048) / 1024d:F1} GB 内存，再打开虚拟机。当前约 {host.FreeMemory / 1073741824d:F1} GB。");
         if (new DriveInfo(Path.GetPathRoot(options.Root)!).AvailableFreeSpace < 2L * 1024 * 1024 * 1024) throw new SetupException("虚拟机所在磁盘的可用空间不足 2 GB，请先释放空间。");
     }
+
+    public sealed record FixedNtfsDrive(string Name, string RootPath, string VolumeLabel, long FreeBytes, long TotalBytes, bool MeetsRecommendedSpace, string SuggestedWorkspacePath)
+    {
+        public string DisplayLabel => $"{Name.TrimEnd('\\')} ({(string.IsNullOrWhiteSpace(VolumeLabel) ? "本地磁盘" : VolumeLabel)}) · 可用 {FreeBytes / 1073741824d:F1} GB / {TotalBytes / 1073741824d:F0} GB" +
+            (MeetsRecommendedSpace ? " · 推荐" : " · 空间偏紧");
+    }
+
+    public static List<FixedNtfsDrive> GetFixedNtfsDrives(int requiredFreeGb = 95)
+    {
+        var list = new List<FixedNtfsDrive>();
+        var threshold = requiredFreeGb * 1024L * 1024 * 1024;
+        foreach (var drive in DriveInfo.GetDrives())
+        {
+            try
+            {
+                if (!drive.IsReady || drive.DriveType != DriveType.Fixed ||
+                    !string.Equals(drive.DriveFormat, "NTFS", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var rootPath = drive.RootDirectory.FullName;
+                var suggested = Path.Combine(rootPath, ProductProfile.DefaultWorkspaceFolderName);
+                list.Add(new(drive.Name, rootPath, drive.VolumeLabel ?? "", drive.AvailableFreeSpace, drive.TotalSize, drive.AvailableFreeSpace >= threshold, suggested));
+            }
+            catch { }
+        }
+        return list.OrderByDescending(d => d.MeetsRecommendedSpace).ThenByDescending(d => d.FreeBytes).ToList();
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ServiceStatus
+    {
+        public uint ServiceType, CurrentState, ControlsAccepted, Win32ExitCode, ServiceSpecificExitCode, CheckPoint, WaitHint;
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenSCManagerW(string? machineName, string? databaseName, uint desiredAccess);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenServiceW(IntPtr scManager, string serviceName, uint desiredAccess);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool QueryServiceStatus(IntPtr service, out ServiceStatus status);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool CloseServiceHandle(IntPtr handle);
+
+    private static string QueryVmmsState()
+    {
+        using var reg = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\vmms");
+        if (reg is null) return "missing";
+        if (reg.GetValue("Start") is int start && start == 4) return "disabled";
+        const uint ScManagerConnect = 0x0001;
+        const uint ServiceQueryStatus = 0x0004;
+        var scm = OpenSCManagerW(null, null, ScManagerConnect);
+        if (scm == IntPtr.Zero) return "unknown";
+        try
+        {
+            var svc = OpenServiceW(scm, "vmms", ServiceQueryStatus);
+            if (svc == IntPtr.Zero) return "missing";
+            try
+            {
+                if (!QueryServiceStatus(svc, out var status)) return "unknown";
+                return status.CurrentState == 4 ? "running" : "stopped";
+            }
+            finally { CloseServiceHandle(svc); }
+        }
+        finally { CloseServiceHandle(scm); }
+    }
+
+    public sealed record HyperVHostPreflight(
+        bool EditionEligible,
+        string EditionSummary,
+        bool VirtualizationReady,
+        string VirtualizationSummary,
+        string VmmsState,
+        string VmmsSummary,
+        bool RebootPending,
+        bool AllReady,
+        bool CanOfferEnableHyperV,
+        string SummaryLine);
+
+    public static HyperVHostPreflight ReadHyperVPreflight(HostInfo? hostOverride = null, PlatformFacts? factsOverride = null)
+    {
+        var host = hostOverride ?? Read();
+        var facts = factsOverride ?? Platforms.Detect();
+        var editionOk = host.Is64Bit && host.Build >= 22000 && !IsHomeEdition(host.Edition) && Platforms.IsHyperVSupportedEdition(host.Edition);
+        var editionMsg = editionOk
+            ? $"系统符合：Windows {host.EditionName}（Build {host.Build}）"
+            : $"系统受限：Windows {host.EditionName}（需 Win11 x64 专业版/企业版）";
+        var virtOk = !facts.VirtualizationKnown || facts.VirtualizationReady;
+        var virtMsg = virtOk ? "硬件虚拟化：已就绪" : "硬件虚拟化：未在 BIOS/UEFI 开启";
+
+        using var cbsReboot = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending");
+        using var wuReboot = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired");
+        var rebootPending = cbsReboot is not null || wuReboot is not null;
+
+        var vmmsState = QueryVmmsState();
+        var vmmsMsg = vmmsState switch
+        {
+            "running" => "Hyper-V vmms 服务：运行中",
+            "stopped" => rebootPending ? "Hyper-V 等待重启生效" : "Hyper-V vmms 服务：未启动",
+            "disabled" => "Hyper-V vmms 服务：被禁用",
+            "missing" => rebootPending ? "Hyper-V 功能等待重启完成" : "Hyper-V 功能：尚未启用",
+            _ => "Hyper-V 服务状态：未知"
+        };
+        var allReady = editionOk && virtOk && vmmsState == "running" && !rebootPending;
+        var canEnable = editionOk && virtOk && !allReady && !rebootPending && vmmsState is "missing" or "stopped";
+        var summary = $"{editionMsg} · {virtMsg} · {vmmsMsg} · {(IsAdmin ? "当前为管理员权限" : "需要时将请求管理员授权")}";
+        return new(editionOk, editionMsg, virtOk, virtMsg, vmmsState, vmmsMsg, rebootPending, allReady, canEnable, summary);
+    }
 }

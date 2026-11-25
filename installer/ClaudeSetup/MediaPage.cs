@@ -15,9 +15,21 @@ public sealed partial class SetupWindow
         var scope=$"我已查看组件来源与许可，同意准备 {platformName}，创建本任务的虚拟机并安装{(image is null?"待识别的系统（需先读取镜像版本）":image.Name+" x64")}及来宾环境；所需主机设置会单独说明并确认。";
         if(((TextBlock)consent.Content).Text!=scope)consent.IsChecked=false;
         ((TextBlock)consent.Content).Text=scope;
-        ((TextBlock)license.Content).Text=image is null?"请先读取镜像版本，再核对其许可与使用授权":"我已核对 "+image.Name+" 用于虚拟机的许可与使用授权（勾选不会授予许可证或激活系统）";
-        license.IsEnabled=!busy&&image is not null;
-        if(image is not null) {imageIndex.Text=image.Index.ToString();mediaDetails.Text=image.Label+"\n这是镜像身份读取结果，不是微软签名、镜像正版或许可证有效性的认证。";}
+        var homeChinaBlocked = image?.IsHomeChinaBlocked == true;
+        if (homeChinaBlocked) license.IsChecked = false;
+        ((TextBlock)license.Content).Text = image is null
+            ? "请先读取镜像版本，再核对其许可与使用授权"
+            : homeChinaBlocked
+                ? "所选索引为家庭中文版（CoreCountrySpecific），请改选专业版 / 企业版"
+                : "我已核对 " + image.Name + " 用于虚拟机的许可与使用授权（勾选不会授予许可证或激活系统）";
+        license.IsEnabled = !busy && image is not null && !homeChinaBlocked;
+        if (image is not null)
+        {
+            imageIndex.Text = image.Index.ToString();
+            mediaDetails.Text = homeChinaBlocked
+                ? $"⚠ 所选索引 {image.Index} 为 Windows 11 家庭中文版（{image.Edition}），Hyper-V 独立版不支持。\n请在上方下拉框改选同镜像中的「Windows 11 专业版 / 企业版」，或重新下载官方多版本 ISO。"
+                : image.Label + "\n这是镜像身份读取结果，不是微软签名、镜像正版或许可证有效性的认证。";
+        }
     }
     private void ClearMedia()
     {

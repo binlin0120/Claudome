@@ -10,7 +10,15 @@ public sealed record WindowsImageChoice(int Index,string Name,string Architectur
         Regex.IsMatch(Name,@"\bWindows\s+11\b",RegexOptions.IgnoreCase) &&
         Architecture.Equals("x64",StringComparison.OrdinalIgnoreCase) && InstallationType.Equals("Client",StringComparison.OrdinalIgnoreCase) &&
         System.Version.TryParse(Version,out var version) && version.Major==10 && version.Build>=22000;
-    public string Label => $"{Name} · {Architecture} · {Version}（索引 {Index}）";
+    public bool IsHomeChinaBlocked => ProductProfile.IsHyperVStandalone &&
+        Edition.Equals("CoreCountrySpecific", StringComparison.OrdinalIgnoreCase);
+    public string Label => IsHomeChinaBlocked
+        ? $"{Name} · {Architecture} · {Version}（索引 {Index} · 家庭中文版不支持）"
+        : $"{Name} · {Architecture} · {Version}（索引 {Index}）";
+}
+public sealed record CandidateIsoChoice(string IsoPath, long SizeBytes, DateTime ModifiedUtc)
+{
+    public string DisplayLabel => $"{Path.GetFileName(IsoPath)}  ·  {SizeBytes / 1073741824d:F2} GB  ·  {IsoPath}";
 }
 public sealed record WindowsMediaIdentity(string IsoPath,string Sha256,long Bytes,List<WindowsImageChoice> Images)
 {
@@ -40,8 +48,74 @@ public static class WindowsMedia
     public static void RequireSelected(SetupOptions o,string actualHash)
     {
         var media=Saved(o);
-        if(media is null||media.Sha256!=actualHash||!media.Images.Any(x=>x.Index==o.WindowsImageIndex))
+        var chosen = media?.Images.FirstOrDefault(x => x.Index == o.WindowsImageIndex);
+        if(media is null||media.Sha256!=actualHash||chosen is null)
             throw new HandoffException(new("读取并确认 Windows 镜像版本",["回到 Windows 镜像页，点击“读取镜像版本”，再选择与你的使用许可对应的版本。","当前程序只支持 Windows 11 x64；Windows 10、Server、ARM64、Linux 或无法识别的镜像不会继续安装。","核对所选镜像的官方条款及虚拟机使用授权，然后重新确认安装范围。"],"windows-media"));
+        if (chosen.IsHomeChinaBlocked)
+            throw new HandoffException(new("不支持使用 Windows 11 家庭中文版镜像", [
+                $"当前选择的索引 {chosen.Index}（{chosen.Name} / {chosen.Edition}）为家庭中文版，Hyper-V 独立版不支持。",
+                "如果该 ISO 内含多版本，请在「Windows 镜像 → 选择实际安装版本」改选「Windows 11 专业版 / 企业版」，然后重新确认授权。",
+                "如果镜像只有家庭中文版，请前往微软官网下载「Windows 11 光盘映像（ISO）多版本」后重新读取。"
+            ], "windows-media"));
+    }
+    public static List<CandidateIsoChoice> DiscoverCandidateIsos(IEnumerable<string>? searchDirectories = null, int maxResults = 12, long minBytes = 1024L * 1024 * 1024)
+    {
+        var folders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (searchDirectories is not null)
+        {
+            foreach (var dir in searchDirectories)
+                if (!string.IsNullOrWhiteSpace(dir)) folders.Add(dir);
+        }
+        else
+        {
+            var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            foreach (var folder in new[]
+            {
+                Path.Combine(userProfile, "Downloads"),
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                ProductProfile.DefaultWorkspaceRoot,
+                Path.Combine(ProductProfile.DefaultWorkspaceRoot, "downloads")
+            })
+            {
+                if (!string.IsNullOrWhiteSpace(folder)) folders.Add(folder);
+            }
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                try
+                {
+                    if (!drive.IsReady || drive.DriveType != DriveType.Fixed || !string.Equals(drive.DriveFormat, "NTFS", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    folders.Add(drive.RootDirectory.FullName);
+                    foreach (var sub in new[] { "ISO", "ISOs", "Downloads", "downloads" })
+                        folders.Add(Path.Combine(drive.RootDirectory.FullName, sub));
+                }
+                catch { }
+            }
+        }
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var found = new List<CandidateIsoChoice>();
+        foreach (var folder in folders)
+        {
+            try
+            {
+                if (!Directory.Exists(folder)) continue;
+                var dirAttr = new DirectoryInfo(folder).Attributes;
+                if ((dirAttr & FileAttributes.ReparsePoint) != 0) continue;
+                foreach (var file in Directory.EnumerateFiles(folder, "*.iso", SearchOption.TopDirectoryOnly))
+                {
+                    try
+                    {
+                        var info = new FileInfo(file);
+                        if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || info.Length < minBytes) continue;
+                        if (seen.Add(info.FullName))
+                            found.Add(new(info.FullName, info.Length, info.LastWriteTimeUtc));
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+        return found.OrderByDescending(x => x.ModifiedUtc).ThenByDescending(x => x.SizeBytes).Take(maxResults).ToList();
     }
     public static async Task<WindowsMediaIdentity> Inspect(string workspaceRoot, string isoPath,
         IProgress<string> messages, IProgress<DownloadProgress> progress, CancellationToken token)

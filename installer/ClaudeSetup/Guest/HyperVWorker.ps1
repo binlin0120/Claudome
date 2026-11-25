@@ -23,6 +23,51 @@ function Target-VM($Data) {
     $null=Assert-LocalPath (Join-Path $actual 'scope-check') $expected
     return $vm
 }
+function Test-OwnedVmMarker([string]$MarkerPath,[string]$WorkspaceId,[string]$VmName) {
+    if(-not [IO.File]::Exists($MarkerPath)){return $false}
+    try {
+        $marker=[IO.File]::ReadAllText($MarkerPath) | ConvertFrom-Json -AsHashtable
+        return ($marker.schema -eq 1 -and [string]$marker.workspaceId -eq $WorkspaceId -and [string]$marker.vmName -eq $VmName)
+    } catch { return $false }
+}
+function Save-OwnedVmMarker([string]$MarkerPath,[string]$WorkspaceId,[string]$VmName,[string]$VmId='') {
+    $parent=[IO.Path]::GetDirectoryName($MarkerPath)
+    $null=Assert-LocalPath $MarkerPath $parent
+    $tmp=$MarkerPath+'.new'
+    $json=@{schema=1;workspaceId=$WorkspaceId;vmName=$VmName;vmId=$VmId} | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($tmp,$json,[Text.UTF8Encoding]::new($false))
+    [IO.File]::Move($tmp,$MarkerPath,$true)
+}
+function Resolve-OrCreateTaskVm($Data) {
+    if($Data.vmId){return [string](Target-VM $Data).Id}
+    $path=Assert-LocalPath (Join-Path $o.Root ('machines\'+$o.VmName)) $o.Root
+    $marker=Assert-LocalPath (Join-Path $path '.claude-hyperv-owner.json') $path
+    $existingVm=Get-VM -Name $o.VmName -ErrorAction SilentlyContinue
+    $pathExists=[IO.Directory]::Exists($path) -or [IO.File]::Exists($path)
+    if($existingVm) {
+        $existingPath=[IO.Path]::GetFullPath([string]$existingVm.Path).TrimEnd('\')
+        $expectedPath=[IO.Path]::GetFullPath($path).TrimEnd('\')
+        if(($existingPath -eq $expectedPath -or $existingPath.StartsWith($expectedPath+'\',[StringComparison]::OrdinalIgnoreCase)) -and
+            (Test-OwnedVmMarker $marker ([string]$o.WorkspaceId) ([string]$o.VmName))) {
+            Get-VMNetworkAdapter -VM $existingVm | Remove-VMNetworkAdapter
+            Save-OwnedVmMarker $marker ([string]$o.WorkspaceId) ([string]$o.VmName) ([string]$existingVm.Id)
+            return [string]$existingVm.Id
+        }
+        throw 'VM_COLLISION'
+    }
+    if($pathExists) {
+        $owned=([IO.Directory]::Exists($path)) -and (Test-OwnedVmMarker $marker ([string]$o.WorkspaceId) ([string]$o.VmName))
+        $others=if([IO.Directory]::Exists($path)){@([IO.Directory]::GetFileSystemEntries($path) | Where-Object { [IO.Path]::GetFileName($_) -notin @('.claude-hyperv-owner.json','.claude-hyperv-owner.json.new') })}else{@('file')}
+        if(-not $owned -or $others.Count -gt 0){throw 'VM_COLLISION'}
+    } else {
+        [void][IO.Directory]::CreateDirectory($path)
+    }
+    Save-OwnedVmMarker $marker ([string]$o.WorkspaceId) ([string]$o.VmName) ''
+    $vm=New-VM -Name $o.VmName -Path $path -Generation 2 -MemoryStartupBytes ([long]$o.MemoryMb*1MB) -NoVHD
+    Get-VMNetworkAdapter -VM $vm | Remove-VMNetworkAdapter
+    Save-OwnedVmMarker $marker ([string]$o.WorkspaceId) ([string]$o.VmName) ([string]$vm.Id)
+    return [string]$vm.Id
+}
 function Test-VMKeyProtectorPresent($Vm) {
     $protector=Get-VMKeyProtector -VM $Vm
     # A cmdlet can emit one object containing a zero-length byte array.
@@ -553,12 +598,7 @@ try {
                     Import-Module Hyper-V -ErrorAction Stop
                     switch($request.operation) {
                         'ensure' {
-                            if($d.vmId){$value=[string](Target-VM $d).Id;break}
-                            $path=Assert-LocalPath (Join-Path $o.Root ('machines\'+$o.VmName)) $o.Root
-                            if((Get-VM -Name $o.VmName -ErrorAction SilentlyContinue) -or (Test-Path -LiteralPath $path)){throw 'VM_COLLISION'}
-                            $vm=New-VM -Name $o.VmName -Path $path -Generation 2 -MemoryStartupBytes ([long]$o.MemoryMb*1MB) -NoVHD
-                            Get-VMNetworkAdapter -VM $vm | Remove-VMNetworkAdapter
-                            $value=[string]$vm.Id
+                            $value=Resolve-OrCreateTaskVm $d
                         }
                         'configure' {
                             $vm=Target-VM $d;if($vm.State -ne 'Off'){throw 'VM_SCOPE'}

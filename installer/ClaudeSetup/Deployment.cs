@@ -22,14 +22,67 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true, Verb = "runas" }); }
         catch { throw new SetupException("微软媒体创建工具未打开，请确认管理员提示后重试。"); }
     }
-    public async Task<string> DownloadIso(SetupOptions o, CancellationToken token)
+    public static bool IsOfficialMicrosoftDownloadUri(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https" &&
+        new[] { "microsoft.com", "microsoftonline.com", "windowsupdate.com" }.Any(d =>
+            uri.Host.Equals(d, StringComparison.OrdinalIgnoreCase) || uri.Host.EndsWith("." + d, StringComparison.OrdinalIgnoreCase));
+
+    public async Task<(string IsoPath, string Sha256)> DownloadIso(SetupOptions o, CancellationToken token, HttpClient? httpClient = null)
     {
         Machine.RequireHyperVStandaloneHostEligible();
         Paths.EnsureWorkspace(o.Root);
-        if (!Uri.TryCreate(o.IsoUrl, UriKind.Absolute, out var uri) || uri.Scheme != "https" || !new[] { "microsoft.com", "microsoftonline.com", "windowsupdate.com" }.Any(d => uri.Host.Equals(d, StringComparison.OrdinalIgnoreCase) || uri.Host.EndsWith("." + d, StringComparison.OrdinalIgnoreCase))) throw new SetupException("请输入微软官方下载的 HTTPS 直链。链接过期时请重新获取，也可以选择已有 ISO。");
-        if (!Regex.IsMatch(o.IsoSha256, "^[a-fA-F0-9]{64}$")) throw new SetupException("请填写微软公布的 SHA-256，再下载镜像。");
-        using var downloader = new Downloader();
-        return await downloader.Get(new("windows", "Windows 11 x64 镜像", "Windows11-x64.iso", o.IsoUrl, o.IsoSha256, 0, "Microsoft Windows license"), o.Cache, downloads, token);
+        if (!IsOfficialMicrosoftDownloadUri(o.IsoUrl))
+            throw new SetupException("请输入微软官方下载页获取的 HTTPS 直链（microsoft.com / microsoftonline.com / windowsupdate.com）。链接过期时请回官网重新获取，或改选本地已有 ISO。");
+        if (!string.IsNullOrWhiteSpace(o.IsoSha256) && !Regex.IsMatch(o.IsoSha256, "^[a-fA-F0-9]{64}$"))
+            throw new SetupException("如填写微软公布的 SHA-256，请输入 64 位十六进制字符（也可留空，由程序校验微软 HTTPS 域并自动计算文件指纹）。");
+        var fileName = "Windows11-x64.iso";
+        if (Uri.TryCreate(o.IsoUrl, UriKind.Absolute, out var parsed) &&
+            Path.GetFileName(parsed.LocalPath) is { Length: > 4 and <= 120 } candidate &&
+            candidate.EndsWith(".iso", StringComparison.OrdinalIgnoreCase) &&
+            !candidate.Any(c => Path.GetInvalidFileNameChars().Contains(c)))
+            fileName = candidate;
+        using var downloader = new Downloader(httpClient);
+        var path = await downloader.GetOfficialOptionalHashAsync(
+            new("windows", "Windows 11 x64 镜像", fileName, o.IsoUrl, o.IsoSha256.Trim(), 0, "Microsoft Windows license"),
+            o.Cache, downloads, token);
+        var computedHash = await Downloader.Hash(path, token);
+        o.IsoPath = path;
+        o.IsoSha256 = computedHash;
+        return (path, computedHash);
+    }
+
+    public async Task EnableHyperVFeatureAsync(SessionState state, CancellationToken token)
+    {
+        Machine.RequireHyperVStandaloneHostEligible();
+        Paths.EnsureWorkspace(state.Options.Root);
+        using var taskLock = WorkspaceLock.Acquire(state);
+        await using var hv = new HyperV(installation);
+        try
+        {
+            await hv.Prepare(state.Options, token);
+            state.PendingActions.RemoveAll(a => a.Id == "hyperv-restart");
+            state.Stage = "Hyper-V 功能与服务已就绪";
+            state.Status = "可继续部署或下载镜像";
+            state.Save();
+        }
+        catch (SetupException ex) when (ex.Message.Contains("HYPERV_RESTART"))
+        {
+            RecordHyperVRestartPending(state);
+            throw new HandoffException(state.PendingActions.Last(a => a.Id == "hyperv-restart"));
+        }
+    }
+
+    internal static void RecordHyperVRestartPending(SessionState state)
+    {
+        state.Stage = "等待重启电脑以完成 Hyper-V 启用";
+        state.Status = "等待宿主机重启";
+        state.PendingActions.RemoveAll(a => a.Id == "hyperv-restart");
+        state.PendingActions.Add(new("请保存工作并重启电脑以完成 Hyper-V 启用",
+            [
+                "系统已写入或正在等待应用 Hyper-V 功能变更。",
+                "请先保存本机其他工作并重启 Windows，重启后重新打开 Claudome Hyper-V 版，程序会自动恢复本任务并继续创建虚拟机。"
+            ], "hyperv-restart"));
+        state.Save();
     }
     public async Task DownloadResources(SetupOptions o, CancellationToken token)
     {
@@ -102,7 +155,16 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 if (code != 0 || !Machine.VcRuntimeInstalled()) throw new SetupException("微软运行库未安装完成，请检查管理员提示后继续。");
             }
             if(plan.CreateMachine)Stage(state,"2 / 7  准备所选虚拟机组件，请确认管理员提示");else messages.Report("恢复检查：核对所选虚拟机组件。");
-            await box.Prepare(o, token);
+            try
+            {
+                await box.Prepare(o, token);
+                state.PendingActions.RemoveAll(a => a.Id == "hyperv-restart");
+            }
+            catch (SetupException ex) when (o.PlatformId == "hyperv" && ex.Message.Contains("HYPERV_RESTART"))
+            {
+                RecordHyperVRestartPending(state);
+                throw new HandoffException(state.PendingActions.Last(a => a.Id == "hyperv-restart"));
+            }
             if(plan.CreateMachine)Stage(state,"3 / 7  创建专用虚拟机");else messages.Report("复用本任务的原虚拟机。");
             await box.EnsureMachine(state, token);
             if (!state.Completed.Contains("machine")) { await box.Configure(state, token); state.Completed.Add("machine"); state.Save(); }

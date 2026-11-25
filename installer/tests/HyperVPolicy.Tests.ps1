@@ -7,7 +7,7 @@ $ErrorActionPreference='Stop'
 $worker=Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($worker,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'PRODUCTION_PARSE_FAILED'}
-$names=@('Invoke-ConsolePolicyLock','Console-Owner','Use-BasicConsolePolicy','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm')
+$names=@('Invoke-ConsolePolicyLock','Console-Owner','Use-BasicConsolePolicy','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm','Assert-LocalPath','Test-OwnedVmMarker','Save-OwnedVmMarker','Resolve-OrCreateTaskVm')
 foreach($name in $names){$definition=$ast.FindAll({param($a)$a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq $name},$true) | Select-Object -First 1;if(-not $definition){throw 'FUNCTION_MISSING'};Invoke-Expression -Command $definition.Extent.Text}
 $script:store=@{};$script:policyEnabled=$true;$script:nicCount=0;$script:metadataEnabled=$true;$script:changes=0
 $script:o=[pscustomobject]@{WorkspaceId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';HyperVBasicConsoleConfirmed=$false}
@@ -165,6 +165,65 @@ Check 'hyperv-protector-setup-and-read-failures-stop-before-vtpm' {
     $setupFailed=$false
     try{Enable-TaskVirtualTpm $first}catch{if($_.Exception.Message -eq 'VM_KEY_PROTECTOR_SETUP_FAILED'){$setupFailed=$true}else{throw}}
     Assert-Case ($readFailed -and $setupFailed -and $script:tpmEnables -eq $before -and $script:protectorWrites -eq 2)
+}
+Check 'hyperv-ensure-recovers-owned-vm-after-crash-before-state-save' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('hv-ensure-recover-' + [guid]::NewGuid().ToString('N'))
+    $savedO = $script:o
+    $savedGetVm = ${function:Get-VM}
+    $savedNewVm = ${function:New-VM}
+    $savedGetNic = ${function:Get-VMNetworkAdapter}
+    $savedRemoveNic = ${function:Remove-VMNetworkAdapter}
+    try {
+        [IO.Directory]::CreateDirectory($tempRoot) | Out-Null
+        $script:o = [pscustomobject]@{ Root = $tempRoot; VmName = 'CrashRecoverVm'; WorkspaceId = '11111111111111111111111111111111'; MemoryMb = 4096 }
+        $ownedId = [guid]'44444444-4444-4444-4444-444444444444'
+        $ownedPath = Join-Path $tempRoot 'machines\CrashRecoverVm'
+        [IO.Directory]::CreateDirectory($ownedPath) | Out-Null
+        Save-OwnedVmMarker (Join-Path $ownedPath '.claude-hyperv-owner.json') $script:o.WorkspaceId $script:o.VmName ([string]$ownedId)
+        $newVmCalls = 0
+        $removedNics = 0
+        function Get-VM { param([string]$Name) if ($Name -eq 'CrashRecoverVm') { [pscustomobject]@{ Id = $ownedId; Name = $Name; Path = $ownedPath } } }
+        function New-VM { param($Name,$Path,$Generation,$MemoryStartupBytes,[switch]$NoVHD) $script:newVmCalls++; [pscustomobject]@{ Id = [guid]::NewGuid(); Name = $Name; Path = $Path } }
+        function Get-VMNetworkAdapter { param($VM) @([pscustomobject]@{ Name = 'DefaultNIC'; VM = $VM }) }
+        function Remove-VMNetworkAdapter { param([Parameter(ValueFromPipeline)]$InputObject) process { $script:removedNics++ } }
+        $script:newVmCalls = 0; $script:removedNics = 0
+        $resolved = Resolve-OrCreateTaskVm ([pscustomobject]@{ vmId = '' })
+        Assert-Case ($resolved -eq [string]$ownedId -and $script:newVmCalls -eq 0 -and $script:removedNics -eq 1)
+    } finally {
+        $script:o = $savedO
+        Set-Item function:Get-VM -Value $savedGetVm -ErrorAction SilentlyContinue
+        Set-Item function:New-VM -Value $savedNewVm -ErrorAction SilentlyContinue
+        Set-Item function:Get-VMNetworkAdapter -Value $savedGetNic -ErrorAction SilentlyContinue
+        Set-Item function:Remove-VMNetworkAdapter -Value $savedRemoveNic -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+Check 'hyperv-ensure-rejects-same-name-foreign-vm' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('hv-ensure-foreign-' + [guid]::NewGuid().ToString('N'))
+    $savedO = $script:o
+    $savedGetVm = ${function:Get-VM}
+    $savedNewVm = ${function:New-VM}
+    $savedGetNic = ${function:Get-VMNetworkAdapter}
+    $savedRemoveNic = ${function:Remove-VMNetworkAdapter}
+    try {
+        [IO.Directory]::CreateDirectory($tempRoot) | Out-Null
+        $script:o = [pscustomobject]@{ Root = $tempRoot; VmName = 'ExistingForeignVm'; WorkspaceId = '22222222222222222222222222222222'; MemoryMb = 4096 }
+        $foreignPath = Join-Path $tempRoot 'other-dir\ExistingForeignVm'
+        function Get-VM { param([string]$Name) if ($Name -eq 'ExistingForeignVm') { [pscustomobject]@{ Id = [guid]'55555555-5555-5555-5555-555555555555'; Name = $Name; Path = $foreignPath } } }
+        function New-VM { param($Name,$Path,$Generation,$MemoryStartupBytes,[switch]$NoVHD) throw 'UNEXPECTED_NEW_VM' }
+        function Get-VMNetworkAdapter { param($VM) @([pscustomobject]@{ Name = 'ForeignNIC'; VM = $VM }) }
+        function Remove-VMNetworkAdapter { param([Parameter(ValueFromPipeline)]$InputObject) process { throw 'UNEXPECTED_NIC_CHANGE' } }
+        $blocked = $false
+        try { $null = Resolve-OrCreateTaskVm ([pscustomobject]@{ vmId = '' }) } catch { if ($_.Exception.Message -eq 'VM_COLLISION') { $blocked = $true } else { throw } }
+        Assert-Case $blocked
+    } finally {
+        $script:o = $savedO
+        Set-Item function:Get-VM -Value $savedGetVm -ErrorAction SilentlyContinue
+        Set-Item function:New-VM -Value $savedNewVm -ErrorAction SilentlyContinue
+        Set-Item function:Get-VMNetworkAdapter -Value $savedGetNic -ErrorAction SilentlyContinue
+        Set-Item function:Remove-VMNetworkAdapter -Value $savedRemoveNic -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 # Call the real .NET file API directly; the mock registry provider remains scoped
 # to this test process, not the user's PowerShell session or machine.

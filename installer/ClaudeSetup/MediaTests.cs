@@ -26,5 +26,36 @@ public static class MediaTests
                 var rejected=false;try{new WindowsMediaIdentity(Path.Combine(root,"Windows.iso"),new string('a',64),2L<<30,images).Validate();}catch(SetupException){rejected=true;}Assert(rejected,"ambiguous image proof accepted");
             }return Task.CompletedTask;
         });
+        await check("media-blocks-home-china-core-country-specific-on-hyperv-standalone", () =>
+        {
+            var homeChina = new WindowsImageChoice(1, "Windows 11 家庭中文版", "x64", "10.0.26100.1", "Client", "CoreCountrySpecific");
+            var pro = image;
+            var o = new SetupOptions { Root = Path.Combine(root, "media-home-china"), IsoPath = Path.Combine(root, "Windows.iso"), WindowsImageIndex = 1 };
+            var media = new WindowsMediaIdentity(o.IsoPath, new string('d', 64), 2L << 30, [homeChina, pro]);
+            media.Validate();
+            JsonFile.Write(Paths.Under(o.Private, "windows-media-identity.json"), media);
+            if (ProductProfile.IsHyperVStandalone)
+            {
+                Assert(homeChina.IsHomeChinaBlocked && homeChina.Label.Contains("家庭中文版不支持"), "CoreCountrySpecific flag/label missing");
+                var blocked = false;
+                try { WindowsMedia.RequireSelected(o, media.Sha256); } catch (HandoffException ex) { blocked = ex.Action.Id == "windows-media" && ex.Action.Title.Contains("家庭中文版"); }
+                Assert(blocked, "CoreCountrySpecific was allowed in Hyper-V standalone");
+            }
+            o.WindowsImageIndex = 6;
+            WindowsMedia.RequireSelected(o, media.Sha256);
+            return Task.CompletedTask;
+        });
+        await check("media-discovers-candidate-isos-safely", () =>
+        {
+            var dir = Path.Combine(root, "iso-scan-fixture");
+            Directory.CreateDirectory(dir);
+            var fakeIso = Path.Combine(dir, "Win11_24H2_Chinese_Simplified_x64.iso");
+            var tinyIso = Path.Combine(dir, "tiny.iso");
+            File.WriteAllBytes(fakeIso, new byte[4096]);
+            File.WriteAllBytes(tinyIso, new byte[100]);
+            var found = WindowsMedia.DiscoverCandidateIsos([dir], maxResults: 5, minBytes: 1024);
+            Assert(found.Count == 1 && string.Equals(found[0].IsoPath, fakeIso, StringComparison.OrdinalIgnoreCase), "candidate ISO discovery missed or included tiny file");
+            return Task.CompletedTask;
+        });
     }
 }

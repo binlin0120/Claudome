@@ -46,6 +46,7 @@ public sealed partial class SetupWindow
             return Card(instructions.ToArray());
         }
         if(action.Id=="hyperv-disk-recovery") { instructions.Add(Row(Action("处理后重新检查并恢复",async(_,_)=>await StartInstall(),true))); return Card(instructions.ToArray()); }
+        if(action.Id=="hyperv-restart") { instructions.Add(Row(Action("我已重启，重新检查并继续", async (_, _) => await StartInstall(), true))); return Card(instructions.ToArray()); }
         if(action.Id=="windows-media"){instructions.Add(Row(Action("去读取镜像版本",(_,_)=>Go(2),true)));return Card(instructions.ToArray());}
         if(action.Id=="hyperv-console") instructions.Add(Row(Action("允许关闭主机增强会话并继续",async(_,_)=>{
             if(MessageBox.Show(this,"这会关闭整台主机的 Hyper-V 增强会话策略，其他 Hyper-V 虚拟机也会受影响。原值会保存，待所有受保护虚拟机正常关机后可恢复。是否继续？","确认 Hyper-V 主机设置",MessageBoxButton.YesNo,MessageBoxImage.Warning)!=MessageBoxResult.Yes)return;

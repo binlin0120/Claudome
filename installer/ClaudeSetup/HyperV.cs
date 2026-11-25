@@ -165,7 +165,23 @@ public sealed class HyperV : IVmBackend
     public Task Prepare(SetupOptions options, CancellationToken token) => Call(options, "prepare", null, token);
     public async Task<string> EnsureMachine(SessionState state, CancellationToken token)
     {
-        state.VmId = await Call(state.Options, "ensure", new { vmId = state.VmId }, token); state.Save(); return state.VmId;
+        var intentPath = Paths.Under(state.Options.Private, "pending-hyperv-create.json");
+        if (string.IsNullOrEmpty(state.VmId))
+        {
+            Directory.CreateDirectory(state.Options.Private);
+            JsonFile.Write(intentPath, new
+            {
+                schema = 1,
+                vmName = state.Options.VmName,
+                workspaceId = state.Options.WorkspaceId,
+                machinePath = state.Options.VmDirectory,
+                createdUtc = DateTime.UtcNow
+            });
+        }
+        state.VmId = await Call(state.Options, "ensure", new { vmId = state.VmId }, token);
+        state.Save();
+        if (File.Exists(intentPath)) try { File.Delete(intentPath); } catch { }
+        return state.VmId;
     }
     private object Context(SessionState s, Secrets? secrets = null) => new { vmId = s.VmId, password = secrets?.VmPassword };
     public Task Configure(SessionState s, CancellationToken token) => Call(s.Options, "configure", Context(s), token);
