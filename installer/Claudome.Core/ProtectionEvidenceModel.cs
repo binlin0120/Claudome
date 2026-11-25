@@ -6,6 +6,8 @@ public enum CheckStatus { NotTested, Passed, Failed, Unverified }
 public sealed record ProtectionCheck(CheckStatus Status = CheckStatus.NotTested, DateTime? CheckedUtc = null, string Evidence = "");
 public sealed class ProtectionEvidence
 {
+    public string WorkspaceId { get; set; } = "";
+    public string VmId { get; set; } = "";
     public string ConfigHash { get; set; } = "";
     public string BootUtc { get; set; } = "";
     public ProtectionCheck Boundary { get; set; } = new();
@@ -15,17 +17,29 @@ public sealed class ProtectionEvidence
     public string BlockAuditNote { get; set; } = "";
     public ProtectionCheck Outage { get; set; } = new();
 
+    internal bool HasMatchingBinding(SessionState state)
+    {
+        if (!string.IsNullOrEmpty(WorkspaceId) && !string.Equals(WorkspaceId, state.Options.WorkspaceId, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!string.IsNullOrEmpty(VmId) && !string.Equals(VmId, state.VmId, StringComparison.OrdinalIgnoreCase))
+            return false;
+        return ConfigHash.Length > 0 && ConfigHash == state.CoreConfigSha256;
+    }
+
     internal string[] PendingChecks(SessionState state)
     {
         var pending = new List<string>();
         if (!state.Completed.Contains("software")) pending.Add("软件安装");
-        var current = ConfigHash.Length > 0 && ConfigHash == state.CoreConfigSha256;
+        var current = HasMatchingBinding(state);
         if (!current || Boundary.Status != CheckStatus.Passed) pending.Add("外层网关与来宾防火墙");
         if (!current || !state.NetworkPassed || Exit.Status != CheckStatus.Passed) pending.Add("来宾出口");
         if (!current || Browser.Status != CheckStatus.Passed) pending.Add("AdsPower 窗口出口");
         if (!current || Dns.Status != CheckStatus.Passed) pending.Add("DNS 与直连旁路");
+        if (state.RestartBootBefore.Length > 0) pending.Add("重启后持久复核");
         return [.. pending];
     }
+
+    internal bool FourDimensionsPassed(SessionState state) => PendingChecks(state).Length == 0;
 
     internal static bool IsExitMismatch(string? code) => code is "MISMATCH" or "IP_MISMATCH" or "COUNTRY_MISMATCH";
 

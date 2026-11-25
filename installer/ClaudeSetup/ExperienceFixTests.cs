@@ -170,6 +170,41 @@ public static class ExperienceFixTests
                 CancellationToken.None, Fetch);
             Assert(fetches.SequenceEqual(new[] { "adspower" }) && runner.Calls.Count(args => args[2] == "copyto") == 1 &&
                 runner.Calls.Count(args => args.Contains("-xf")) == 1, "did not reuse the verified PowerShell ZIP or copied an unrelated installer");
+
+            // Hyper-V reuses C:\ProgramData\ClaudeBootstrap\pwsh locally inside guest without transferring pwsh ZIP a second time
+            var hvTask = State("guest-package-hyperv-local-pwsh");
+            hvTask.Options.PlatformId = "hyperv";
+            Directory.CreateDirectory(hvTask.Options.Private);
+            var hvCopiedPwsh = false;
+            var hvRunner = new Runner(args =>
+            {
+                if (args[2] == "stat")
+                {
+                    var p = args[^1];
+                    if (p.EndsWith(@"ClaudeBootstrap\pwsh\pwsh.exe", StringComparison.OrdinalIgnoreCase) || hvCopiedPwsh)
+                        return "";
+                    throw new SetupException("VERR_FILE_NOT_FOUND");
+                }
+                if (args[2] == "mkdir") return "";
+                if (args[2] == "copyto") throw new Exception("unexpected host->VM pwsh upload when bootstrap pwsh exists");
+                if (args[^1] == "-Version") return "PowerShell " + currentVersion;
+                if (args[^2] == "-EncodedCommand")
+                {
+                    var cmd = System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(args[^1]));
+                    if (cmd.StartsWith("Copy-Item", StringComparison.Ordinal)) { hvCopiedPwsh = true; return ""; }
+                    using var inp = JsonDocument.Parse(Convert.FromBase64String(cmd.Split("'")[1]));
+                    return "CLAUDOME_INSTALLER_INVENTORY:" + JsonSerializer.Serialize(new
+                    {
+                        schema = 2, runId = inp.RootElement.GetProperty("runId").GetString(),
+                        vmId = hvTask.VmId, workspaceId = hvTask.Options.WorkspaceId, status = "ready",
+                        installed = new[] { "clash", "adspower" }, cached = new[] { "vcredist" }
+                    });
+                }
+                return "";
+            });
+            var hvNeeded = await deployment.PrepareGuestPackages(new VirtualBox(hvRunner, "fixture-hv"), hvTask, guest,
+                hvTask.Options.GuestSetupDirectory, false, CancellationToken.None, Fetch);
+            Assert(hvCopiedPwsh && hvNeeded.Select(r => r.Id).SequenceEqual(new[] { "vcredist" }), "Hyper-V did not reuse bootstrap pwsh locally inside guest");
         });
         await check("missing-VM-identity-cannot-silently-recreate",async()=> {
             var s=new SessionState{Completed=["machine"]};await Rejected(()=>Sync(()=>ResumePlan.For(s)));

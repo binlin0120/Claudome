@@ -39,18 +39,19 @@ public sealed partial class Deployment
         messages.Report("正在核对原来宾的 PowerShell 和安装资源。");
         await box.EnsureGuestDirectory(state, secrets, guestRoot, token);
         var runtimePresent = await box.GuestFileExists(state, secrets, guestPwsh, token);
-        async Task<bool> VerifyVersion()
+        async Task<bool> VerifyExeVersion(string exePath)
         {
             if (options.PlatformId != "workstation")
             {
-                var output = await box.GuestRun(state, secrets, guestPwsh, ["-Version"], token, 30);
+                var output = await box.GuestRun(state, secrets, exePath, ["-Version"], token, 30);
                 if (HasExpectedPowerShell(output, expectedVersion)) return true;
                 if (Regex.IsMatch(output, @"(?m)^\s*PowerShell\s+\d+\.")) return false;
                 throw new SetupException("未能核对来宾 PowerShell 版本，已停止补传。");
             }
-            return await TestWorkstationGuest(guestPwsh,
+            return await TestWorkstationGuest(exePath,
                 "if ($PSVersionTable.PSVersion.ToString() -ne '" + expectedVersion + "') { exit 41 }");
         }
+        Task<bool> VerifyVersion() => VerifyExeVersion(guestPwsh);
         async Task<bool> TestWorkstationGuest(string exe, string command)
         {
             var code = Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
@@ -64,29 +65,52 @@ public sealed partial class Deployment
 
         if (!runtimePresent || !await VerifyVersion())
         {
-            var archive = guestRoot + "\\" + pwsh.FileName;
-            var archiveMatches = false;
-            if (await box.GuestFileExists(state, secrets, archive, token))
+            var reusedBootstrapPwsh = false;
+            const string bootstrapPwshDir = @"C:\ProgramData\ClaudeBootstrap\pwsh";
+            const string bootstrapPwshExe = bootstrapPwshDir + @"\pwsh.exe";
+            if (options.PlatformId == "hyperv" && await box.GuestFileExists(state, secrets, bootstrapPwshExe, token))
             {
-                if (options.PlatformId != "workstation")
+                try
                 {
-                    var checksum = await box.GuestRun(state, secrets, @"C:\Windows\System32\certutil.exe", ["-hashfile", archive, "SHA256"], token, 150);
-                    archiveMatches = Regex.IsMatch(checksum, @"(?im)^\s*" + Regex.Escape(pwsh.Sha256) + @"\s*$");
+                    if (await VerifyExeVersion(bootstrapPwshExe))
+                    {
+                        messages.Report("已在来宾内定位初始化阶段写入的 PowerShell 7，直接本地复用（免重复传送）。");
+                        var targetDirEscaped = (guestRoot + @"\pwsh").Replace("'", "''");
+                        await box.EnsureGuestDirectory(state, secrets, guestRoot + @"\pwsh", token);
+                        var copyScript = $"Copy-Item -LiteralPath '{bootstrapPwshDir}' -Destination '{targetDirEscaped}' -Recurse -Force";
+                        var encodedCopy = Convert.ToBase64String(Encoding.Unicode.GetBytes(copyScript));
+                        await box.GuestRun(state, secrets, bootstrapPwshExe, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedCopy], token, 120);
+                        reusedBootstrapPwsh = await VerifyVersion();
+                    }
                 }
-                else if (runtimePresent)
-                {
-                    var path = archive.Replace("'", "''");
-                    archiveMatches = await TestWorkstationGuest(guestPwsh,
-                        $"if ((Get-FileHash -LiteralPath '{path}' -Algorithm SHA256).Hash -ine '{pwsh.Sha256}') {{ exit 41 }}");
-                }
+                catch { reusedBootstrapPwsh = false; }
             }
-            if (!archiveMatches) await Upload(pwsh);
-            else messages.Report("已核验来宾 PowerShell 压缩包，直接复用。");
-            await box.EnsureGuestDirectory(state, secrets, guestRoot + @"\pwsh", token);
-            messages.Report("正在来宾中解压 PowerShell。");
-            await box.GuestRun(state, secrets, @"C:\Windows\System32\tar.exe", ["-xf", archive, "-C", guestRoot + @"\pwsh"], token, 180);
-            if (!await VerifyVersion())
-                throw new SetupException("来宾 PowerShell 解压后未通过版本回读。");
+            if (!reusedBootstrapPwsh)
+            {
+                var archive = guestRoot + "\\" + pwsh.FileName;
+                var archiveMatches = false;
+                if (await box.GuestFileExists(state, secrets, archive, token))
+                {
+                    if (options.PlatformId != "workstation")
+                    {
+                        var checksum = await box.GuestRun(state, secrets, @"C:\Windows\System32\certutil.exe", ["-hashfile", archive, "SHA256"], token, 150);
+                        archiveMatches = Regex.IsMatch(checksum, @"(?im)^\s*" + Regex.Escape(pwsh.Sha256) + @"\s*$");
+                    }
+                    else if (runtimePresent)
+                    {
+                        var path = archive.Replace("'", "''");
+                        archiveMatches = await TestWorkstationGuest(guestPwsh,
+                            $"if ((Get-FileHash -LiteralPath '{path}' -Algorithm SHA256).Hash -ine '{pwsh.Sha256}') {{ exit 41 }}");
+                    }
+                }
+                if (!archiveMatches) await Upload(pwsh);
+                else messages.Report("已核验来宾 PowerShell 压缩包，直接复用。");
+                await box.EnsureGuestDirectory(state, secrets, guestRoot + @"\pwsh", token);
+                messages.Report("正在来宾中解压 PowerShell。");
+                await box.GuestRun(state, secrets, @"C:\Windows\System32\tar.exe", ["-xf", archive, "-C", guestRoot + @"\pwsh"], token, 180);
+                if (!await VerifyVersion())
+                    throw new SetupException("来宾 PowerShell 解压后未通过版本回读。");
+            }
         }
         else messages.Report("来宾 PowerShell 版本已核对，直接复用。");
 
@@ -94,11 +118,18 @@ public sealed partial class Deployment
         var appPackages = packages.Where(r => r.Id != "pwsh").ToArray();
         var inventory = await ReadGuestInstallerInventory(box, state, secrets, guestRoot, guestPwsh, appPackages, token);
         var needed = appPackages.Where(r => !inventory.Installed.Contains(r.Id)).ToArray();
+        var uploadIndex = 0;
+        var toUploadCount = appPackages.Count(r => !inventory.Installed.Contains(r.Id) && !inventory.Cached.Contains(r.Id));
         foreach (var package in appPackages)
         {
             if (inventory.Installed.Contains(package.Id)) messages.Report(package.Name + " 已安装，沿用现有应用。");
             else if (inventory.Cached.Contains(package.Id)) messages.Report(package.Name + " 安装包已核验，直接复用。");
-            else await Upload(package);
+            else
+            {
+                uploadIndex++;
+                messages.Report($"正在下载/核验并传送 {package.Name}（{uploadIndex}/{toUploadCount} · {package.Size / 1048576d:F1} MB）…");
+                await Upload(package);
+            }
         }
         return needed;
     }

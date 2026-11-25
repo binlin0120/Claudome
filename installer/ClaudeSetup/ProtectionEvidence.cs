@@ -74,8 +74,15 @@ public sealed partial class Deployment
     {
         var p = state.Protection;
         var boot = report.GetProperty("bootUtc").GetString() ?? "";
-        if (p.ConfigHash != state.CoreConfigSha256 || p.BootUtc != boot)
-            p = state.Protection = new() { ConfigHash = state.CoreConfigSha256, BootUtc = boot };
+        if (p.ConfigHash != state.CoreConfigSha256 || p.BootUtc != boot ||
+            (!string.IsNullOrEmpty(p.VmId) && p.VmId != state.VmId) ||
+            (!string.IsNullOrEmpty(p.WorkspaceId) && p.WorkspaceId != state.Options.WorkspaceId))
+            p = state.Protection = new() { WorkspaceId = state.Options.WorkspaceId, VmId = state.VmId, ConfigHash = state.CoreConfigSha256, BootUtc = boot };
+        else
+        {
+            p.WorkspaceId = state.Options.WorkspaceId;
+            p.VmId = state.VmId;
+        }
         bool Flag(string key) => report.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.True;
         string Code(string key) => report.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.String
             ? field.GetString() ?? "" : "";
@@ -218,7 +225,42 @@ public sealed partial class SetupWindow
                 Notice(File.ReadAllText(path));
             }
             catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
-        })));
+        }),
+            Action("导出客户使用手册", (_, _) => ExportCustomerGuideFile())));
+
+    private void ExportCustomerGuideFile()
+    {
+        try
+        {
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "导出客户使用手册",
+                Filter = "Markdown 文档|*.md|文本文档|*.txt",
+                FileName = $"Claudome-客户使用手册-{state.Options.VmName}.md"
+            };
+            if (dialog.ShowDialog() != true) return;
+            var lines = new List<string>
+            {
+                $"# {ProductProfile.WindowTitle} 客户使用手册（{state.Options.VmName}）",
+                "",
+                $"- 任务地区 / 时区：{CustomerGuide.Country(state.Options.Country)} / {state.Options.TimeZoneId}",
+                $"- 当前验收摘要：{(state.Protection.FourDimensionsPassed(state) ? "四维受控验收已通过" : "尚有待核验项：" + string.Join("、", state.Protection.PendingChecks(state)))}",
+                "",
+                "## 日常操作与排查步骤"
+            };
+            foreach (var step in CustomerGuide.Software(state.Options))
+            {
+                lines.Add($"### {step.Title}");
+                lines.Add(step.Instructions);
+                lines.Add("");
+            }
+            lines.Add("## 重要提示：conhost / 命令行终端运行 Claude Code / CLI");
+            lines.Add("若通过 conhost、PowerShell 或 cmd 等命令行窗口运行 Claude Code / CLI 工具，需要由本人在对应终端窗口手动配置代理环境变量（不会由 AdsPower 指纹浏览器自动接管）。");
+            File.WriteAllText(dialog.FileName, string.Join(Environment.NewLine, lines), new System.Text.UTF8Encoding(false));
+            Notice("已导出客户使用手册：\n" + dialog.FileName);
+        }
+        catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
+    }
 
     private async Task EnableBlockAuditAndRetest()
     {
@@ -283,6 +325,8 @@ public sealed partial class SetupWindow
                 != MessageBoxResult.Yes) return;
             SaveProtectionChange(() =>
             {
+                state.Protection.WorkspaceId = state.Options.WorkspaceId;
+                state.Protection.VmId = state.VmId;
                 state.Protection.Browser = new(CheckStatus.Passed, DateTime.UtcNow, "用户确认实际 AdsPower 窗口出口");
                 state.PendingActions.RemoveAll(action => action.Id == CustomerGuide.ManualAdsPowerId);
             });

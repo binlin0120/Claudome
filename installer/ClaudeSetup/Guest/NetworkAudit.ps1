@@ -161,9 +161,20 @@ function Trace-Request([switch]$ViaClashLoopback, [switch]$ComparisonTarget) {
 function Read-GuestTrace {
     try { return (Trace-Request) }
     catch {
-        if($_.Exception.Message -notin @('TRACE_TLS_FAILED','TRACE_CONNECT_FAILED')){throw}
-        Start-Sleep -Seconds 2
-        return (Trace-Request)
+        $primaryError = $_.Exception.Message
+        if ($primaryError -in @('TRACE_TLS_FAILED','TRACE_CONNECT_FAILED')) {
+            Start-Sleep -Seconds 2
+            try { return (Trace-Request) }
+            catch {
+                $primaryError = $_.Exception.Message
+                if ($primaryError -ne 'TRACE_CONNECT_FAILED') { throw }
+            }
+        }
+        elseif ($primaryError -notin @('TRACE_HTTP_FAILED','TRACE_INCOMPLETE')) { throw }
+
+        # Fallback probe only on HTTP/edge instability so transient single-endpoint failures recover cleanly.
+        try { return (Trace-Request -ComparisonTarget) }
+        catch { throw $primaryError }
     }
 }
 # Called only after the guarded TUN check fails. An HTTP response over the same

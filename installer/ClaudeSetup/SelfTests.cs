@@ -507,6 +507,78 @@ public static class SelfTests
             Assert(reloaded.PendingActions.Any(a => a.Id == "hyperv-restart") && reloaded.Stage.Contains("重启"),
                 "Hyper-V restart checkpoint was not persisted");
         }));
+        await Check("downloader-16-thread-parallel-range-and-part-quarantine", async () => {
+            var dlDir = Path.Combine(root, "parallel-16-dl");
+            Directory.CreateDirectory(dlDir);
+            var payload = new byte[64 * 1024];
+            new Random(42).NextBytes(payload);
+            var expectedSha = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+            var rangeRequests = 0;
+
+            using var http = new HttpClient(new Handler(request =>
+            {
+                if (request.Headers.Range is { } rng && rng.Ranges.SingleOrDefault() is { From: long from, To: long to })
+                {
+                    Interlocked.Increment(ref rangeRequests);
+                    var len = (int)(to - from + 1);
+                    var slice = payload.AsSpan((int)from, len).ToArray();
+                    var resp = Reply(request, slice, HttpStatusCode.PartialContent);
+                    resp.Content.Headers.ContentRange = new ContentRangeHeaderValue(from, to, payload.Length);
+                    resp.Headers.AcceptRanges.Add("bytes");
+                    return resp;
+                }
+                var full = Reply(request, payload);
+                full.Headers.AcceptRanges.Add("bytes");
+                full.Content.Headers.ContentLength = payload.Length;
+                return full;
+            }));
+            using var downloader = new Downloader(http);
+            var res = new Resource("parallel-pkg", "Parallel Package", "parallel.bin", "https://cdn.example.invalid/parallel.bin", expectedSha, payload.Length, "MIT");
+            var savedPath = await downloader.GetWithThresholdAsync(res, dlDir, 1024, null, CancellationToken.None);
+            Assert(rangeRequests == Downloader.DefaultMaxParallelStreams && File.ReadAllBytes(savedPath).SequenceEqual(payload),
+                $"Expected {Downloader.DefaultMaxParallelStreams} parallel Range chunks, got {rangeRequests}");
+
+            // Corrupt .part should be quarantined on mismatch
+            var badDir = Path.Combine(root, "quarantine-dl");
+            Directory.CreateDirectory(badDir);
+            var badPart = Path.Combine(badDir, "broken.bin.part");
+            File.WriteAllText(badPart, "corrupt-stale-bytes");
+            JsonFile.Write(badPart + ".json", new { Sha256 = new string('0', 64), ETag = "\"old\"" });
+            using var singleHttp = new HttpClient(new Handler(req => Reply(req, payload)));
+            using var qdl = new Downloader(singleHttp);
+            var rejected = false;
+            try { await qdl.Get(res with { FileName = "broken.bin" }, badDir, null, CancellationToken.None); }
+            catch (SetupException) { rejected = true; }
+            Assert(rejected && !File.Exists(badPart) && Directory.GetFiles(badDir, "*.quarantine").Length == 1,
+                "Corrupt .part was not quarantined after version mismatch");
+        });
+        await Check("protection-evidence-4d-binds-task-vm-boot-and-config", () => Sync(() => {
+            var st = new SessionState
+            {
+                VmId = "11111111-1111-1111-1111-111111111111",
+                Options = new() { WorkspaceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Country = "US" },
+                Completed = ["software"],
+                CoreConfigSha256 = new string('f', 64),
+                NetworkPassed = true,
+                Protection = new()
+                {
+                    WorkspaceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    VmId = "11111111-1111-1111-1111-111111111111",
+                    ConfigHash = new string('f', 64),
+                    BootUtc = "2026-11-25T10:00:00Z",
+                    Boundary = new(CheckStatus.Passed),
+                    Exit = new(CheckStatus.Passed),
+                    Browser = new(CheckStatus.Passed),
+                    Dns = new(CheckStatus.Passed)
+                }
+            };
+            Assert(st.Protection.FourDimensionsPassed(st), "Matched 4D evidence did not pass");
+            st.VmId = "22222222-2222-2222-2222-222222222222";
+            Assert(!st.Protection.FourDimensionsPassed(st), "Changing VmId left 4D evidence passing");
+            st.VmId = "11111111-1111-1111-1111-111111111111";
+            st.RestartBootBefore = "2026-11-25T10:00:00Z";
+            Assert(!st.Protection.FourDimensionsPassed(st), "Pending guest restart left 4D evidence passing");
+        }));
         await Check("mac-recommendation-does-not-claim-windows-exe-support", () => Sync(() => {
             var mac = new PlatformFacts("macOS", "arm64", "", true, true, 16, false, false);
             Assert(Platforms.Recommend(mac)[0].Id == "fusion" && Platforms.Recommend(mac).All(x => !x.Automatic), "Mac claimed Windows EXE automation");

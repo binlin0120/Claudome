@@ -324,8 +324,12 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                             if (hyperVStatus == HyperVGuestStatus.CredentialsRejected)
                                 throw new HandoffException(new("需要同步虚拟机 Windows 登录账号与密码",
                                     [detail + "。请在来宾内核对原 Windows 登录账号，再使用左侧「同步虚拟机账号密码」。"], "guest-auth-sync"));
-                            if (hyperVStatus is HyperVGuestStatus.AccessDenied or HyperVGuestStatus.BootstrapMissing)
-                                break;
+                            if (hyperVStatus == HyperVGuestStatus.AccessDenied)
+                                throw new HandoffException(new("Hyper-V 来宾拒绝 PowerShell Direct 访问",
+                                    [detail + "。", "请确认虚拟机内部账号属于 Administrators 组且已完成首次桌面登录，然后继续原任务。"], "guest-auth-sync"));
+                            if (hyperVStatus == HyperVGuestStatus.BootstrapMissing)
+                                throw new HandoffException(new("Hyper-V 来宾缺少初始化引导组件",
+                                    [detail + "。", "请先确认虚拟机是从本任务系统盘启动，不要切换为未经本工具准备的外部磁盘后继续。"], "guest-wait"));
 
                             if (HyperV.CanRepairGuestStatus(hyperVStatus))
                             {

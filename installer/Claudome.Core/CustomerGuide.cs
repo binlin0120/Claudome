@@ -41,6 +41,7 @@ public static class CustomerGuide
         new("clash","5. Clash 检查","核对 Clash Verge 服务模式和 TUN 已开启，使用本任务专用配置与所选节点。保持助手及保护通道开启；不要关闭 Clash，也不要改成 NAT 或直连来绕过检查。"),
         new("leak-check","6. 首次网络检测","在 AdsPower 点「打开」，在浏览器访问 https://ip.net.coffee/claude/ 。核对国家/地区为 "+Country(options.Country)+"，并检查出口、DNS、IPv6、WebRTC 和时区。\n\n不要求评分或每个项目全绿；国家正确本身不能证明没有泄露。存在本地地址或未完成检查时，保留提示继续排查。"),
         new("claude","7. 登录与收藏","完成检测后保留同一个 AdsPower 窗口，新开标签访问 https://claude.ai/ ，由本人登录并完成一次对话，再收藏到书签栏。账号、验证码、付款由本人处理。官方 Claude 客户端需要单独检查网络与登录，不能直接沿用浏览器的验收结果。"),
-        new("daily","8. 以后每天使用","打开助手并恢复原任务 → 等待网络与虚拟桌面自动连接 → 打开 AdsPower 原专用环境 → 先检查连接状态，再使用 Claude 书签。重开、更新或网络变化后重新检测。\n\n不要随意生成新指纹、删除环境、关闭 Clash，或在其他浏览器混用账号。关闭助手时先保存并暂停；下次继续原任务即可。")
+        new("daily","8. 以后每天使用","打开助手并恢复原任务 → 等待网络与虚拟桌面自动连接 → 打开 AdsPower 原专用环境 → 先检查连接状态，再使用 Claude 书签。重开、更新或网络变化后重新检测。\n\n不要随意生成新指纹、删除环境、关闭 Clash，或在其他浏览器混用账号。关闭助手时先保存并暂停；下次继续原任务即可。"),
+        new("cli-conhost","9. 命令行（conhost / Claude Code）代理提示","如需在虚拟机内的 conhost / PowerShell / cmd 等命令行窗口运行 Claude Code 或其他 CLI 工具，请注意：命令行窗口不会由 AdsPower 指纹浏览器自动接管，也不建议依赖隐式系统代理，需按实际使用的终端会话自行核对或手动设置代理环境变量（如 HTTP_PROXY / HTTPS_PROXY，仅指向本机受控端口，勿绕过 Clash TUN）。")
     };
 }
