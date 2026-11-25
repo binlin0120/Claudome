@@ -23,6 +23,17 @@ public static class DesktopRecoveryTests
             Assert(!ConsoleWindowLocator.MatchesIdentity(new(1,@"C:\VMware\vmware.exe","vmware.exe -n \"D:\\Fixture VM Copy\\Fixture.vmx\""),id,@"C:\VMware\vmware.exe","Fixture",@"D:\Fixture VM\Fixture.vmx"),"foreign VMware path claimed");
             Assert(ConsoleWindowLocator.MatchesVmwareCaption("Fixture - VMware Workstation","Fixture")&&!ConsoleWindowLocator.MatchesVmwareCaption("Fixture Copy - VMware Workstation","Fixture"),"VMware tab caption accepted another VM");
         }));
+        await check("hyperv-zoom-matches-only-the-native-view-auto-options", () => Sync(() => {
+            Assert(HyperVConsoleZoom.MatchesMenu("查看(&V)", 0), "Chinese View mnemonic was rejected");
+            Assert(HyperVConsoleZoom.MatchesMenu("&Zoom Level", 1), "English zoom menu was rejected");
+            Assert(HyperVConsoleZoom.MatchesMenu("自动(&A)", 2) && HyperVConsoleZoom.MatchesMenu("&Auto", 2),
+                "Automatic zoom options were rejected");
+            Assert(!HyperVConsoleZoom.MatchesMenu("增强会话", 0) &&
+                !HyperVConsoleZoom.MatchesMenu("100%", 2) && !HyperVConsoleZoom.MatchesMenu("自动连接", 2),
+                "Unrelated menu command was accepted");
+            Assert(!HyperVConsoleZoom.TrySelectAuto(new(IntPtr.Zero, Environment.ProcessId, @"C:\Windows\System32\vmconnect.exe"), CancellationToken.None),
+                "Stale console handle was accepted");
+        }));
         await check("desktop-automatic-retry-cannot-reopen-a-closed-console",()=>Sync(()=>{
             var policy=new DesktopConnectionPolicy();policy.ObserveRunning();Assert(policy.TryLaunchFrontend(),"initial launch denied");
             Assert(!policy.TryLaunchFrontend(),"duplicate frontend launch allowed");policy.ObserveWindow();policy.Suspend();

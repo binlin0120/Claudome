@@ -420,7 +420,13 @@ public static class SelfTests
         });
         await Check("fresh-home-and-pro-platform-recommendations", () => Sync(() => {
             var fresh = new PlatformFacts("Windows", "x64", "Core", true, true, 16, false, false);
-            var home = Platforms.Recommend(fresh); Assert(home[0].Id == "virtualbox" && home.Single(x => x.Id == "hyperv").Compatible == false, "home recommendation wrong");
+            foreach (var edition in new[] { "Core", "CoreN", "CoreCountrySpecific", "CoreSingleLanguage" })
+            {
+                Assert(Machine.IsHomeEdition(edition), $"Home edition was not detected: {edition}");
+                var home = Platforms.Recommend(fresh with { Edition = edition });
+                Assert(home[0].Id == "virtualbox" && !home.Single(x => x.Id == "hyperv").Compatible, $"Home recommendation was wrong: {edition}");
+            }
+            Assert(!Machine.IsHomeEdition("Professional") && !Machine.IsHomeEdition(null), "non-Home edition should not show the Home notice");
             var pro = Platforms.Recommend(fresh with { Edition = "Professional" }); Assert(pro[0].Id == "hyperv", "Pro should prefer original supported route");
             Assert(Platforms.Recommend(fresh with { Architecture = "arm64" }).All(x => !x.Compatible), "Windows ARM offered unsupported automatic install");
             Assert(Platforms.Recommend(fresh with { VirtualizationReady = false }).All(x => !x.Compatible), "disabled virtualization accepted");

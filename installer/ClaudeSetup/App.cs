@@ -293,7 +293,19 @@ public sealed partial class SetupWindow : Window
     }
     private void RefreshHost()
     {
-        try { var host = Machine.Read(); hostText.Text = host.Summary; if (platform.Items.Count > 0) RefreshPlatforms(); hostNote.Text = host.FreeMemory < 6L * 1024 * 1024 * 1024 ? "可以先下载资源。启动 4 GB 虚拟机前，请至少空出约 6 GB 内存。程序不会自动关闭你的应用。" : "当前空闲内存满足默认 4 GB 来宾的启动余量，实际启动前还会重新检查。"; }
+        try
+        {
+            var host = Machine.Read();
+            hostText.Text = host.Summary;
+            if (platform.Items.Count > 0) RefreshPlatforms();
+
+            var memoryNote = host.FreeMemory < 6L * 1024 * 1024 * 1024
+                ? "可以先下载资源。启动 4 GB 虚拟机前，请至少空出约 6 GB 内存。程序不会自动关闭你的应用。"
+                : "当前空闲内存满足默认 4 GB 来宾的启动余量，实际启动前还会重新检查。";
+            hostNote.Text = Machine.IsHomeEdition(host.Edition)
+                ? Machine.HomeEditionHyperVNotice + "\n\n" + memoryNote
+                : memoryNote;
+        }
         catch (Exception ex) { hostText.Text = "当前检查未完成"; hostNote.Text = Redaction.SafeError(ex); }
     }
     private void ApplyRecommendedCpuIfNotCustom()

@@ -22,6 +22,7 @@ public static class ConsoleWindowLocator
     [DllImport("user32.dll")]private static extern bool IsIconic(IntPtr handle);
     [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]private static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")]private static extern bool ShowWindowAsync(IntPtr handle,int command);
+    [DllImport("user32.dll")]private static extern bool SetForegroundWindow(IntPtr handle);
     [DllImport("user32.dll")]private static extern IntPtr GetWindow(IntPtr handle,uint command);
     [DllImport("user32.dll")]private static extern bool GetClientRect(IntPtr handle,out NativeRect rect);
     [DllImport("kernel32.dll",SetLastError=true)]private static extern IntPtr OpenProcess(uint access,bool inherit,int id);
@@ -151,8 +152,15 @@ public static class ConsoleWindowLocator
     public static bool ShowExisting(string vmId,string executable)
     {
         var window=Find(vmId,executable);if(window is null)return false;
-        NativeConsoleHost.EnableWindow(window.Handle, true);
-        if(!IsWindowVisible(window.Handle)||IsIconic(window.Handle))ShowWindowAsync(window.Handle,9);
+        RestoreVisible(window);
         return true;
+    }
+
+    internal static void RestoreVisible(ConsoleWindow window, bool foreground = false)
+    {
+        if (!IsAlive(window)) return;
+        NativeConsoleHost.EnableWindow(window.Handle, true);
+        if (!IsWindowVisible(window.Handle) || IsIconic(window.Handle)) ShowWindowAsync(window.Handle, 9);
+        if (foreground) SetForegroundWindow(window.Handle);
     }
 }

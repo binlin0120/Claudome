@@ -7,7 +7,7 @@ namespace ClaudeSetup;
 
 public sealed record HostInfo(string Edition, long TotalMemory, long FreeMemory, int Processors, bool Is64Bit, int Build, string? VBoxPath)
 {
-    public string EditionName => (Build>=22000?"11 ":"10 ") + (Edition switch { "CoreCountrySpecific" => "家庭中文版", "Core" or "CoreSingleLanguage" => "家庭版", "Professional" => "专业版", "Enterprise" => "企业版", "Education" => "教育版", _ => Edition });
+    public string EditionName => (Build>=22000?"11 ":"10 ") + (Edition switch { "CoreCountrySpecific" => "家庭中文版", "Core" or "CoreSingleLanguage" => "家庭版", "CoreN" => "家庭版 N", "Professional" => "专业版", "Enterprise" => "企业版", "Education" => "教育版", _ => Edition });
     public string Summary => $"Windows {EditionName}  ·  {TotalMemory / 1073741824d:F1} GB 内存  ·  {Processors} 个逻辑处理器\n当前空闲 {FreeMemory / 1073741824d:F1} GB；" + (VBoxPath is null ? "尚未安装 VirtualBox" : "检测到 VirtualBox，可复用");
 }
 public static class Machine
@@ -48,7 +48,10 @@ public static class Machine
     }
     public static bool IsAdmin => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
     public static bool IsHostHypervisorActive => System.Runtime.Intrinsics.X86.X86Base.IsSupported && (System.Runtime.Intrinsics.X86.X86Base.CpuId(1, 0).Ecx & unchecked((int)0x80000000)) != 0;
-    internal static bool IsHomeEdition(string? edition) => edition is "Core" or "CoreCountrySpecific" or "CoreSingleLanguage";
+    internal const string HomeEditionHyperVNotice =
+        "当前电脑使用 Windows 家庭版。新建 Hyper-V 环境，请先在「设置 → 系统 → 激活」通过 Microsoft Store 升级，或输入有效的专业版产品密钥，然后返回重新检查。已有 VirtualBox 任务可继续使用。";
+
+    internal static bool IsHomeEdition(string? edition) => edition is "Core" or "CoreN" or "CoreCountrySpecific" or "CoreSingleLanguage";
     public static void CheckVmStart(SetupOptions options)
     {
         Paths.ValidateRoot(options.Root);

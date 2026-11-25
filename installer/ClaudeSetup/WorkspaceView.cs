@@ -33,7 +33,8 @@ public sealed partial class SetupWindow
     private string latestTaskActivity="",latestTaskDownload="";
     private bool taskFaulted, installationNetworkFailed;
     private NativeConsoleHost? consoleHost;
-    private bool fittingVBoxDisplay;
+    private bool fittingVBoxDisplay, fittingHyperVDisplay;
+    private Button? openStandaloneHyperV;
     private bool waitingForGuestFrame;
     private DateTime? waitingForGuestFrameSinceUtc;
     private bool notifiedMultiCoreBlankTimeout;
@@ -91,6 +92,7 @@ public sealed partial class SetupWindow
             desktopConfirmAdsExit = Action("确认 AdsPower 出口", (_, _) => ConfirmBrowserExit());
             desktopFinish = Action("完成设置", (_, _) => FinishWorkspace(), true);
             desktopFinishHint = Text("", 11);
+            openStandaloneHyperV = Action("在独立窗口查看 Hyper-V 桌面", (_, _) => ShowStandaloneHyperV());
             desktopRecoverDisplay = Action("保存状态并恢复显示", async (_, _) => await RecoverVirtualBoxDisplay(), true);
             desktopRecoverDisplay.Visibility = Visibility.Collapsed;
             desktopForceRepair = Action("强制关闭并恢复 1 核", async (_, _) => await ForceRepairVirtualBoxDialog(), true);
@@ -114,6 +116,7 @@ public sealed partial class SetupWindow
                     Action("防护结果",(_,_)=>Navigate(5)),
                     Action("重新连接桌面",async(_,_)=>{desktopConnectionPolicy.ResumeExplicitly();autoConnectDesktop=true;await ConnectDesktop(requested:true);},true),
                     Action("适配显示区域",async(_,_)=>await FitConnectedConsole(true)),
+                    openStandaloneHyperV,
                     Action("同步虚拟机账号密码",async(_,_)=>await SyncGuestCredentialsDialog()),
                 Action("检查 Clash / AdsPower",async(_,_)=>await RunValidation(false,false)),
                 Action("查看黑屏与启动诊断",async(_,_)=>await ReadVmDiagnostic()),
@@ -185,6 +188,11 @@ public sealed partial class SetupWindow
                                 lastVBoxLayout?.LastCheckedAspect is null && VirtualBoxDisplayFit.CanAdaptViewport(consoleHost.ViewportPixels)))
                                 await FitConnectedConsole();
                             await RefreshDefaultNativeClipboard();
+                        }
+                        else if (state.Options.PlatformId == "hyperv" && !fittingHyperVDisplay)
+                        {
+                            // VMConnect can resize its own outer HWND after a mode or DPI change.
+                            consoleHost.Fit();
                         }
                     }
                     else if (autoConnectDesktop && !desktopConnectionPolicy.Suspended && !connectingConsole)
@@ -430,7 +438,9 @@ public sealed partial class SetupWindow
         if (connectingConsole || fittingVBoxDisplay || shuttingDownVm) return;
         if (state.Options.PlatformId != "virtualbox")
         {
-            host.Fit();
+            host.Fit(forceRedraw: requested);
+            if (requested && state.Options.PlatformId == "hyperv")
+                await FitHyperVConsole(host);
             return;
         }
 
@@ -472,6 +482,59 @@ public sealed partial class SetupWindow
         }
         finally { fittingVBoxDisplay = false; }
     }
+    private async Task FitHyperVConsole(NativeConsoleHost host)
+    {
+        if (fittingHyperVDisplay || lastConsoleWindow is not { } window || host.GuestWindow != window.Handle) return;
+        var vmId = state.VmId;
+        var lifetime = desktopConnectionCancellation?.Token ?? CancellationToken.None;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        var token = deadline.Token;
+        fittingHyperVDisplay = true;
+        UpdateDesktopActivity();
+        try
+        {
+            var applied = await Task.Run(() => HyperVConsoleZoom.TrySelectAuto(window, token), token)
+                .WaitAsync(token);
+            if (applied)
+                await Task.Delay(325, lifetime); // VMConnect can animate its own resize after selecting Auto.
+            if (!lifetime.IsCancellationRequested && section == 7 && state.VmId == vmId &&
+                host == consoleHost && host.IsAttached && host.GuestWindow == window.Handle)
+            {
+                host.Fit(forceRedraw: true);
+                SetDesktopConnectionStatus(applied ? "已请求 Hyper-V 控制台自动缩放。" : HyperVZoomUnavailable);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (!lifetime.IsCancellationRequested && section == 7 && state.VmId == vmId && host.IsAttached && host.GuestWindow == window.Handle)
+                SetDesktopConnectionStatus(HyperVZoomUnavailable);
+        }
+        finally
+        {
+            fittingHyperVDisplay = false;
+            UpdateDesktopActivity();
+        }
+    }
+
+    private const string HyperVZoomUnavailable = "无法调用 Hyper-V 自动缩放。请在右侧选择「查看 → 缩放级别 → 自动」，或用「在独立窗口查看 Hyper-V 桌面」。";
+
+    private void ShowStandaloneHyperV()
+    {
+        if (connectingConsole || fittingHyperVDisplay || shuttingDownVm || state.Options.PlatformId != "hyperv" ||
+            lastConsoleWindow is not { } window || !ConsoleWindowLocator.IsAlive(window)) return;
+
+        desktopConnectionPolicy.Suspend();
+        autoConnectDesktop = false;
+        desktopConnectionCancellation?.Cancel();
+        consoleHost?.Detach(showOriginal: true);
+        if (consoleHost is not null) consoleHost.Visibility = Visibility.Collapsed;
+        if (consoleFrame is not null) consoleFrame.Background = Surface;
+        ConsoleWindowLocator.RestoreVisible(window, foreground: true);
+        SetDesktopConnectionStatus("已在独立窗口显示原 Hyper-V 桌面。选择「重新连接桌面」可返回内嵌显示。");
+        UpdateDesktopActivity();
+    }
+
     private string DesktopConnectedStatus() => !busy && state.Status.Contains("暂停")
         ? "已连接原虚拟机桌面。任务已暂停，可在左侧继续。"
         : "已连接原虚拟机桌面。";
@@ -493,6 +556,11 @@ public sealed partial class SetupWindow
     {
         UpdateShutdownCommand(section == 7);
         if (desktopGuidePanel is not null) desktopGuidePanel.IsEnabled = !shuttingDownVm;
+        if (openStandaloneHyperV is not null)
+        {
+            openStandaloneHyperV.Visibility = state.Options.PlatformId == "hyperv" ? Visibility.Visible : Visibility.Collapsed;
+            openStandaloneHyperV.IsEnabled = consoleHost?.IsAttached == true && !connectingConsole && !fittingHyperVDisplay;
+        }
         if (desktopRecoverDisplay is not null)
         {
             desktopRecoverDisplay.Visibility = !string.IsNullOrEmpty(framebufferConflictVm) &&
