@@ -48,6 +48,7 @@ public sealed class HyperV : IVmBackend
     private readonly bool recoveryChannelOnly;
     private readonly SemaphoreSlim spawnerRecoveryGate = new(1, 1);
     private readonly CancellationTokenSource disposeCts = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> pendingLaunchRequestIds = new(StringComparer.Ordinal);
     private HyperV? verifier;
     private HyperV? displayHelper;
     private HyperV? displaySpawner;
@@ -110,6 +111,23 @@ public sealed class HyperV : IVmBackend
     internal int SpawnerRecoveryCount { get; private set; }
     internal int DisposedTempSpawnerCount { get; private set; }
     internal int StaleReplyDiscardedCount { get; private set; }
+    internal int VerifiedOrphanChildKilledCount { get; private set; }
+
+    internal static bool TryKillVerifiedOwnedPwshChild(int pid, DateTime launchSentUtc)
+    {
+        if (pid <= 0) return false;
+        try
+        {
+            using var proc = Process.GetProcessById(pid);
+            if (proc.HasExited) return false;
+            if (!string.Equals(proc.ProcessName, "pwsh", StringComparison.OrdinalIgnoreCase)) return false;
+            var startedUtc = proc.StartTime.ToUniversalTime();
+            if (startedUtc < launchSentUtc.AddSeconds(-2) || startedUtc > DateTime.UtcNow.AddSeconds(5)) return false;
+            proc.Kill(entireProcessTree: true);
+            return true;
+        }
+        catch { return false; }
+    }
     internal bool HasManagementConnection => Volatile.Read(ref disposed) == 0 && !faultedOrAborted && pipe is { CanRead: true, CanWrite: true } && (pipe is not NamedPipeServerStream nps || nps.IsConnected) && writer is not null;
 
     internal static bool IsCurrentProcessElevated()
@@ -376,6 +394,7 @@ public sealed class HyperV : IVmBackend
         // Once the pipe lock is acquired, do NOT bind callerToken to abort the main pipe on cancel.
         // If this instance is an isolated spawnerOnly or recoveryChannelOnly channel and the outer timeout fires BEFORE
         // the inner RPC timeout, immediately retire ONLY this isolated channel (NEVER touching the main pipe).
+        var launchSentUtc = DateTime.UtcNow;
         var rpcTask = RunLaunchVerifierLockedAsync(options, pipeName, scriptPath, spawnAsSpawner);
         try
         {
@@ -383,19 +402,19 @@ public sealed class HyperV : IVmBackend
         }
         catch (OperationCanceledException) when (callerToken.IsCancellationRequested)
         {
-            _ = CleanupLateLaunchedChildAsync(rpcTask);
+            _ = CleanupLateLaunchedChildAsync(rpcTask, launchSentUtc);
             throw new OperationCanceledException("已取消 Hyper-V 子通道启动，主管理通道保持可用。", callerToken);
         }
         catch (OperationCanceledException)
         {
             if (spawnerOnly || recoveryChannelOnly) AbortPipeUnsafely();
-            _ = CleanupLateLaunchedChildAsync(rpcTask);
+            _ = CleanupLateLaunchedChildAsync(rpcTask, launchSentUtc);
             throw new SetupException("启动 Hyper-V 显示子通道超时，已放弃本次冷启动。");
         }
         catch (TimeoutException)
         {
             if (spawnerOnly || recoveryChannelOnly) AbortPipeUnsafely();
-            _ = CleanupLateLaunchedChildAsync(rpcTask);
+            _ = CleanupLateLaunchedChildAsync(rpcTask, launchSentUtc);
             throw new SetupException("启动 Hyper-V 显示子通道超时，已放弃本次冷启动。");
         }
     }
@@ -652,20 +671,13 @@ public sealed class HyperV : IVmBackend
         }
     }
 
-    private static async Task CleanupLateLaunchedChildAsync(Task<string> rpcTask)
+    private async Task CleanupLateLaunchedChildAsync(Task<string> rpcTask, DateTime launchSentUtc)
     {
         try
         {
             var idText = await rpcTask;
-            if (int.TryParse(idText, out var pid) && pid > 0)
-            {
-                try
-                {
-                    using var proc = Process.GetProcessById(pid);
-                    if (!proc.HasExited) proc.Kill(entireProcessTree: true);
-                }
-                catch { }
-            }
+            if (int.TryParse(idText, out var pid) && TryKillVerifiedOwnedPwshChild(pid, launchSentUtc))
+                VerifiedOrphanChildKilledCount++;
         }
         catch { }
     }
@@ -692,6 +704,8 @@ public sealed class HyperV : IVmBackend
         var activeWriter = writer ?? throw new SetupException("Hyper-V 管理通道未就绪，请重试。");
         var activeReader = reader ?? throw new SetupException("Hyper-V 管理通道未就绪，请重试。");
         var requestId = Guid.NewGuid().ToString("N");
+        var isLaunchRequest = operation == "launch-verifier";
+        if (isLaunchRequest) pendingLaunchRequestIds[requestId] = DateTime.UtcNow;
         var payload = JsonSerializer.Serialize(new { id = requestId, operation, data });
         try
         {
@@ -770,15 +784,20 @@ public sealed class HyperV : IVmBackend
                     !string.Equals(respId, requestId, StringComparison.Ordinal))
                 {
                     StaleReplyDiscardedCount++;
-                    if (result.RootElement.TryGetProperty("value", out var lateVal) &&
+                    // Only reclaim a late PID when respId belongs to a launch-verifier request WE issued on this channel,
+                    // AND the target process identity (pwsh + launch time window) is verified to prevent killing unrelated PIDs.
+                    if (pendingLaunchRequestIds.TryRemove(respId, out var orphanLaunchUtc) &&
+                        result.RootElement.TryGetProperty("value", out var lateVal) &&
                         lateVal.ValueKind == JsonValueKind.String &&
-                        int.TryParse(lateVal.GetString(), out var orphanPid) && orphanPid > 0)
+                        int.TryParse(lateVal.GetString(), out var orphanPid) &&
+                        TryKillVerifiedOwnedPwshChild(orphanPid, orphanLaunchUtc))
                     {
-                        try { using var p = Process.GetProcessById(orphanPid); if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+                        VerifiedOrphanChildKilledCount++;
                     }
                     result.Dispose();
                     continue;
                 }
+                if (isLaunchRequest) pendingLaunchRequestIds.TryRemove(requestId, out _);
                 break;
             }
             using (result) {

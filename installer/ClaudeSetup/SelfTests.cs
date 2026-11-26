@@ -3003,6 +3003,107 @@ public static class SelfTests
                 "DisposeAsync during in-flight rebuild failed to abort promptly or leaked temp spawner");
             await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(3));
         });
+        await Check("hyperv-stale-reply-preserves-unrelated-process-and-only-reclaims-verified-owned-child", async () => {
+            var ownRoot = Path.Combine(root, "hv-stale-pid"); Directory.CreateDirectory(ownRoot);
+            var st = new SessionState { VmId = Guid.NewGuid().ToString("D"), Options = new() { Root = ownRoot, PlatformId = "hyperv", VmName = "HV-StalePid" } };
+
+            static string? ExtractReqId(string jsonLine)
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(jsonLine);
+                    return doc.RootElement.TryGetProperty("id", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+                }
+                catch { return null; }
+            }
+
+            // 1. Start a genuinely unrelated process (not a Claudome worker) and inject its PID as a mismatched stale reply
+            //    during a normal `running` status query -> stale reply MUST be discarded, query MUST succeed, and
+            //    the unrelated process MUST stay alive!
+            using var unrelated = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ping -n 30 127.0.0.1 >nul")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true
+            })!;
+            System.Diagnostics.Process? ownedLatePwsh = null;
+            try
+            {
+                Assert(!unrelated.HasExited, "Unrelated fixture process exited prematurely");
+                Task? mainSrv = null;
+                var hv = new HyperV(connectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeStaleUnrel-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    mainSrv = Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    var id = ExtractReqId(line);
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "initialized", code = "OK" }));
+                                    else if (line.Contains("\"running\""))
+                                    {
+                                        // Mismatched numeric reply citing an unrelated live PID
+                                        await w.WriteLineAsync(JsonSerializer.Serialize(new { id = "unregistered-stale-id", ok = true, value = unrelated.Id.ToString(), code = "OK" }));
+                                        await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "True", code = "OK" }));
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    });
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                });
+
+                var running = await hv.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+                unrelated.Refresh();
+                Assert(running && hv.StaleReplyDiscardedCount == 1 && hv.VerifiedOrphanChildKilledCount == 0 && !unrelated.HasExited,
+                    "Discarding a mismatched numeric reply killed an unrelated process or broke status query");
+                await hv.DisposeAsync();
+                if (mainSrv is not null) await mainSrv.WaitAsync(TimeSpan.FromSeconds(3));
+
+                // 2. Verify TryKillVerifiedOwnedPwshChild refuses non-pwsh process even with valid timestamp,
+                //    AND DOES reclaim a genuinely owned pwsh child started within the launch window.
+                var nowUtc = DateTime.UtcNow;
+                Assert(!HyperV.TryKillVerifiedOwnedPwshChild(unrelated.Id, nowUtc) && !unrelated.HasExited,
+                    "TryKillVerifiedOwnedPwshChild killed a non-pwsh process");
+
+                var pwshPath = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator)
+                    .Select(dir => Path.Combine(dir.Trim(), "pwsh.exe")).FirstOrDefault(File.Exists);
+                if (pwshPath is not null)
+                {
+                    var launchUtc = DateTime.UtcNow;
+                    ownedLatePwsh = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(pwshPath, "-NoLogo -NoProfile -Command Start-Sleep -Seconds 30")
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    });
+                    Assert(ownedLatePwsh is not null && !ownedLatePwsh.HasExited, "Owned pwsh fixture failed to start");
+                    // A stale timestamp far in the past (simulating PID reuse / pre-existing unrelated pwsh) must NOT kill it
+                    Assert(!HyperV.TryKillVerifiedOwnedPwshChild(ownedLatePwsh!.Id, launchUtc.AddMinutes(5)) && !ownedLatePwsh.HasExited,
+                        "TryKillVerifiedOwnedPwshChild killed a pwsh started outside the launch time window");
+                    // Matching launch timestamp cleanly reclaims the owned pwsh child
+                    Assert(HyperV.TryKillVerifiedOwnedPwshChild(ownedLatePwsh.Id, launchUtc) && ownedLatePwsh.WaitForExit(3000),
+                        "TryKillVerifiedOwnedPwshChild failed to reclaim verified owned late pwsh child");
+                }
+            }
+            finally
+            {
+                try { if (!unrelated.HasExited) unrelated.Kill(entireProcessTree: true); } catch { }
+                try { if (ownedLatePwsh is not null && !ownedLatePwsh.HasExited) ownedLatePwsh.Kill(entireProcessTree: true); ownedLatePwsh?.Dispose(); } catch { }
+            }
+        });
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));

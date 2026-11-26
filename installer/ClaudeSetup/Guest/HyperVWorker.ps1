@@ -1,21 +1,27 @@
 ﻿#requires -Version 7.0
 param([string]$PipeName='',[switch]$ProbeGuestStatus,[string]$SpawnerPipeName='',[string]$RecoveryPipeName='',[switch]$SpawnerOnly)
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
-$script:supervisedChildPids=[Collections.Concurrent.ConcurrentBag[int]]::new()
+$script:supervisedChildren=[Collections.Concurrent.ConcurrentDictionary[int,Diagnostics.Process]]::new()
 $script:sharedState=[Collections.Concurrent.ConcurrentDictionary[string,string]]::new()
 $script:recoveryStop=[ref]$false
 $script:recoveryPs=$null
 $script:recoveryHandle=$null
 $script:workerScriptPath=$PSCommandPath
+function Register-SupervisedChild([Diagnostics.Process]$Process) {
+    if($null -eq $Process){return}
+    $script:supervisedChildren[$Process.Id]=$Process
+}
+function Unregister-SupervisedChild([int]$ProcessId) {
+    $removed=$null
+    [void]$script:supervisedChildren.TryRemove($ProcessId,[ref]$removed)
+}
 function Stop-SupervisedChildren {
-    $seen=[Collections.Generic.HashSet[int]]::new()
-    $childPid=0
-    while($script:supervisedChildPids.TryTake([ref]$childPid)) {
-        if(-not $seen.Add($childPid)){continue}
-        try {
-            $proc = Get-Process -Id $childPid -ErrorAction SilentlyContinue
-            if($proc -and -not $proc.HasExited){ $proc.Kill($true) }
-        } catch { }
+    foreach($childPid in @($script:supervisedChildren.Keys)) {
+        $proc=$null
+        if($script:supervisedChildren.TryRemove($childPid,[ref]$proc) -and $proc) {
+            try { if(-not $proc.HasExited){ $proc.Kill($true); $null=$proc.WaitForExit(1500) } } catch { }
+            try { $proc.Dispose() } catch { }
+        }
     }
 }
 if(-not $ProbeGuestStatus) {
@@ -27,7 +33,7 @@ if(-not $ProbeGuestStatus) {
             $spStart.UseShellExecute=$false;$spStart.CreateNoWindow=$true
             foreach($a in @('-NoLogo','-NoProfile','-File',$PSCommandPath,'-PipeName',$SpawnerPipeName,'-SpawnerOnly')){$spStart.ArgumentList.Add($a)}
             $spProc=[Diagnostics.Process]::Start($spStart)
-            if($spProc){$script:supervisedChildPids.Add($spProc.Id)}
+            if($spProc){Register-SupervisedChild $spProc}
         } catch { }
     }
     if($RecoveryPipeName) {
@@ -35,7 +41,7 @@ if(-not $ProbeGuestStatus) {
         try {
             $script:recoveryPs=[powershell]::Create()
             $null=$script:recoveryPs.AddScript({
-                param($recPipeName,$workerPath,$psHomePath,$childPids,$shared,$stopRef)
+                param($recPipeName,$workerPath,$psHomePath,$childMap,$shared,$stopRef)
                 $ErrorActionPreference='Stop'
                 while(-not $stopRef.Value) {
                     $rp=$null;$rr=$null;$rw=$null
@@ -68,7 +74,7 @@ if(-not $ProbeGuestStatus) {
                                     $childArgs=@('-NoLogo','-NoProfile','-File',$fullScript,'-PipeName',[string]$rd.pipeName,'-SpawnerOnly')
                                     foreach($ca in $childArgs){$si.ArgumentList.Add($ca)}
                                     $cp=[Diagnostics.Process]::Start($si)
-                                    if($cp){$childPids.Add($cp.Id)}
+                                    if($cp){$childMap[$cp.Id]=$cp}
                                     $resp=@{ok=$true;value=[string]$cp.Id;code='OK'}
                                 } else {
                                     throw 'UNSUPPORTED_OPERATION'
@@ -89,7 +95,7 @@ if(-not $ProbeGuestStatus) {
                         if($rp){try{$rp.Dispose()}catch{}}
                     }
                 }
-            }).AddArgument($RecoveryPipeName).AddArgument($PSCommandPath).AddArgument($PSHOME).AddArgument($script:supervisedChildPids).AddArgument($script:sharedState).AddArgument($script:recoveryStop)
+            }).AddArgument($RecoveryPipeName).AddArgument($PSCommandPath).AddArgument($PSHOME).AddArgument($script:supervisedChildren).AddArgument($script:sharedState).AddArgument($script:recoveryStop)
             $script:recoveryHandle=$script:recoveryPs.BeginInvoke()
         } catch { }
     }
@@ -302,7 +308,7 @@ function Get-HyperVGuestStatus($Data, [int]$TimeoutMs = 12000) {
     }
     $child = [Diagnostics.Process]::Start($start)
     if (-not $child) { return 'SessionUnavailable' }
-    $script:supervisedChildPids.Add($child.Id)
+    Register-SupervisedChild $child
     try {
         $payload = @{
             options = $o
@@ -326,7 +332,7 @@ function Get-HyperVGuestStatus($Data, [int]$TimeoutMs = 12000) {
         }
         return 'SessionUnavailable'
     } finally {
-        $null = $script:supervisedChildPids.Remove($child.Id)
+        Unregister-SupervisedChild $child.Id
         $child.Dispose()
     }
 }
@@ -1041,7 +1047,7 @@ try {
                             $childArgs=@('-NoLogo','-NoProfile','-File',$scriptFile,'-PipeName',[string]$d.pipeName)
                             if($launchAsSpawner){$childArgs+='-SpawnerOnly'}
                             foreach($a in $childArgs){$start.ArgumentList.Add($a)}
-                            $process=[Diagnostics.Process]::Start($start);if($process){$script:supervisedChildPids.Add($process.Id)};$value=[string]$process.Id
+                            $process=[Diagnostics.Process]::Start($start);if($process){Register-SupervisedChild $process};$value=[string]$process.Id
                         }
                         'boundary-prepare' {
                             $vm=Target-VM $d

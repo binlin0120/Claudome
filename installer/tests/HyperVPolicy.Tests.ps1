@@ -735,6 +735,65 @@ Check 'hyperv-worker-spawner-only-live-process-isolation' {
     }
 }
 
+Check 'hyperv-guest-status-probe-returns-ready-unregisters-and-handles-timeout-and-exit' {
+    # Load production Register-SupervisedChild, Unregister-SupervisedChild, Stop-SupervisedChildren, and Get-HyperVGuestStatus
+    $workerPath = Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($workerPath, [ref]$null, [ref]$null)
+    $fnNames = @('Register-SupervisedChild', 'Unregister-SupervisedChild', 'Stop-SupervisedChildren', 'Get-HyperVGuestStatus')
+    foreach ($fnName in $fnNames) {
+        $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true) | Select-Object -First 1
+        Assert-Case ($null -ne $fn)
+        . ([scriptblock]::Create($fn.Extent.Text))
+    }
+
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('claudome-guest-status-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $savedTargetVm = ${function:Target-VM}
+    $savedWorkerPath = $script:workerScriptPath
+    $savedO = $script:o
+    $savedChildren = $script:supervisedChildren
+    $longChild = $null
+    try {
+        [IO.Directory]::CreateDirectory($tempRoot) | Out-Null
+        $script:supervisedChildren = [Collections.Concurrent.ConcurrentDictionary[int,Diagnostics.Process]]::new()
+        $script:o = [pscustomobject]@{ Root = $tempRoot; VmName = 'GuestProbeVm'; WorkspaceId = '11111111111111111111111111111111' }
+        function Target-VM($Data) { [pscustomobject]@{ Id = [guid]'55555555-5555-5555-5555-555555555555' } }
+
+        # 1. Probe worker returns STATUS:Ready -> Get-HyperVGuestStatus returns 'Ready' cleanly and unregisters PID
+        $readyProbe = Join-Path $tempRoot 'probe-ready.ps1'
+        [IO.File]::WriteAllText($readyProbe, "param([switch]`$ProbeGuestStatus)`n`$null=[Console]::In.ReadLine()`nWrite-Output 'STATUS:Ready'`n", [Text.UTF8Encoding]::new($false))
+        $script:workerScriptPath = $readyProbe
+        $statusReady = Get-HyperVGuestStatus ([pscustomobject]@{ vmId = '55555555-5555-5555-5555-555555555555'; password = 'pw' }) 5000
+        Assert-Case ($statusReady -eq 'Ready' -and $script:supervisedChildren.Count -eq 0)
+
+        # 2. Probe worker hangs beyond timeout -> Get-HyperVGuestStatus kills probe, returns SessionUnavailable, and unregisters PID
+        $hangProbe = Join-Path $tempRoot 'probe-hang.ps1'
+        [IO.File]::WriteAllText($hangProbe, "param([switch]`$ProbeGuestStatus)`nStart-Sleep -Seconds 30`n", [Text.UTF8Encoding]::new($false))
+        $script:workerScriptPath = $hangProbe
+        $statusTimeout = Get-HyperVGuestStatus ([pscustomobject]@{ vmId = '55555555-5555-5555-5555-555555555555'; password = 'pw' }) 350
+        Assert-Case ($statusTimeout -eq 'SessionUnavailable' -and $script:supervisedChildren.Count -eq 0)
+
+        # 3. Worker exit cleanup kills registered child by held Process handle and clears registry
+        $si = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
+        $si.UseShellExecute = $false; $si.CreateNoWindow = $true
+        foreach ($a in @('-NoLogo','-NoProfile','-Command','Start-Sleep -Seconds 30')) { $si.ArgumentList.Add($a) }
+        $longChild = [Diagnostics.Process]::Start($si)
+        Assert-Case ($null -ne $longChild -and -not $longChild.HasExited)
+        $longChildPid = $longChild.Id
+        Register-SupervisedChild $longChild
+        Assert-Case ($script:supervisedChildren.Count -eq 1)
+        Stop-SupervisedChildren
+        $longChild = $null
+        Assert-Case ($script:supervisedChildren.Count -eq 0 -and $null -eq (Get-Process -Id $longChildPid -ErrorAction SilentlyContinue))
+    } finally {
+        if ($longChild) { try { if (-not $longChild.HasExited) { $longChild.Kill($true) }; $longChild.Dispose() } catch { } }
+        if ($savedTargetVm) { Set-Item function:Target-VM -Value $savedTargetVm } else { Remove-Item function:Target-VM -ErrorAction SilentlyContinue }
+        $script:workerScriptPath = $savedWorkerPath
+        $script:o = $savedO
+        $script:supervisedChildren = $savedChildren
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 # Call the real .NET file API directly; the mock registry provider remains scoped
 # to this test process, not the user's PowerShell session or machine.
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null
