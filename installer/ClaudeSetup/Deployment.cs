@@ -80,7 +80,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         state.PendingActions.Add(new("请保存工作并重启电脑以完成 Hyper-V 启用",
             [
                 "系统已写入或正在等待应用 Hyper-V 功能变更。",
-                "请先保存本机其他工作并重启 Windows，重启后重新打开 Claudome Hyper-V 版，程序会自动恢复本任务并继续创建虚拟机。"
+                $"请先保存本机其他工作并重启 Windows，重启后重新打开 {ProductProfile.WindowTitle}，程序会自动恢复本任务并继续创建虚拟机。"
             ], "hyperv-restart"));
         state.Save();
     }
@@ -137,7 +137,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             if(plan.InstallWindows) WindowsMedia.RequireSelected(o,o.IsoSha256);
             var resourceStamp=ResumePlan.ResourceStamp();
             var hostPackages = Catalog.Resources.Where(r =>
-                (r.Id == "vcredist" && !Machine.VcRuntimeInstalled()) ||
+                (r.Id == "vcredist" && o.PlatformId != "hyperv" && !Machine.VcRuntimeInstalled()) ||
                 (r.Id == "vbox" && o.PlatformId == "virtualbox" && Machine.VBoxPath() is null)).ToArray();
             if (hostPackages.Length > 0)
             {
@@ -146,7 +146,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 foreach (var package in hostPackages)
                     await hostDownloader.Get(package, o.Cache, downloads, token);
             }
-            if (!Machine.VcRuntimeInstalled())
+            if (o.PlatformId != "hyperv" && !Machine.VcRuntimeInstalled())
             {
                 Stage(state, "2 / 7  准备微软运行库，请确认管理员提示");
                 var vc = Catalog.Resources.Single(r => r.Id == "vcredist");
@@ -282,7 +282,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                             {
                                 if (++authFailures == 1)
                                 {
-                                    Stage(state, "4 / 7  来宾拒绝了后台登录，可点击左侧同步虚拟机账号密码");
+                                    Stage(state, "4 / 7  来宾拒绝了后台登录，可在「检测出错问题」点击同步虚拟机密码");
                                     await Task.Delay(TimeSpan.FromSeconds(4), token);
                                     continue;
                                 }
@@ -291,7 +291,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                                     [
                                         "检测到 VirtualBox 来宾工具已就绪，但手动完成 Windows 设置时创建的账号或密码与助手当前记录不一致。",
                                         "先在来宾 Windows 完成登录。若微软账号需要联网，请使用当前已核验的安装网络，必要时关闭登录提示后重新打开。",
-                                        "进入来宾桌面后，点击左侧「同步虚拟机账号密码」，填写实际 Windows 用户名和密码，验证后再继续第 5/7 步。"
+                                        "进入来宾桌面后，点击顶部「检测出错问题 → 同步虚拟机账号密码」，填写实际 Windows 用户名和密码，验证后再继续第 5/7 步。"
                                     ], "guest-auth-sync"));
                             }
                             else authFailures = 0;

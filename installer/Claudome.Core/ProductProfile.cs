@@ -12,11 +12,11 @@ public static class ProductProfile
     public static bool IsHyperVStandalone => true;
     public static string ChannelId => "hyperv";
     public static string ProductName => "Claudome Hyper-V";
-    public static string WindowTitle => "Claudome Hyper-V 版";
-    public static string BrandTagline => "Windows 11 专版 · Hyper-V 受控独立环境";
+    public static string WindowTitle => "Claudome";
+    public static string BrandTagline => "Windows 11 独立安全工作区";
     public static string PackagePrefix => "Claudome-HyperV";
     public static string AppDataFolderName => "ClaudomeHyperVSetup";
-    public static string DefaultWorkspaceFolderName => "ClaudomeHyperVWorkspace";
+    public static string DefaultWorkspaceFolderName => "Claudome";
     public static bool OnlineUpdatesEnabled => false;
     public static string PreReleasePageUrl => "https://github.com/binlin0120/Claudome/releases";
 #else

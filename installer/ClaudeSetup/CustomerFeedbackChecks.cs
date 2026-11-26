@@ -64,7 +64,12 @@ public sealed partial class SetupWindow
             var previewed = appearance.Accent == "#B85F39" && savedAppearance is null;
             await Click(saveButton);
             var resizable = appearanceDialog.ResizeMode == ResizeMode.CanResizeWithGrip;
-            var passed = scrolled && visibleActions && previewed && resizable && savedAppearance?.Accent == "#B85F39" && !appearanceDialog.IsVisible;
+            var opacitySlider = Descendants<Slider>(appearanceDialog).Single(s => s.Name == "AppearanceOpacitySlider");
+            opacitySlider.Value = 5;
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+            var minOpacityOk = appearance.Opacity == 0.05 && ((SolidColorBrush)Surface).Color.A == 13 &&
+                quickOpacityButton?.Content?.ToString() == "◐ 透度 5%";
+            var passed = scrolled && visibleActions && previewed && resizable && savedAppearance?.Accent == "#B85F39" && minOpacityOk && !appearanceDialog.IsVisible;
             if (!passed) failed++;
             rows.Add(new { name = "appearance-dialog-wheel-and-fixed-preview-save-actions-work-in-a-short-window", passed });
         }
@@ -276,46 +281,16 @@ public sealed partial class SetupWindow
             using var file=File.Create(Path.Combine(directory,name+".png"));png.Save(file);
         }
         Navigate(7);await SaveAlignmentView("embedded-workspace");
-        var oneSidebar=desktopGuidePanel is not null && navigation.Children.Contains(desktopGuidePanel) && desktopView!.Children.Count==1 && ContentRoot.ColumnDefinitions[0].Width.Value==310;
-        if(!oneSidebar)failed++;rows.Add(new{name="workspace-navigation-and-guide-share-one-sidebar",passed=oneSidebar});
-        var desktopPanel = desktopView;
-        var expandedWidth = desktopPanel!.ActualWidth;
-        var sidebarToggle = desktopSidebarToggle ?? throw new SetupException("Missing desktop sidebar toggle.");
-        await Click(sidebarToggle);
-        var fold = section == 7 && ContentRoot.ColumnDefinitions[0].Width.Value == 62 &&
-            this.sidebarScroll?.Visibility == Visibility.Collapsed && sidebarToggle.IsVisible &&
-            desktopPanel.ActualWidth > expandedWidth && main.Children.Contains(desktopPanel);
+        var topDockReady = desktopGuidePanel is not null && desktopTopBar is not null &&
+            desktopView!.Children.Contains(desktopTopBar) && desktopView.Children.Contains(consoleFrame!) &&
+            desktopDetailDrawer?.Visibility == Visibility.Collapsed &&
+            ContentRoot.ColumnDefinitions[0].Width.Value == 0;
+        if(!topDockReady)failed++;rows.Add(new{name="workspace-navigation-and-guide-moved-to-top-bar",passed=topDockReady});
         PreviewTheme(true);
         await SaveAlignmentView("desktop-guide-collapsed-dark");
-        await Click(sidebarToggle);
-        fold &= ContentRoot.ColumnDefinitions[0].Width.Value == 310 &&
-            this.sidebarScroll?.Visibility == Visibility.Visible && main.Children.Contains(desktopPanel);
-        await SaveAlignmentView("desktop-guide-expanded-dark");
         PreviewTheme(false);
-        if (!fold) failed++;
-        rows.Add(new { name = "desktop-chevron-collapses-and-restores-the-same-guide-and-viewport", passed = fold });
 
-        var sidebarScroll = Descendants<ScrollViewer>(ContentRoot).Single(s => s.Name == "SidebarScroll");
-        var maintenance = Descendants<Expander>(desktopGuidePanel!).Single(e => e.Header as string == "检查与维护");
-        maintenance.IsExpanded = true;
-        sidebarScroll.ScrollToTop();
-        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
-        UpdateLayout();
-        var rail = sidebarScroll.Template.FindName("PART_VerticalScrollBar", sidebarScroll) as ScrollBar;
-        rail?.ApplyTemplate();
-        var track = rail?.Template.FindName("PART_Track", rail) as Track;
-        var railReady = rail is { ActualWidth: <= 12, IsVisible: true } &&
-            track?.Thumb is not null && sidebarScroll.ScrollableHeight > 0;
-        if (railReady)
-        {
-            var pageDown = track!.IncreaseRepeatButton;
-            if (pageDown.Command is System.Windows.Input.RoutedCommand command)
-                command.Execute(null, pageDown);
-            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
-            railReady = sidebarScroll.VerticalOffset > 0;
-        }
-        if (!railReady) failed++;
-        rows.Add(new { name = "slim-sidebar-scrollbar-preserves-access-to-maintenance", passed = railReady });
+        var maintenance = desktopMaintenanceExpander ?? throw new SetupException("Missing desktop maintenance expander.");
         Button MaintenanceAction(string label) => ((StackPanel)maintenance.Content).Children.OfType<Button>().Single(b => b.Content as string == label);
         await Click(MaintenanceAction("防护结果"));
         var maintenanceRoutes = section == 5;
@@ -326,7 +301,7 @@ public sealed partial class SetupWindow
         if (!maintenanceRoutes) failed++;
         rows.Add(new { name = "desktop-maintenance-actions-open-the-actual-recovery-and-network-pages", passed = maintenanceRoutes });
         Navigate(7);
-        maintenance.IsExpanded = false;
+        if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = false;
         var savedDesktopStatus=state.Status;var savedDesktopVm=state.VmId;
         state.VmId="11111111-1111-1111-1111-111111111111";state.Status="已暂停，可继续原任务";latestTaskActivity="";latestTaskDownload="";SetDesktopConnectionStatus(DesktopWaitingText());UpdateDesktopGuide();
         var openedShutdownPrompt = false;
@@ -346,7 +321,7 @@ public sealed partial class SetupWindow
         if (!shutdownRoute) failed++;
         rows.Add(new { name = "desktop-shutdown-button-opens-confirmation-and-honors-cancel", passed = shutdownRoute });
         await SaveAlignmentView("desktop-paused");
-        var pausedConsistent=consoleStatus!.Text.Contains("已暂停")&&consolePlaceholder!.Text.Contains("已暂停")&&!consolePlaceholder.Text.Contains("正在自动连接")&&desktopContinue!.IsEnabled&&desktopContinue.Content.ToString()!.Contains("继续原任务");
+        var pausedConsistent=consoleStatus!.Text.Contains("暂停")&&consolePlaceholder!.Text.Contains("暂停")&&!consolePlaceholder.Text.Contains("正在自动连接")&&desktopContinue!.IsEnabled&&desktopContinue.Content.ToString()!.Contains("继续");
         if(!pausedConsistent)failed++;rows.Add(new{name="paused-desktop-has-visible-resume-and-no-false-connecting-status",passed=pausedConsistent});
         busy=true;AllowEditing(false);SetDesktopConnectionStatus(DesktopWaitingText());UpdateDesktopGuide();progress.IsIndeterminate=false;progress.Value=37;RecordTaskActivity("正在准备安装网络组件");RecordTaskDownload("安装网络组件 · 37%");
         await SaveAlignmentView("desktop-network-progress");
@@ -454,11 +429,12 @@ public sealed partial class SetupWindow
         if(!fieldsLocked)failed++;rows.Add(new{name="existing-vm-creation-fields-explicitly-locked",passed=fieldsLocked});
         state.VmId=savedVmId;RefreshCreationFields();
         await VerifyNativeHostFixture(rows,directory);
-        var hasForceRepairItem = Descendants<Expander>(desktopGuidePanel!).Any(control => control.Header?.ToString() == "检查与维护" &&
-            (control.Content as Panel)?.Children.OfType<Button>().Any(button => button.Content?.ToString() == "强制关闭无响应虚拟机并修复" &&
-                button.Visibility == (ProductProfile.IsHyperVStandalone ? Visibility.Collapsed : Visibility.Visible)) == true);
+        var hasForceRepairItem = desktopMaintenanceExpander is not null &&
+            (desktopMaintenanceExpander.Content as Panel)?.Children.OfType<Button>().Any(button => button.Content?.ToString() == "强制关闭无响应虚拟机并修复" &&
+                button.Visibility == (ProductProfile.IsHyperVStandalone ? Visibility.Collapsed : Visibility.Visible)) == true;
         var desktopInputControls = desktopGuidePanel is not null &&
-            Descendants<Expander>(desktopGuidePanel).Any(control => control.Header?.ToString() == "手动传送纯文本") &&
+            desktopClipboardPopup?.Child is DependencyObject clipRoot &&
+            Descendants<Expander>(clipRoot).Any(control => control.Header?.ToString() == "手动传送纯文本") &&
             Descendants<Button>(desktopGuidePanel).All(button => button.Content?.ToString() != "聚焦虚拟机键盘") &&
             hasForceRepairItem;
         if (!desktopInputControls) failed++;
@@ -478,10 +454,12 @@ public sealed partial class SetupWindow
         state.Options.PlatformId = "hyperv";
         state.Options.SharedClipboardEnabled = true;
         state.Options.HyperVBasicConsoleConfirmed = false;
+        nativeClipboardReady = false;
         UpdateNativeClipboardControl();
-        var hypervDefaultClipboard = nativeClipboardButton?.Visibility == Visibility.Visible &&
+        var hypervPendingClipboard = nativeClipboardButton?.Visibility == Visibility.Visible &&
             nativeClipboardButton?.Content?.ToString() == "关闭双向剪贴板" &&
-            nativeClipboardStatus?.Text.Contains("增强会话双向剪贴板") == true;
+            nativeClipboardStatus?.Text.Contains("待") == true &&
+            !nativeClipboardStatus.Text.Contains("已核验");
         state.Options.SharedClipboardEnabled = false;
         UpdateNativeClipboardControl();
         var hypervOptOutClipboard = nativeClipboardButton?.Content?.ToString() == "启用双向剪贴板" &&
@@ -490,8 +468,8 @@ public sealed partial class SetupWindow
         state.Options.PlatformId = previousPlatform;
         state.VmId = previousVm;
         UpdateNativeClipboardControl();
-        if (!hypervDefaultClipboard || !hypervOptOutClipboard) failed++;
-        rows.Add(new { name = "hyperv-desktop-shows-clipboard-on-by-default-and-toggle", passed = hypervDefaultClipboard && hypervOptOutClipboard });
+        if (!hypervPendingClipboard || !hypervOptOutClipboard) failed++;
+        rows.Add(new { name = "hyperv-desktop-shows-clipboard-on-by-default-and-toggle", passed = hypervPendingClipboard && hypervOptOutClipboard });
         var clickFocus = new[] { 0x0201, 0x0204, 0x0207, 0x020B, 0x0246 }.All(NativeConsoleHost.IsPointerPress) &&
             new[] { 0x0200, 0x0202, 0x020A, 0x0100 }.All(message => !NativeConsoleHost.IsPointerPress(message));
         if (!clickFocus) failed++;
@@ -508,7 +486,7 @@ public sealed partial class SetupWindow
             timeZone.SelectedValue?.ToString() == "Tokyo Standard Time" &&
             Descendants<Button>(pages[3]).Any(b => b.Content?.ToString() == "测速并自动识别出口地区与时区") &&
             softwareChecklist is not null && softwareChecklist.Text.Contains("外层门禁") && softwareChecklist.Text.Contains("内层环境") && softwareChecklist.Text.Contains("资源策略") &&
-            desktopGuidePanel is not null && Descendants<Button>(desktopGuidePanel).Any(b => b.Content?.ToString() == "复制检测网址");
+            desktopStepGuideExpander?.Content is DependencyObject diagRoot && Descendants<Button>(diagRoot).Any(b => b.Content?.ToString() == "复制检测网址");
         if (!cageInspiredUpgrades) failed++;
         rows.Add(new { name = "cage-inspired-node-probe-timezone-sync-and-live-dual-layer-badge", passed = cageInspiredUpgrades });
         var autoRestoreDir = Path.Combine(directory, "auto-restore-fixture");
@@ -737,6 +715,137 @@ public sealed partial class SetupWindow
             rows.Add(new { name = "hyperv-standalone-rejects-legacy-tasks-early-and-hides-vbox-controls", passed = standaloneChecksOk });
             Navigate(0);
         }
+
+        Go(2);
+        var centeredConfigModal = configModalFrame is not null &&
+            configModalFrame.HorizontalAlignment == HorizontalAlignment.Center &&
+            configModalFrame.VerticalAlignment == VerticalAlignment.Center &&
+            ReferenceEquals(configModalFrame.Background, Surface) &&
+            configModalFrame.Width <= 800 &&
+            closeConfigButton?.Visibility == Visibility.Visible &&
+            topMoreButton?.Content?.ToString() == "⚙ 设置 ▾";
+        ShowInlineAppearanceOverlay();
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        var inlineOverlayShown = inlineModalOverlay?.Visibility == Visibility.Visible &&
+            inlineModalCard?.HorizontalAlignment == HorizontalAlignment.Center &&
+            ReferenceEquals(inlineModalCard?.Background, Surface);
+        CloseInlineModal();
+
+        // Real concurrent background load test: actual background Task.Run work + elevated wait + page switching + quick root lock + ParseNodes finish
+        var prevCheckRoot = root.Text;
+        var prevCheckNodes = nodes;
+        var prevCheckSource = source.SelectedIndex;
+        var prevCheckNetText = networkText.Text;
+        var prevCheckUser = user.Text;
+        var prevCheckPass = password.Password;
+        var loadDir = Path.Combine(directory, "concurrent-media-load-fixture");
+        Directory.CreateDirectory(loadDir);
+        var tempMediaBytes = Path.Combine(loadDir, "dummy-media.bin");
+        File.WriteAllBytes(tempMediaBytes, new byte[256 * 1024]);
+        var originalRootValue = Path.Combine(loadDir, "active-root");
+        var altRootValue = Path.Combine(loadDir, "alt-suggested-root");
+        root.Text = originalRootValue;
+        fixedNtfsDrives.ItemsSource = new[]
+        {
+            new Machine.FixedNtfsDrive("Z:\\", "Z:\\", "Fixture", 200L << 30, 500L << 30, true, altRootValue)
+        };
+        fixedNtfsDrives.SelectedIndex = 0;
+
+        var elevateStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseElevate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var backgroundTask = InspectMediaWithHooks(async (ws, isoFile, msgs, dl, tok, onElevateStart, onElevateWait) =>
+        {
+            msgs.Report("正在哈希校验模拟镜像");
+            await Downloader.Hash(tempMediaBytes, tok);
+            dl.Report(new("模拟镜像检查", 1, 2, 1024));
+            onElevateStart();
+            elevateStarted.TrySetResult();
+            using var _ = tok.Register(onElevateWait);
+            await releaseElevate.Task;
+            tok.ThrowIfCancellationRequested();
+            return fixtureMedia;
+        });
+        await elevateStarted.Task;
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+
+        Go(1);
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        var allRootControlsLocked = !root.IsEnabled && !fixedNtfsDrives.IsEnabled &&
+            pickRootBtn?.IsEnabled == false && applySuggestedRootBtn?.IsEnabled == false &&
+            downloadIsoBtn?.IsEnabled == false && pauseIsoBtn?.IsEnabled == true;
+        applySuggestedRootBtn?.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        var quickBtnDidNotMutateRoot = string.Equals(root.Text, originalRootValue, StringComparison.OrdinalIgnoreCase);
+
+        Go(3);
+        source.SelectedIndex = 1;
+        networkText.Text = "socks5://concurrent.example:1080#ConcurrentNode";
+        await ParseNodes(interactive: false);
+        var networkParsedDuringMedia = nodes.Count == 1 && nodes[0].Name == "ConcurrentNode";
+        // AllowEditing(true) called by ParseNodes MUST NOT unlock root/media while mediaBusy is still true
+        var stillLockedAfterParseNodes = !root.IsEnabled && !fixedNtfsDrives.IsEnabled &&
+            pickRootBtn?.IsEnabled == false && applySuggestedRootBtn?.IsEnabled == false;
+
+        Go(4);
+        user.Text = "ConcurrentUser";
+        password.Password = "Concurrent!Pass99";
+        var accountEditableDuringMedia = user.IsEnabled && password.IsEnabled && user.Text == "ConcurrentUser";
+
+        Go(2);
+        PauseMediaWork();
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        var elevatedWaitShown = mediaStatusText.Text.Contains("等待") && banner.Text.Contains("等待");
+        releaseElevate.TrySetResult();
+        await backgroundTask;
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+
+        var workspaceGuardRejectsMismatch = IsSameMediaWorkspace(state, state.Options.WorkspaceId, Path.GetFullPath(originalRootValue)) &&
+            !IsSameMediaWorkspace(state, state.Options.WorkspaceId, Path.GetFullPath(altRootValue));
+        var unlockedAfterFinish = root.IsEnabled && applySuggestedRootBtn?.IsEnabled == true && !mediaBusy && !mediaInElevatedInspect;
+
+        root.Text = prevCheckRoot;
+        fixedNtfsDrives.ItemsSource = Machine.GetFixedNtfsDrives();
+        if (fixedNtfsDrives.Items.Count > 0) fixedNtfsDrives.SelectedIndex = 0;
+        nodes = prevCheckNodes;
+        source.SelectedIndex = prevCheckSource;
+        networkText.Text = prevCheckNetText;
+        user.Text = prevCheckUser;
+        password.Password = prevCheckPass;
+        UpdateRouteActionsVisibility();
+        Directory.Delete(loadDir, true);
+
+        var mediaLocksOnlyConflicts = allRootControlsLocked && quickBtnDidNotMutateRoot &&
+            networkParsedDuringMedia && stillLockedAfterParseNodes && accountEditableDuringMedia &&
+            elevatedWaitShown && workspaceGuardRejectsMismatch && unlockedAfterFinish;
+        var v6ChecksOk = mediaLocksOnlyConflicts && centeredConfigModal && inlineOverlayShown && iso.IsEnabled;
+        // Also verify automatic jump to 专属桌面 on Stage 4 and hidden route clutter when idle
+        var prevAppliedSecrets = appliedSecrets;
+        var prevNodes = nodes;
+        var prevBusyJump = busy;
+        var prevVmJump = state.VmId;
+        var prevGuestReady = state.Completed.Contains("guest-ready");
+        appliedSecrets = null;
+        nodes = [];
+        state.VmId = "";
+        UpdateRouteActionsVisibility();
+        var routeHiddenWhenIdle = routeActionsCard?.Visibility == Visibility.Collapsed;
+        appliedSecrets = prevAppliedSecrets;
+        nodes = prevNodes;
+        UpdateRouteActionsVisibility();
+        state.VmId = "44444444-4444-4444-4444-444444444444";
+        state.Completed.Remove("guest-ready");
+        busy = true;
+        autoJumpedToDesktopThisRun = false;
+        desktopConnectionPolicy.ResumeExplicitly();
+        Go(1);
+        ShowInstallationProgress(new("4 / 7  安装 Windows", 35));
+        var jumpedToDesktop = section == 7 && autoConnectDesktop;
+        busy = prevBusyJump;
+        state.VmId = prevVmJump;
+        if (prevGuestReady) state.Completed.Add("guest-ready");
+        autoJumpedToDesktopThisRun = false;
+        var allV6Ok = v6ChecksOk && routeHiddenWhenIdle && jumpedToDesktop;
+        if (!allV6Ok) failed++;
+        rows.Add(new { name = "centered-translucent-config-modal-settings-menu-and-nonblocking-media-download", passed = allV6Ok, v6ChecksOk, routeHiddenWhenIdle, jumpedToDesktop });
 
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);

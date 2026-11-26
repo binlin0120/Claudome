@@ -1,23 +1,23 @@
-Claudome Hyper-V 版 0.5.0 快速开始
+Claudome 0.5.0 快速开始
 适用于 Windows 11 x64（专业版 / 企业版）
 
 重要环境说明
-1. 本专版仅适用于 Windows 11 x64 专业版或企业版（需开启硬件虚拟化与 Hyper-V），不会安装或修改 VirtualBox / VMware。
-2. Windows 10 或 Windows 11 家庭版 / 家庭中文版用户：可打开本程序只读查看界面或管理存储目录，但不可建机或部署；请先通过系统官方渠道升级至 Windows 11 专业版，或继续使用原版 Claudome 管理旧任务。
-3. 本专版与原版 Claudome 数据目录完全隔离，且更新包互相校验拒载（Claudome-HyperV_* 与 Claudome_* 不可混用原地升级），已有 VirtualBox 虚拟机、磁盘与任务记录不会被覆盖或迁移。
+1. 本安装包仅适用于 Windows 11 x64 专业版或企业版（需开启硬件虚拟化与 Hyper-V），不会安装或修改 VirtualBox / VMware。
+2. Windows 10 或 Windows 11 家庭版 / 家庭中文版用户：可打开本程序只读查看界面或管理存储目录，但不可建机或部署；请先通过系统官方渠道升级至 Windows 11 专业版，或继续使用标准版 Claudome 管理旧任务。
+3. 本版本与标准版 Claudome 数据目录完全隔离，且更新包互相校验拒载（Claudome-HyperV_* 与 Claudome_* 不可混用原地升级），已有 VirtualBox 虚拟机、磁盘与任务记录不会被覆盖或迁移。
 
 快速上手步骤
 1. 将 Claudome-HyperV_0.5.0_win-x64.zip 完整解压到本地目录，双击运行 Claudome.exe。
-2. 在「当前电脑」查看宿主机预检状态：如尚未启用 Hyper-V，可点击「启用 / 核对 Hyper-V 功能」，按提示保存工作并重启电脑；重启后重新打开程序将自动恢复当前任务断点。
+2. 在「本机状态」查看宿主机预检：如尚未启用 Hyper-V，可点击「启用 / 核对 Hyper-V 功能」，按提示保存工作并重启电脑；重启后重新打开 Claudome 将自动恢复当前任务断点。
 3. 选择任务保存目录（支持一键选择本机任意固定 NTFS 分区，建议预留 95 GB 空间）。
 4. 在「Windows 镜像」支持三种来源（均禁用 Windows 11 家庭中文版 CoreCountrySpecific 索引）：
    - 选择或扫描本机已有 Windows 11 x64 ISO；
    - 前往微软官网选择「Windows 11（多版本 ISO）」并右键复制 64 位下载直链，粘贴后由程序 16 线程自主高速下载；
    - 或下载微软官方媒体创建工具制作 ISO。
-5. 配置代理订阅/节点与来宾账号后开始部署。程序会创建第二代 Hyper-V 虚拟机、启用安全启动与虚拟 TPM、移除普通虚拟网卡并通过专用 VM 总线通道受控联网，并在来宾内自动复用初始化阶段的 PowerShell 7（免二次传送）。
-6. 在「检测与修复」按 A/B/C/D 四维完成外层边界、来宾 Clash/TUN、出口与 DNS 防泄漏及 AdsPower 浏览器出口验收，并可导出客户使用手册。
+5. 配置代理订阅/节点与来宾账号后开始部署。程序会创建第二代 Hyper-V 虚拟机、启用安全启动与虚拟 TPM、移除普通虚拟网卡并通过受控通道安全联网，同时在来宾内自动复用初始化阶段的 PowerShell 7（免二次传送），并默认开启共享剪贴板实现无缝复制粘贴。
+6. 在「安全验真」按 A/B/C/D 四维完成外层边界、来宾 Clash/TUN、出口与 DNS 防泄漏及 AdsPower 浏览器出口验收，并可导出客户使用手册。
 
 命令行与 SmartScreen 提示
 - 通过 conhost / PowerShell / cmd 运行 Claude Code 或其他 CLI 工具时，不会由 AdsPower 指纹浏览器自动接管，需在对应终端会话自行配置或核对代理环境变量。
-- 本预览包为开源自建未签名版本，如 Windows SmartScreen 提示“已保护你的电脑”，点击「更多信息 → 仍要运行」并建议核对同目录 SHA256SUMS.txt。
-- 本专版在线检查暂未开放，后续更新请从预发布页手动下载新版 Claudome-HyperV_* ZIP 后在软件内「从本地 ZIP 更新」原地升级。
+- 本发行包为开源自建未签名版本，如 Windows SmartScreen 提示“已保护你的电脑”，点击「更多信息 → 仍要运行」并建议核对同目录 SHA256SUMS.txt。
+- 如需升级新版，请从发布页下载对应 Claudome-HyperV_* ZIP 后，在软件内通过「从本地 ZIP 更新」原地升级。

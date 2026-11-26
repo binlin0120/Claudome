@@ -14,10 +14,12 @@ public sealed partial class SetupWindow
     private Grid? desktopView;
     private Grid? shellBody;
     private ScrollViewer? shellContentScroll;
-    private Border? desktopHiddenFooter;
-    private StackPanel? desktopGuidePanel;
-    private ComboBox? desktopNavigation;
-    private bool settingDesktopNavigation;
+    private Border? desktopTopBar;
+    private StackPanel? desktopDetailDrawer;
+    private StackPanel? desktopGuidePanel, consoleIdleOverlay;
+    private System.Windows.Controls.Primitives.Popup? desktopClipboardPopup, desktopMaintenancePopup;
+    private Expander? desktopMaintenanceExpander, desktopStepGuideExpander;
+    private Button? idleWizardButton;
     private TextBlock? consolePlaceholder,softwareChecklist,guideStepText;
     private ComboBox? guideStepChoice;
     private string guidePhase="";
@@ -77,17 +79,21 @@ public sealed partial class SetupWindow
     }
     private void DrawDesktop()
     {
-        title.Text="虚拟机桌面";subtitle.Text="左侧查看当前步骤，在右侧操作原来的真实虚拟机。";
+        title.Text="专属桌面";subtitle.Text="";
         if(desktopView is null) {
             desktopView=new Grid{MinHeight=340,Margin=new Thickness(0,0,0,4)};
+            desktopView.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});
+            desktopView.RowDefinitions.Add(new RowDefinition{Height=new GridLength(1,GridUnitType.Star)});
+
             var guide=new StackPanel();desktopGuidePanel=guide;
-            consoleStatus=Text("尚未连接桌面",14,false);consoleGuide=Text("",12);
-            softwareChecklist=Text("",11);softwareChecklist.Margin=new Thickness(0);desktopActivity=Text("",11);
-            var safetyBadgeBox=new Border{Background=Pale,BorderBrush=Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(8),Padding=new Thickness(10,8,10,8),Margin=new Thickness(0,2,0,10),Child=softwareChecklist};
-            desktopActivityProgress=new ProgressBar{Height=4,Margin=new Thickness(0,4,0,6),Foreground=Accent,Visibility=Visibility.Collapsed};
-            desktopContinue=Action("继续原任务并连接",async(_,_)=>await ResumeDesktopTask(),true);
-            desktopSyncAuth=Action("同步虚拟机账号密码",async(_,_)=>await SyncGuestCredentialsDialog());
-            desktopManualAdsPower = Action("不用 API，手动使用 AdsPower", (_, _) => SelectManualAdsPower());
+            consoleStatus=Text("待连接虚拟机",13,false);consoleStatus.Margin=new Thickness(0,0,12,0);consoleStatus.VerticalAlignment=VerticalAlignment.Center;
+            consoleGuide=Text("",11.5);consoleGuide.Margin=new Thickness(0,0,0,6);
+            softwareChecklist=Text("",11);softwareChecklist.Margin=new Thickness(0);desktopActivity=Text("",11.5);desktopActivity.Margin=new Thickness(0,4,0,0);
+            var safetyBadgeBox=new Border{Background=Pale,BorderBrush=Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(10),Padding=new Thickness(10,8,10,8),Margin=new Thickness(0,4,0,8),Child=new StackPanel{Children={consoleGuide,softwareChecklist}}};
+            desktopActivityProgress=new ProgressBar{Height=4,Margin=new Thickness(0,6,0,2),Foreground=Accent,Visibility=Visibility.Collapsed};
+            desktopContinue=Action("连接到虚拟机",async(_,_)=>await ResumeDesktopTask(),true);
+            desktopSyncAuth=Action("同步虚拟机密码",async(_,_)=>await SyncGuestCredentialsDialog());
+            desktopManualAdsPower = Action("手动使用 AdsPower", (_, _) => SelectManualAdsPower());
             desktopManualAdsGuide = Text("", 12);
             desktopConfirmAdsExit = Action("确认 AdsPower 出口", (_, _) => ConfirmBrowserExit());
             desktopFinish = Action("完成设置", (_, _) => FinishWorkspace(), true);
@@ -103,53 +109,120 @@ public sealed partial class SetupWindow
                 desktopRecoverDisplayMenuItem.Visibility = Visibility.Collapsed;
                 desktopForceRepairMenuItem.Visibility = Visibility.Collapsed;
             }
-            var forceRepairText = Text("检测到多核虚拟机长时间停留在 0×0 无画面状态，可能触发了 NEM 跨核死锁。建议强制关闭并自动恢复为 1 核（保留原磁盘与进度）。", 11, false);
+            var forceRepairText = Text("检测到多核虚拟机持续无画面（0×0），可能触发了 NEM 跨核死锁。建议强制关闭并自动恢复为 1 核（保留原磁盘与进度）。", 11, false);
             forceRepairText.Margin = new Thickness(0, 0, 0, 6);
             desktopForceRepairBanner = new Border
             {
                 Background = Pale, BorderBrush = Accent, BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(8), Padding = new Thickness(10, 8, 10, 8),
-                Margin = new Thickness(0, 0, 0, 10), Visibility = Visibility.Collapsed,
+                CornerRadius = new CornerRadius(10), Padding = new Thickness(10, 8, 10, 8),
+                Margin = new Thickness(0, 6, 0, 2), Visibility = Visibility.Collapsed,
                 Child = new StackPanel { Children = { forceRepairText, desktopForceRepair } }
             };
-            guide.Children.Add(Card(Text("当前步骤与检查",15,false),consoleStatus,desktopRecoverDisplay,desktopForceRepairBanner,consoleGuide,safetyBadgeBox,
-                new ScrollViewer{Content=desktopActivity,MaxHeight=95,VerticalScrollBarVisibility=ScrollBarVisibility.Auto},desktopActivityProgress,desktopContinue,desktopManualAdsPower,desktopManualAdsGuide,
-                desktopConfirmAdsExit,desktopFinish,desktopFinishHint,desktopSyncAuth,
-                CreateClipboardControls(),
-                Action("保存并暂停任务",(_,_)=>PauseCurrentTask()),
-                new Expander{Header="检查与维护",Foreground=Ink,Background=Surface,Content=new StackPanel{Children={
-                    Action("一键连接网络", async (_, _) => await EnterOriginalWorkspace(networkOnly: true)),
-                    Action("备用线路",async(_,_)=>await PickSavedRoute()),
-                    Action("防护结果",(_,_)=>Navigate(5)),
-                    Action("重新连接桌面",async(_,_)=>{desktopConnectionPolicy.ResumeExplicitly();autoConnectDesktop=true;await ConnectDesktop(requested:true);},true),
-                    Action("适配显示区域",async(_,_)=>await FitConnectedConsole(true)),
-                    openStandaloneHyperV,
-                    Action("同步虚拟机账号密码",async(_,_)=>await SyncGuestCredentialsDialog()),
-                Action("检查 Clash / AdsPower",async(_,_)=>await RunValidation(false,false)),
-                Action("查看黑屏与启动诊断",async(_,_)=>await ReadVmDiagnostic()),
-                desktopRecoverDisplayMenuItem,
-                desktopForceRepairMenuItem,
-                Action("关机后调整 CPU / 内存",(_,_)=>ResourceDialog()),
-                Action("打开网络配置", (_, _) => Navigate(3)),
-                Text("关闭本程序会收起本任务的控制台。虚拟机、磁盘和安装进度仍会保留。",10) }}}));
+
             guideStepChoice=Choice([]);guideStepChoice.Template=source.Template;guideStepChoice.DisplayMemberPath="Title";
-            guideStepText=Text("",12);
+            guideStepText=Text("",11.5);
             guideStepChoice.SelectionChanged+=(_,_)=>{if(guideStepText is not null)guideStepText.Text=(guideStepChoice.SelectedItem as CustomerGuideStep)?.Instructions??"";};
-            guide.Children.Insert(1,Card(Text("逐步操作指引",15,false),guideStepChoice,new ScrollViewer{Content=guideStepText,MaxHeight=190,VerticalScrollBarVisibility=ScrollBarVisibility.Auto},
-                Row(Action("复制检测网址",(_,_)=>{Clipboard.SetText("https://ip.net.coffee/claude");Notice("已复制检测页网址到主机剪贴板。可用双向剪贴板或手动传送纯文本。");}))));
-            navigation.Children.Add(guide);
-            desktopNavigation=Choice(sections);desktopNavigation.Template=source.Template;desktopNavigation.SelectedIndex=7;desktopNavigation.Margin=new Thickness(0,0,0,12);
-            desktopNavigation.SelectionChanged+=(_,_)=>{if(!settingDesktopNavigation && desktopNavigation.SelectedIndex>=0)Navigate(desktopNavigation.SelectedIndex);};navigation.Children.Insert(1,desktopNavigation);
+
+            var clipboardBtn = Action("剪贴板 ▾", (_, _) => { if (desktopClipboardPopup is not null) desktopClipboardPopup.IsOpen = !desktopClipboardPopup.IsOpen; });
+            desktopClipboardPopup = new System.Windows.Controls.Primitives.Popup
+            {
+                PlacementTarget = clipboardBtn,
+                Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
+                AllowsTransparency = true, StaysOpen = false, VerticalOffset = 6,
+                Child = new Border { Background = ModalSurface, BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14), Padding = new Thickness(14), Width = 320, Child = CreateClipboardControls() }
+            };
+
+            var maintenanceBtn = Action("检测出错问题 ▾", (_, _) => { if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = !desktopMaintenancePopup.IsOpen; });
+            desktopStepGuideExpander = new Expander
+            {
+                Header = "操作指引与检测网址", Foreground = Ink, Background = ModalSurface, Margin = new Thickness(0, 6, 0, 0),
+                Content = new StackPanel { Children = { guideStepChoice, new ScrollViewer { Content = guideStepText, MaxHeight = 160, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, Row(Action("复制检测网址", (_, _) => { Clipboard.SetText("https://ip.net.coffee/claude"); Notice("已复制检测页网址到主机剪贴板。可用双向剪贴板或手动传送纯文本。"); })) } }
+            };
+            desktopMaintenanceExpander = new Expander
+            {
+                Header = "检测出错问题", IsExpanded = true, Foreground = Ink, Background = ModalSurface,
+                Content = new StackPanel
+                {
+                    Children =
+                    {
+                        safetyBadgeBox,
+                        Action("黑屏与启动诊断", async (_, _) => await ReadVmDiagnostic()),
+                        Action("检查 Clash / AdsPower", async (_, _) => await RunValidation(false, false)),
+                        Action("一键连接网络", async (_, _) => await EnterOriginalWorkspace(networkOnly: true)),
+                        Action("备用线路", async (_, _) => await PickSavedRoute()),
+                        Action("防护结果", (_, _) => { if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = false; Navigate(5); }),
+                        Action("重新连接桌面", async (_, _) => { desktopConnectionPolicy.ResumeExplicitly(); autoConnectDesktop = true; await ConnectDesktop(requested: true); }, true),
+                        Action("适配显示区域", async (_, _) => await FitConnectedConsole(true)),
+                        openStandaloneHyperV,
+                        Action("同步虚拟机账号密码", async (_, _) => await SyncGuestCredentialsDialog()),
+                        desktopRecoverDisplayMenuItem,
+                        desktopForceRepairMenuItem,
+                        Action("关机后调整 CPU / 内存", (_, _) => ResourceDialog()),
+                        Action("打开网络配置", (_, _) => { if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = false; Navigate(3); }),
+                        desktopStepGuideExpander
+                    }
+                }
+            };
+            desktopMaintenancePopup = new System.Windows.Controls.Primitives.Popup
+            {
+                PlacementTarget = maintenanceBtn,
+                Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
+                AllowsTransparency = true, StaysOpen = false, VerticalOffset = 6,
+                Child = new Border { Background = ModalSurface, BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14), Padding = new Thickness(14), Width = 340, MaxHeight = 500, Child = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = desktopMaintenanceExpander } }
+            };
+
+            var pauseSaveBtn = Action("保存并暂停", (_, _) => PauseCurrentTask());
+            var topBarRow = new DockPanel { LastChildFill = true };
+            var actionCluster = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+            foreach (var item in new UIElement[] { desktopContinue, pauseSaveBtn, clipboardBtn, maintenanceBtn, desktopRecoverDisplay, desktopSyncAuth, desktopManualAdsPower, desktopConfirmAdsExit, desktopFinish })
+                actionCluster.Children.Add(item);
+            DockPanel.SetDock(actionCluster, Dock.Right);
+            topBarRow.Children.Add(actionCluster);
+            topBarRow.Children.Add(consoleStatus);
+
+            desktopDetailDrawer = new StackPanel
+            {
+                Margin = new Thickness(0, 4, 0, 0),
+                Visibility = Visibility.Collapsed,
+                Children =
+                {
+                    desktopForceRepairBanner,
+                    desktopActivity,
+                    desktopActivityProgress,
+                    desktopManualAdsGuide,
+                    desktopFinishHint
+                }
+            };
+
+            guide.Children.Add(topBarRow);
+            guide.Children.Add(desktopDetailDrawer);
+            desktopTopBar = new Border
+            {
+                Name = "DesktopTopBar",
+                Background = Surface,
+                BorderBrush = Line,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(14),
+                Padding = new Thickness(16, 10, 16, 10),
+                Margin = new Thickness(0, 0, 0, 10),
+                Child = guide
+            };
+            desktopView.Children.Add(desktopTopBar);
+
             consoleHost=new NativeConsoleHost{Focusable=true,MinHeight=320,Visibility=Visibility.Collapsed};
             consoleHost.SizeChanged += (_, _) => {
                 if (state.Options.PlatformId != "virtualbox" || consoleHost?.IsAttached != true) return;
                 consoleResizeTimer.Stop();
                 consoleResizeTimer.Start();
             };
-            taskSaveStatus=Text("任务进度将自动保存",11);guide.Children.Add(taskSaveStatus);
-            consolePlaceholder=new TextBlock{Text="载入原任务后连接虚拟电脑",MaxWidth=680,TextAlignment=TextAlignment.Center,VerticalAlignment=VerticalAlignment.Center,HorizontalAlignment=HorizontalAlignment.Center,Foreground=Muted,FontSize=16,TextWrapping=TextWrapping.Wrap};
-            var surface=new Grid();surface.Children.Add(consolePlaceholder);surface.Children.Add(consoleHost);
-            consoleFrame=new Border{Background=Surface,BorderBrush=Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(10),ClipToBounds=true,Child=surface};desktopView.Children.Add(consoleFrame);
+            consolePlaceholder=new TextBlock{Text="当前还没有运行中的虚拟机",MaxWidth=640,TextAlignment=TextAlignment.Center,HorizontalAlignment=HorizontalAlignment.Center,Foreground=Ink,FontSize=16,FontWeight=FontWeights.SemiBold,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,8)};
+            idleWizardButton = Action("前往安装向导  →", (_, _) => Navigate(1), true);
+            idleWizardButton.HorizontalAlignment = HorizontalAlignment.Center;
+            consoleIdleOverlay = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Children = { consolePlaceholder, idleWizardButton } };
+            var surface=new Grid();surface.Children.Add(consoleIdleOverlay);surface.Children.Add(consoleHost);
+            consoleFrame=new Border{Background=Surface,BorderBrush=Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(16),ClipToBounds=true,Child=surface};
+            Grid.SetRow(consoleFrame, 1);
+            desktopView.Children.Add(consoleFrame);
             desktopView.Loaded+=async(_,_)=>{autoConnectDesktop=!desktopConnectionPolicy.Suspended;desktopTimer.Start();UpdateDesktopGuide();if(autoConnectDesktop)await ConnectDesktop();};
             desktopView.Unloaded += (_, _) => {
                 desktopTimer.Stop();
@@ -196,10 +269,11 @@ public sealed partial class SetupWindow
                                 await FitConnectedConsole();
                             await RefreshDefaultNativeClipboard();
                         }
-                        else if (state.Options.PlatformId == "hyperv" && !fittingHyperVDisplay)
+                        else if (state.Options.PlatformId == "hyperv")
                         {
                             // VMConnect can resize its own outer HWND after a mode or DPI change.
-                            consoleHost.Fit();
+                            if (!fittingHyperVDisplay) consoleHost.Fit();
+                            await RefreshDefaultNativeClipboard();
                         }
                     }
                     else if (autoConnectDesktop && !desktopConnectionPolicy.Suspended && !connectingConsole)
@@ -256,11 +330,8 @@ public sealed partial class SetupWindow
     private void SetDesktopSidebar(bool enabled)
     {
         UpdateDesktopSidebarLayout(enabled);
-        foreach(var button in navigationButtons)button.Visibility=enabled?Visibility.Collapsed:Visibility.Visible;
-        if(desktopNavigation is not null){settingDesktopNavigation=true;desktopNavigation.SelectedIndex=enabled?7:section;desktopNavigation.Visibility=enabled?Visibility.Visible:Visibility.Collapsed;settingDesktopNavigation=false;}
         if(desktopGuidePanel is not null)desktopGuidePanel.Visibility=enabled?Visibility.Visible:Visibility.Collapsed;
-        if(desktopHiddenFooter is not null)desktopHiddenFooter.Visibility=enabled?Visibility.Collapsed:Visibility.Visible;
-        if(shellBody is not null)shellBody.Margin=enabled?new Thickness(18,20,20,18):new Thickness(34,26,30,18);
+        if(shellBody is not null && !IsCenteredConfigSection(section))shellBody.Margin=enabled?new Thickness(20,10,20,10):new Thickness(34,18,34,16);
         if(shellContentScroll is not null)shellContentScroll.VerticalScrollBarVisibility=enabled?ScrollBarVisibility.Disabled:ScrollBarVisibility.Auto;
     }
     private void FitDesktopViewport()
@@ -543,16 +614,17 @@ public sealed partial class SetupWindow
     }
 
     private string DesktopConnectedStatus() => !busy && state.Status.Contains("暂停")
-        ? "已连接原虚拟机桌面。任务已暂停，可在左侧继续。"
-        : "已连接原虚拟机桌面。";
-    private const string VmOffStatus = "虚拟机已关机。可从这里重新打开原任务。";
-    private string DesktopWaitingText()=>taskFaulted?latestTaskActivity:shuttingDownVm?"正在等待原虚拟机正常关机…":busy?
-        (consoleHost?.IsAttached == true ? "原虚拟机桌面已连接，正在检查原任务和安装网络。" : "正在准备原任务与安装网络，检查通过后将启动并接入桌面。"):
-        string.IsNullOrEmpty(state.VmId)?"请先创建或载入原任务。":state.Status == VmOffStatus ? VmOffStatus : state.Status.Contains("暂停")||desktopConnectionPolicy.Suspended?"原任务已暂停。点击“继续原任务并连接”后恢复。":"原虚拟机尚未运行。点击“继续原任务并连接”启动原任务。";
+        ? "已连接到虚拟机 · 任务已暂停"
+        : "已连接到虚拟机";
+    private const string VmOffStatus = "虚拟机已关机，可直接重新连接。";
+    private string DesktopWaitingText()=>taskFaulted?latestTaskActivity:shuttingDownVm?"正在等待虚拟机正常关机…":busy?
+        (consoleHost?.IsAttached == true ? "虚拟机已连接，正在配置运行环境…" : "正在准备虚拟机与安装网络…"):
+        string.IsNullOrEmpty(state.VmId)?"当前还没有运行中的虚拟机":state.Status == VmOffStatus ? VmOffStatus : state.Status.Contains("暂停")||desktopConnectionPolicy.Suspended?"任务已暂停 · 点击「继续任务并连接」恢复":"虚拟机待机中 · 点击「连接到虚拟机」启动";
     private void SetDesktopConnectionStatus(string message)
     {
         if(consoleStatus is not null)consoleStatus.Text=message;
-        if(consolePlaceholder is not null){consolePlaceholder.Text=message+"\n\nWindows 安装和软件操作将在这里显示";consolePlaceholder.Visibility=consoleHost?.IsAttached==true?Visibility.Collapsed:Visibility.Visible;}
+        if(consolePlaceholder is not null){consolePlaceholder.Text=message;if(consoleIdleOverlay is not null)consoleIdleOverlay.Visibility=consoleHost?.IsAttached==true?Visibility.Collapsed:Visibility.Visible;}
+        if(idleWizardButton is not null) idleWizardButton.Visibility = string.IsNullOrEmpty(state.VmId) && !busy ? Visibility.Visible : Visibility.Collapsed;
     }
     private void RecordTaskActivity(string message){latestTaskActivity=message;latestTaskDownload="";UpdateDesktopActivity();}
     private void RecordTaskDownload(string message){latestTaskDownload=message;UpdateDesktopActivity();}
@@ -626,15 +698,21 @@ public sealed partial class SetupWindow
         {
             desktopContinue.IsEnabled = !busy && !recoveringDisplay;
             desktopContinue.Content = busy ? "正在处理…" :
-                state.SetupFinished ? "打开原环境" :
+                state.SetupFinished ? "打开已建好的桌面" :
                 installationNetworkFailed ? "重连安装网络" :
-                ManualAdsPowerReady ? "查看 AdsPower 手动指引" :
+                ManualAdsPowerReady ? "查看 AdsPower 指引" :
                 state.PendingActions.Any(ResumePlan.IsGuestNetworkProbe) ? "重试来宾联网检查" :
-                state.Options.ManualAdsPower ? "继续原任务并连接" :
-                ResumePlan.CanResumeBrowser(state) ? "继续 AdsPower 配置与验收" : "继续原任务并连接";
+                state.Status.Contains("暂停") || state.Options.ManualAdsPower ? "继续任务并连接" :
+                ResumePlan.CanResumeBrowser(state) ? "继续配置与验收" : "连接到虚拟机";
         }
-        if(desktopActivity is not null){desktopActivity.Text=latestTaskActivity+(busy&&!string.IsNullOrEmpty(latestTaskDownload)?"\n"+latestTaskDownload:"");desktopActivity.Visibility=!busy&&desktopActivity.Text==consoleStatus?.Text?Visibility.Collapsed:Visibility.Visible;}
+        var showActivity = busy || taskFaulted;
+        if(desktopActivity is not null){desktopActivity.Text=latestTaskActivity+(busy&&!string.IsNullOrEmpty(latestTaskDownload)?"\n"+latestTaskDownload:"");desktopActivity.Visibility=showActivity&&!string.IsNullOrWhiteSpace(desktopActivity.Text)?Visibility.Visible:Visibility.Collapsed;}
         if(desktopActivityProgress is not null){desktopActivityProgress.Visibility=busy?Visibility.Visible:Visibility.Collapsed;desktopActivityProgress.IsIndeterminate=progress.IsIndeterminate;desktopActivityProgress.Value=progress.Value;}
+        if (desktopDetailDrawer is not null)
+        {
+            var hasContext = showActivity || offerMultiCoreRecovery || state.Options.ManualAdsPower || showFinish;
+            desktopDetailDrawer.Visibility = hasContext ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
     private bool ManualAdsPowerReady => state.Options.ManualAdsPower && state.NetworkPassed &&
         BoundaryRuntime.BackendFor(state) is not null;

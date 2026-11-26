@@ -140,16 +140,74 @@ public sealed partial class SetupWindow
         nativeClipboardButton.Content = allowed ? "关闭双向剪贴板" : "启用双向剪贴板";
         nativeClipboardStatus.Text = status ?? (platformId == "hyperv"
             ? (allowed
-                ? "已开启 Hyper-V 增强会话双向剪贴板（来宾内已禁用磁盘和设备映射）；若窗口提示连接，点连接后即可直接复制粘贴。"
+                ? (nativeClipboardReady
+                    ? "已核验：Hyper-V 增强会话双向剪贴板（HvSocket）与来宾隔离策略均已生效，可直接 Ctrl+C / Ctrl+V。"
+                    : "已设为默认启用 Hyper-V 增强会话双向剪贴板（待第 6 步来宾策略及 HvSocket 会话核验通过后生效；磁盘/USB 保持隔离）。")
                 : "Hyper-V 双向剪贴板已关闭（基本会话模式），可使用下方按钮手动传送纯文本。")
             : (allowed ? "来宾工具就绪后自动开启双向剪贴板。" : "双向剪贴板已关闭。"));
     }
 
+    internal static bool IsHyperVClipboardVerified(bool guestReadyCompleted, bool hostEnhanced, bool hvSocket, bool guestPolicyVerified, bool consoleAttached) =>
+        guestReadyCompleted && hostEnhanced && hvSocket && guestPolicyVerified && consoleAttached;
+
     private async Task RefreshDefaultNativeClipboard()
     {
+        if (nativeClipboardReady || checkingNativeClipboard || closingDesktop || DateTime.UtcNow < nextNativeClipboardCheck) return;
+        if (state.Options.PlatformId == "hyperv")
+        {
+            if (string.IsNullOrEmpty(state.VmId) || !WantsNativeClipboard(state)) return;
+            if (consoleHost is not { IsAttached: true } hvHost) return;
+            var hvOriginal = state;
+            var hvGuestWindow = hvHost.GuestWindow;
+            bool SameHvDesktop() => state.VmId == hvOriginal.VmId && consoleHost == hvHost && hvHost.IsAttached && hvHost.GuestWindow == hvGuestWindow;
+
+            if (!hvOriginal.Completed.Contains("guest-ready"))
+            {
+                nextNativeClipboardCheck = DateTime.UtcNow.AddSeconds(10);
+                UpdateNativeClipboardControl("待核验：正在系统安装阶段（第 6 步写入并回读来宾剪贴板与隔离策略后生效，当前可使用手动传送纯文本）。");
+                return;
+            }
+            checkingNativeClipboard = true;
+            nextNativeClipboardCheck = DateTime.UtcNow.AddSeconds(12);
+            try
+            {
+                await using var hv = new HyperV();
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(desktopConnectionCancellation?.Token ?? CancellationToken.None);
+                timeout.CancelAfter(TimeSpan.FromSeconds(25));
+                var guestVerified = await TrySyncHyperVGuestClipboardPolicy(hv, hvOriginal, true, timeout.Token);
+                if (!SameHvDesktop()) return;
+                if (!guestVerified)
+                {
+                    nativeClipboardReady = false;
+                    UpdateNativeClipboardControl("待核验：未能确认来宾剪贴板与设备重定向隔离策略（磁盘/USB 仍保持阻断），暂不标记可复制粘贴；可重试或使用手动纯文本传送。");
+                    return;
+                }
+                await hv.SetEnhancedSessionClipboard(hvOriginal, true, timeout.Token);
+                var hostReadback = await hv.ReadClipboardHostStatus(hvOriginal, timeout.Token);
+                if (!SameHvDesktop()) return;
+                nativeClipboardReady = IsHyperVClipboardVerified(
+                    hvOriginal.Completed.Contains("guest-ready"),
+                    hostReadback.HostEnhanced,
+                    hostReadback.HvSocket,
+                    guestVerified,
+                    hvHost.IsAttached);
+                UpdateNativeClipboardControl(nativeClipboardReady
+                    ? "已核验：Hyper-V 增强会话（HvSocket）与来宾 8 项隔离策略已生效，可直接 Ctrl+C / Ctrl+V 复制粘贴。"
+                    : "待核验：宿主机增强会话或 HvSocket 传输尚未就绪，暂保持基本会话或待重连复核（可使用手动纯文本传送）。");
+            }
+            catch (Exception error) when (error is SetupException or IOException or OperationCanceledException or UnauthorizedAccessException)
+            {
+                if (SameHvDesktop())
+                {
+                    nativeClipboardReady = false;
+                    UpdateNativeClipboardControl("待核验：暂未确认 Hyper-V 双向剪贴板状态，稍后自动复核（可使用手动纯文本传送）。");
+                }
+            }
+            finally { checkingNativeClipboard = false; }
+            return;
+        }
         if (state.Options.PlatformId != "virtualbox") return;
-        if (nativeClipboardReady || checkingNativeClipboard || closingDesktop || DateTime.UtcNow < nextNativeClipboardCheck ||
-            consoleHost is not { IsAttached: true, IsVisible: true } host || !VirtualBoxClipboard.WantsSharedClipboard(state)) return;
+        if (consoleHost is not { IsAttached: true, IsVisible: true } host || !VirtualBoxClipboard.WantsSharedClipboard(state)) return;
 
         var original = state;
         var guestWindow = host.GuestWindow;
@@ -213,15 +271,26 @@ public sealed partial class SetupWindow
                 await using var hv = new HyperV();
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
                 await hv.SetEnhancedSessionClipboard(original, enabled, timeout.Token);
+                var hostReadback = await hv.ReadClipboardHostStatus(original, timeout.Token);
                 var guestSynced = await TrySyncHyperVGuestClipboardPolicy(hv, original, enabled, timeout.Token);
                 if (state.VmId == original.VmId)
                 {
                     state.Options.SharedClipboardEnabled = enabled;
                     state.Options.HyperVBasicConsoleConfirmed = !enabled;
                     state.Save();
+                    nativeClipboardReady = enabled && IsHyperVClipboardVerified(
+                        state.Completed.Contains("guest-ready"),
+                        hostReadback.HostEnhanced,
+                        hostReadback.HvSocket,
+                        guestSynced,
+                        consoleHost?.IsAttached == true);
                     UpdateNativeClipboardControl(enabled
-                        ? (guestSynced ? "已开启 Hyper-V 双向剪贴板（来宾重定向策略已同步）。若之前以基本会话打开，请重连桌面一次。" : "已开启 Hyper-V 增强会话双向剪贴板（重连桌面即可直接复制粘贴；来宾策略将在下次部署时同步）。")
-                        : (guestSynced ? "已关闭 Hyper-V 双向剪贴板并立即停止来宾同步。" : "已关闭 Hyper-V 增强会话剪贴板（重连或重启桌面后切换为基本会话）。"));
+                        ? (nativeClipboardReady
+                            ? "已核验：已开启 Hyper-V 增强会话双向剪贴板并确认来宾隔离策略，重连桌面或直接 Ctrl+C / Ctrl+V。"
+                            : guestSynced && hostReadback.HostEnhanced && hostReadback.HvSocket
+                                ? "已配置并核对宿主与来宾策略，重连或进入桌面会话后即可复制粘贴。"
+                                : "已写入增强会话选项，但来宾策略或 HvSocket 会话尚未完全核验（待进入第 6 步或重连桌面复核）。")
+                        : (guestSynced ? "已关闭 Hyper-V 双向剪贴板并回读确认来宾同步已禁用。" : "已关闭 Hyper-V 增强会话剪贴板（重连或重启桌面后切换为基本会话）。"));
                 }
             }
             else
@@ -257,10 +326,14 @@ public sealed partial class SetupWindow
             var stopClip = enabled ? "" : "; Get-Process -Name rdpclip -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue";
             var cmd = "$p='HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services';" +
                 "if(-not(Test-Path -LiteralPath $p)){New-Item -Path $p -Force|Out-Null};" +
-                $"@{{fDisableClip={clipValue};fDisableCdm=1;fDisableLPT=1;fDisableCam=1;fDisablePNPRedir=1;fDisableAudio=1;fDisableAudioCapture=1;fDisableCcm=1}}.GetEnumerator()|ForEach-Object{{New-ItemProperty -Path $p -Name $_.Key -PropertyType DWord -Value ([int]$_.Value) -Force|Out-Null}}" +
-                stopClip;
-            await hv.GuestRun(target, credentials, "powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], token, 30);
-            return true;
+                $"$expected=@{{fDisableClip={clipValue};fDisableCdm=1;fDisableLPT=1;fDisableCam=1;fDisablePNPRedir=1;fDisableAudio=1;fDisableAudioCapture=1;fDisableCcm=1}};" +
+                "$expected.GetEnumerator()|ForEach-Object{New-ItemProperty -Path $p -Name $_.Key -PropertyType DWord -Value ([int]$_.Value) -Force|Out-Null};" +
+                stopClip +
+                "$props=Get-ItemProperty -LiteralPath $p;" +
+                "$ok=$true;foreach($k in $expected.Keys){if($null -eq $props.$k -or [int]$props.$k -ne [int]$expected[$k]){$ok=$false}};" +
+                "if($ok){'CLIP_POLICY_OK'}else{'CLIP_POLICY_MISMATCH'}";
+            var output = await hv.GuestRun(target, credentials, "powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], token, 30);
+            return output.Contains("CLIP_POLICY_OK", StringComparison.Ordinal);
         }
         catch (Exception error) when (error is SetupException or IOException or OperationCanceledException or UnauthorizedAccessException)
         {

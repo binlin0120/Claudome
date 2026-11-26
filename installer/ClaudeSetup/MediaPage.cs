@@ -22,7 +22,7 @@ public sealed partial class SetupWindow
             : homeChinaBlocked
                 ? "所选索引为家庭中文版（CoreCountrySpecific），请改选专业版 / 企业版"
                 : "我已核对 " + image.Name + " 用于虚拟机的许可与使用授权（勾选不会授予许可证或激活系统）";
-        license.IsEnabled = !busy && image is not null && !homeChinaBlocked;
+        license.IsEnabled = !busy && !mediaBusy && image is not null && !homeChinaBlocked;
         if (image is not null)
         {
             imageIndex.Text = image.Index.ToString();
@@ -46,31 +46,75 @@ public sealed partial class SetupWindow
     private delegate Task<WindowsMediaIdentity> MediaReader(string workspaceRoot, string isoPath,
         IProgress<string> messages, IProgress<DownloadProgress> downloads, CancellationToken token);
 
-    private async Task InspectMedia(MediaReader? readMedia = null)
-    {
-        if (busy) { Notice("请等待当前操作完成，或先暂停。"); return; }
+    internal delegate Task<WindowsMediaIdentity> HookedMediaReader(string workspaceRoot, string isoPath,
+        IProgress<string> messages, IProgress<DownloadProgress> downloads, CancellationToken token,
+        Action onElevationStart, Action onWaitingWhileElevated);
 
+    private Task InspectMedia(MediaReader? readMedia = null) =>
+        InspectMediaCore(readMedia is null
+            ? (rootDir, isoFile, msgs, dl, tok, onStart, onWait) =>
+                WindowsMedia.Inspect(rootDir, isoFile, msgs, dl, tok, onStart, onWait)
+            : (rootDir, isoFile, msgs, dl, tok, _, _) =>
+                readMedia(rootDir, isoFile, msgs, dl, tok));
+
+    internal async Task InspectMediaWithHooks(HookedMediaReader hookedReader) =>
+        await InspectMediaCore(hookedReader);
+
+    private async Task InspectMediaCore(HookedMediaReader reader)
+    {
+        if (busy || mediaBusy) { Notice("镜像正在后台下载或识别中，请先等待完成，或暂停后再读取版本；此时您可先去配置网络节点和账号。"); return; }
+
+        var expectedTask = state;
+        var expectedWorkspaceId = state.Options.WorkspaceId;
         var workspaceRoot = root.Text.Trim();
+        var expectedRoot = System.IO.Path.GetFullPath(workspaceRoot);
         var isoPath = iso.Text.Trim();
         var preferredIndex = int.TryParse(imageIndex.Text, out var index) ? index : 1;
-        readMedia ??= WindowsMedia.Inspect;
         using var operation = new CancellationTokenSource();
-        cancellation = operation;
-        busy = true;
+        mediaCancellation = operation;
+        mediaBusy = true;
+        mediaInElevatedInspect = false;
         try
         {
             ClearMedia();
-            AllowEditing(false);
-            banner.Text = "正在准备读取 Windows 镜像版本…";
-            var media = await readMedia(workspaceRoot, isoPath,
-                new Progress<string>(message => banner.Text = message),
-                new Progress<DownloadProgress>(p => progressText.Text = p.Display), operation.Token);
+            UpdateMediaLockState("正在后台读取 Windows 镜像版本… 可先去「网络节点 / 本机资料」继续配置");
+            banner.Text = "⬇ 后台正在读取 Windows 镜像版本… 您可先配置「网络节点」与「本机资料」";
+            var media = await reader(workspaceRoot, isoPath,
+                new Progress<string>(message =>
+                {
+                    if (mediaStatusText is not null) mediaStatusText.Text = message + "（支持先配置网络节点与账号）";
+                    banner.Text = "⬇ 后台读取镜像：" + message;
+                }),
+                new Progress<DownloadProgress>(p =>
+                {
+                    progressText.Text = p.Display;
+                    if (mediaProgressBar is not null)
+                    {
+                        mediaProgressBar.Visibility = Visibility.Visible;
+                        mediaProgressBar.IsIndeterminate = p.Total is not > 0;
+                        mediaProgressBar.Value = p.Total > 0 ? p.Received * 100d / p.Total.Value : 0;
+                    }
+                    if (mediaStatusText is not null) mediaStatusText.Text = p.Display;
+                }),
+                operation.Token,
+                () => _ = Dispatcher.BeginInvoke(() => { if (mediaBusy) mediaInElevatedInspect = true; }),
+                () => _ = Dispatcher.BeginInvoke(() =>
+                {
+                    if (!mediaBusy) return;
+                    mediaStatusText.Text = "正在等待管理员授权 / 镜像检查子进程（DISM）安全结束后暂停…";
+                    banner.Text = "正在等待镜像检查子进程安全结束后暂停，请完成或关闭管理员窗口…";
+                }));
+            if (operation.IsCancellationRequested || !IsSameMediaWorkspace(expectedTask, expectedWorkspaceId, expectedRoot))
+            {
+                banner.Text = "镜像检查结果未应用（操作已取消或当前任务目录已切换）。";
+                return;
+            }
             ApplyMedia(media, preferredIndex);
             banner.Text = "已读取镜像版本。请选择你的许可对应的版本，并重新确认授权。";
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
-            banner.Text = "已取消读取镜像版本。";
+            banner.Text = "已暂停或取消读取镜像版本。";
         }
         catch (Exception ex)
         {
@@ -80,9 +124,10 @@ public sealed partial class SetupWindow
         }
         finally
         {
-            busy = false;
-            cancellation = null;
-            AllowEditing(true);
+            mediaInElevatedInspect = false;
+            mediaBusy = false;
+            mediaCancellation = null;
+            UpdateMediaLockState();
             CompleteCloseAfterPause();
         }
     }

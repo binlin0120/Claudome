@@ -184,7 +184,18 @@ public sealed class ExternalGateway : IAsyncDisposable
             _=>"本机安装网络组件尚未就绪。"
         };
         if(code is not ("BOOTSTRAP_AUTH_REQUIRED" or "BOOTSTRAP_AUTH_FAILED" or "BOOTSTRAP_CONNECT_FAILED" or "BOOTSTRAP_DNS_TLS_FAILED" or "BOOTSTRAP_DNS_TRANSPORT_FAILED" or "BOOTSTRAP_DOH_HTTP_FAILED" or "BOOTSTRAP_DOH_RESPONSE_INVALID" or "BOOTSTRAP_DNS_EMPTY" or "BOOTSTRAP_TIMEOUT" or "BOOTSTRAP_DNS_FAILED" or "BOOTSTRAP_HTTP_REDIRECT" or "BOOTSTRAP_HTTP_TIMEOUT" or "BOOTSTRAP_DNS_REQUIRED" or "BOOTSTRAP_HTTP_FAILED" or "BOOTSTRAP_HTTP_MISMATCH" or "EGRESS_CLOSED"))code="BOOTSTRAP_UNAVAILABLE";
-        return message+"（"+code+"）\n原任务和磁盘保留。此结果不能单独认定节点不可用；请按当前阶段重试。";
+        var hostHint = code switch
+        {
+            "BOOTSTRAP_AUTH_REQUIRED" or "BOOTSTRAP_AUTH_FAILED" => "宿主排查：请回到「节点」页核对节点用户名、密码或认证方式是否填写正确；原任务进度与磁盘已保留。",
+            "BOOTSTRAP_CONNECT_FAILED" => "宿主排查：请检查宿主机代理服务是否已开启、节点服务器地址与端口是否正确且允许本机防火墙出站；原任务配置与磁盘已保留。",
+            "BOOTSTRAP_DNS_TLS_FAILED" => "宿主排查：请校准宿主机系统时间与时区，并排查节点/机场或本地安全软件是否开启了 HTTPS 证书中间人解密；原任务进度已保留。",
+            "BOOTSTRAP_DNS_TRANSPORT_FAILED" or "BOOTSTRAP_DOH_HTTP_FAILED" or "BOOTSTRAP_DOH_RESPONSE_INVALID" or "BOOTSTRAP_DNS_EMPTY" or "BOOTSTRAP_DNS_FAILED" =>
+                "宿主排查：请确认宿主机所选代理节点可正常解析 DoH（DNS over HTTPS），或切换一条稳定节点后重试原任务。",
+            "BOOTSTRAP_TIMEOUT" or "BOOTSTRAP_HTTP_TIMEOUT" or "BOOTSTRAP_HTTP_FAILED" =>
+                "宿主排查：请在宿主机用同一节点测试访问网页是否超时或丢包；当前原任务与磁盘均已保留，节点恢复后可直接重试。",
+            _ => "宿主排查：请检查宿主机当前代理节点连通性与防火墙放行设置；原任务与磁盘完整保留，排查后可继续。"
+        };
+        return message + "（" + code + "）\n" + hostHint;
     }
     public async Task FinishBootstrap(CancellationToken token)
     {

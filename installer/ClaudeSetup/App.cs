@@ -42,6 +42,10 @@ public static class Program
                         await Save(name);
                     }
                     await window.VerifyCustomerFeedbackUI(directory);
+                    window.PreviewTheme(false, 0.05); window.Navigate(0); await Save("overview-opacity-5");
+                    window.Go(2); await Save("install-windows-opacity-5");
+                    window.PreviewTheme(false, 0.90); window.Navigate(0); await Save("overview-opacity-90");
+                    window.PreviewTheme(true, 0.05); window.Navigate(0); await Save("appearance-dark-opacity-5");
                     window.PreviewTheme(true); window.Navigate(0); await Save("appearance-dark");
                     async Task Save(string name)
                     {
@@ -61,7 +65,7 @@ public static class Program
 
 public sealed partial class SetupWindow : Window
 {
-    private static readonly Brush Ink = Brush("#172B3A"), Muted = Brush("#617684"), Accent = Brush("#087E8B"), Pale = Brush("#EDF6F6");
+    private static readonly Brush Ink = Brush("#161310"), Muted = Brush("#5A5149"), Accent = Brush("#C9643B"), Pale = Brush("#FBF0E8");
     public Grid ContentRoot { get; } = new();
     private readonly string[] titles = ["检查这台电脑", "创建或载入虚拟机", "准备 Windows 镜像", "选择网络与节点", "保存本机资料", "部署与验收"];
     private readonly string[] subtitles = ["先了解可用资源，保留你已有的软件和资料。", "先扫描已有环境，或新建独立虚拟机并选择保存位置。", "使用官方镜像，已有 ISO 可以直接选择。", "已有订阅和节点可以继续用，不需要重新购买。", "资料留在这台电脑，按需传给虚拟机。", "每一步显示实际结果，中断后可以接着完成。"];
@@ -94,13 +98,16 @@ public sealed partial class SetupWindow : Window
     private bool checkingUpdates;
     private readonly ProgressBar progress = new() { Minimum = 0, Maximum = 100, Height = 8, Margin = new Thickness(0, 12, 0, 10), Foreground = Accent };
     private readonly TextBlock progressText = new() { Foreground = Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap };
+    private readonly ProgressBar mediaProgressBar = new() { Minimum = 0, Maximum = 100, Height = 6, Margin = new Thickness(0, 6, 0, 4), Foreground = Accent, Visibility = Visibility.Collapsed };
+    private readonly TextBlock mediaStatusText = new() { FontSize = 11.5, Foreground = Muted, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 6), Visibility = Visibility.Collapsed };
+    private Button? pickRootBtn, applySuggestedRootBtn, selectIsoBtn, scanIsoBtn, adoptIsoBtn, downloadIsoBtn, pauseIsoBtn, inspectMediaBtn;
     private readonly Button previous, next;
     private int page;
-    private bool busy, refreshingPlatforms, secretsLoaded = true, updatingCpuRecommendation;
+    private bool busy, mediaBusy, mediaInElevatedInspect, autoJumpedToDesktopThisRun, refreshingPlatforms, secretsLoaded = true, updatingCpuRecommendation;
     private string guestMicrosoftAddress = "";
     private string guestMicrosoftPassword = "";
     private int platformInvalidations;
-    private CancellationTokenSource? cancellation;
+    private CancellationTokenSource? cancellation, mediaCancellation;
     private TaskCompletionSource? installationFinished;
     private SessionState state = new();
     private List<ProxyNode> nodes = [];
@@ -165,7 +172,7 @@ public sealed partial class SetupWindow : Window
     private static Border Card(params UIElement[] content)
     {
         var panel = new StackPanel(); foreach (var item in content) panel.Children.Add(item);
-        return new Border { Background = Surface, BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12), Padding = new Thickness(22), Margin = new Thickness(0, 0, 5, 16), Child = panel };
+        return new Border { Background = Surface, BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(15), Padding = new Thickness(20, 18, 20, 18), Margin = new Thickness(0, 0, 5, 16), Child = panel };
     }
     private static StackPanel Field(string label, UIElement control, string? hint = null)
     {
@@ -186,7 +193,7 @@ public sealed partial class SetupWindow : Window
         platform.SelectionChanged += (_, _) => { if(hyperVConsoleCard is not null) hyperVConsoleCard.Visibility = platform.SelectedValue?.ToString() == "hyperv" ? Visibility.Visible : Visibility.Collapsed; ApplyRecommendedCpuIfNotCustom(); UpdateCreationCpuNemWarning(); if (platform.SelectedItem is PlatformChoice choice) { platformReason.Text = choice.Reason + "\n" + string.Join("\n", choice.Instructions); RefreshConsent(); } };
         RefreshPlatforms();
         pages[0].Children.Add(Card(Field("选择虚拟机方案（按这台电脑的推荐度排序）", platform), platformReason, Text("推荐度综合系统版本、架构、硬件虚拟化与已有软件；自动部署能力单独标明。Mac 在项目中另有 Fusion / Parallels / UTM 流程，此 Windows 程序不在 Mac 上运行。", 11)));
-        pages[0].Children.Add(Card(Text("这次会做什么", 16, false), Text("创建独立的 Windows 虚拟机，准备网络代理与 AdsPower 环境。你可以继续使用已有订阅，自行选择节点。"), Text("客户无需安装 Codex。安装到哪些目录、哪些步骤需要管理员确认，都会在开始前说明。已有虚拟机不会被覆盖。"), Text("当前为开发试用版：Windows 10 与内嵌控制台尚需干净机器端到端验收，程序会如实显示待处理项。", 12), Row(Action("查看组件来源与许可", (_, _) => ShowLicenses()))));
+        pages[0].Children.Add(Card(Text("这次会做什么", 16, false), Text("创建独立的 Windows 虚拟机，准备网络代理与 AdsPower 环境。你可以继续使用已有订阅，自行选择节点。"), Text("所有目录选择、组件许可与管理员权限均在执行前清晰提示，现有虚拟机和本机资料不会被覆盖。"), Row(Action("查看组件来源与许可", (_, _) => ShowLicenses()))));
         pages[1].Children.Add(Card(Text("已有虚拟机？", 16, false), Text("先查看当前电脑已注册的环境，再决定新建还是载入原任务。", 12), Row(Action("扫描本机已有虚拟机", async (_, _) => await ScanMachines()), Action("载入已有安装任务", (_, _) => LoadTask())), inventoryPanel));
         cpuNemWarning.Foreground = Accent;
         useCustomVmConfig.Visibility = ProductProfile.IsHyperVStandalone ? Visibility.Collapsed : Visibility.Visible;
@@ -195,15 +202,17 @@ public sealed partial class SetupWindow : Window
             : "开启虚拟化安全（Hyper-V 兼容模式）的电脑上 VirtualBox 默认推荐 1 核以彻底避免多核跨核中断死锁；若你自行修改核数或勾选下方自定义开关，程序将按你选择的配置运行，不自动启用防卡死降核。";
         fixedNtfsDrives.DisplayMemberPath = "DisplayLabel";
         fixedNtfsDrives.SelectedValuePath = "SuggestedWorkspacePath";
-        var driveQuickRow = Row(Action("使用所选 NTFS 盘建议目录", (_, _) =>
+        applySuggestedRootBtn = Action("使用所选 NTFS 盘建议目录", (_, _) =>
         {
+            if (busy || mediaBusy) { banner.Text = "Windows 镜像正在后台下载或读取中，此时不可修改任务目录。"; return; }
             if (!string.IsNullOrEmpty(state.VmId)) { Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。"); return; }
             if (fixedNtfsDrives.SelectedValue is string suggested && !string.IsNullOrWhiteSpace(suggested)) root.Text = suggested;
-        }));
+        });
+        var driveQuickRow = Row(applySuggestedRootBtn);
         pages[1].Children.Add(Card(
             Field("数据与虚拟磁盘目录", root, "建议至少预留 95 GB；可选择本机任意固定 NTFS 盘（无需强制 C/D 盘）。"),
             Field("快速选择本机可用 NTFS 分区", fixedNtfsDrives),
-            Row(Action("选择文件夹", (_, _) => { if(!string.IsNullOrEmpty(state.VmId)){Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。");return;}var d = new OpenFolderDialog(); if (d.ShowDialog() == true) root.Text = d.FolderName; }), driveQuickRow),
+            Row(pickRootBtn = Action("选择文件夹", (_, _) => { if (busy || mediaBusy) { banner.Text = "Windows 镜像正在后台下载或读取中，此时不可修改任务目录。"; return; } if(!string.IsNullOrEmpty(state.VmId)){Notice("原任务目录已固定。新建请使用独立任务；不会移动或覆盖现有虚拟机。");return;}var d = new OpenFolderDialog(); if (d.ShowDialog() == true) root.Text = d.FolderName; }), driveQuickRow),
             Field("虚拟机名称", vmName, "使用英文字母、数字、短横线或下划线。"),
             Field("来宾内存（MB）", memory),
             Field("虚拟 CPU 数量", cpu, cpuFieldHint),
@@ -215,23 +224,29 @@ public sealed partial class SetupWindow : Window
             Text("方式一：选择本机已有或扫描到的 Windows 11 ISO", 17, false),
             Text("如本机已有官方 Windows 11 x64 ISO，可直接浏览选择，或点击扫描本机常见下载目录/NTFS 分区。", 12),
             Field("Windows 11 x64 镜像路径", iso),
-            Row(Action("选择已下载的 ISO", (_, _) => { var d = new OpenFileDialog { Filter = "Windows ISO|*.iso" }; if (d.ShowDialog() == true) { iso.Text = d.FileName; isoHash.Clear(); } }),
-                Action("扫描本机已有 ISO", (_, _) => ScanCandidateIsos())),
+            Row(selectIsoBtn = Action("选择已下载的 ISO", (_, _) => { var d = new OpenFileDialog { Filter = "Windows ISO|*.iso" }; if (d.ShowDialog() == true) { iso.Text = d.FileName; isoHash.Clear(); } }),
+                scanIsoBtn = Action("扫描本机已有 ISO", (_, _) => ScanCandidateIsos())),
             Field("扫描到的本机候选 ISO", candidateIsos),
-            Row(Action("采用所选候选 ISO", (_, _) => { if (candidateIsos.SelectedValue is string foundIso && !string.IsNullOrWhiteSpace(foundIso)) { iso.Text = foundIso; isoHash.Clear(); banner.Text = "已选中候选 ISO，请点击下方「读取镜像版本」。"; } }))));
+            Row(adoptIsoBtn = Action("采用所选候选 ISO", (_, _) => { if (candidateIsos.SelectedValue is string foundIso && !string.IsNullOrWhiteSpace(foundIso)) { iso.Text = foundIso; isoHash.Clear(); banner.Text = "已选中候选 ISO，请点击下方「读取镜像版本」。"; } }))));
+        pauseIsoBtn = Action("暂停下载/读取", (_, _) => PauseMediaWork());
+        pauseIsoBtn.IsEnabled = false;
+        downloadIsoBtn = Action("从官网链接下载 ISO", async (_, _) => await DownloadIsoFromUrlAsync(), true);
         pages[2].Children.Add(Card(
             Text("方式二：粘贴微软官网下载链接，由程序自主下载", 17, false),
-            Text("前往微软官网选择「Windows 11（多版本 ISO）」→ 选择简体中文或英文 → 右键「立即下载（64位）」复制链接粘贴到下方，即可由程序高速下载并记录指纹（也可再按传统方式下载微软媒体创建工具）。", 12),
+            Text("前往微软官网选择「Windows 11（多版本 ISO）」→ 选择简体中文或英文 → 右键「立即下载（64位）」复制链接粘贴到下方，即可由程序后台高速下载并记录指纹（下载或读取镜像期间，可先点击「下一步」配置网络节点与账号资料）。", 12),
             Field("微软官网 ISO 下载直链（HTTPS）", isoUrl, "仅接受微软官方下载域（*.microsoft.com / windowsupdate.com），支持断点续传。"),
             Field("微软官网公布的 SHA-256（可选，建议填写以严格校验）", isoHash, "填写后下载完成立即核验；留空则在下载完成后由程序自动计算并记录指纹。"),
             Row(Action("打开微软 Windows 11 官网下载页", (_, _) => OpenUrl("https://www.microsoft.com/software-download/windows11")),
-                Action("从官网链接下载 ISO", async (_, _) => await DownloadIsoFromUrlAsync(), true),
-                Action("暂停下载", (_, _) => cancellation?.Cancel())),
+                downloadIsoBtn,
+                pauseIsoBtn),
+            mediaProgressBar,
+            mediaStatusText,
             Row(Action("改用微软媒体创建工具下载", async (_, _) => await Perform(async (o, token) => { await Engine().PrepareWindowsMedia(o, token); Notice("微软工具已打开。确认许可 → 选择 ISO 文件（不要选 U 盘）→ 保存镜像。下载完成后回到上方选择该 ISO。"); })))));
         windowsImages.DisplayMemberPath="Label";windowsImages.SelectedValuePath="Index";
         windowsImages.SelectionChanged+=(_,_)=>{license.IsChecked=false;RefreshConsent();};
         iso.TextChanged+=(_,_)=>ClearMedia();
-        pages[2].Children.Add(Card(Text("确认本次安装的系统",16,false),Text("读取将临时只读挂载 ISO，并用微软 DISM 查询系统信息，需要管理员确认；不会创建虚拟机、安装系统或修改镜像。",11),Row(Action("读取镜像版本",async(_,_)=>await InspectMedia(),true),Action("查看微软软件许可条款",(_,_)=>OpenUrl("https://www.microsoft.com/useterms"))),Field("选择实际安装版本",windowsImages),mediaDetails,license));
+        inspectMediaBtn = Action("读取镜像版本", async (_, _) => await InspectMedia(), true);
+        pages[2].Children.Add(Card(Text("确认本次安装的系统",16,false),Text("读取将临时只读挂载 ISO，并用微软 DISM 查询系统信息，需要管理员确认；不会创建虚拟机、安装系统或修改镜像。",11),Row(inspectMediaBtn,Action("查看微软软件许可条款",(_,_)=>OpenUrl("https://www.microsoft.com/useterms"))),Field("选择实际安装版本",windowsImages),mediaDetails,license));
         ClearMedia();
         networkText.Height = 105;
         source.SelectionChanged += (_, _) =>
@@ -240,6 +255,7 @@ public sealed partial class SetupWindow : Window
             node.ItemsSource = null;
             importedInput = "";
             currentFinalSubscription = false;
+            UpdateRouteActionsVisibility();
         };
         pages[3].Children.Add(BuildRouteActions());
         var subscriptionField = Field("已有订阅链接", subscription, "仅在本机读取，不发送到聊天或我们的服务器。");
@@ -296,7 +312,7 @@ public sealed partial class SetupWindow : Window
         pages[5].Children.Add(Card(Text("准备好后开始", 16, false), Text("安装流程：核验资源 → 安装虚拟机组件 → 安装 Windows → 配置所选网络 → 安装 AdsPower → 回读结果。遇到需要本人操作的步骤会暂停提示。"), consent, Row(Action("仅下载并核验资源", async (_, _) => await Perform(async (o, token) => await Engine().DownloadResources(o, token))), Action("开始 / 继续部署", async (_, _) => await StartInstall(), true), Action("暂停", (_, _) => { cancellation?.Cancel(); banner.Text = "已请求暂停；进行中的系统安装或来宾配置步骤会先结束。"; })), progress, progressText, log));
         pages[5].Children.Add(BuildValidationCard());
         pages[5].Children.Add(pendingPanel);
-        hyperVConsoleCard = Card(Text("Hyper-V 主机会话设置", 15, false), Text("Hyper-V 默认允许仅限剪贴板的增强会话（来宾内已通过策略禁用磁盘、USB、音频与设备重定向）。如曾手动关闭双向剪贴板并切换为基本会话，可在所有受保护环境正常关机后恢复主机增强会话原值；其他 Hyper-V 虚拟机也会受影响。", 11), Row(Action("恢复主机增强会话设置", async (_, _) => {
+        hyperVConsoleCard = Card(Text("Hyper-V 共享剪贴板与安全边界", 15, false), Text("默认自动开启 Hyper-V 仅剪贴板增强会话（支持宿主机与桌面无缝 Ctrl+C / Ctrl+V 复制粘贴），同时来宾策略保持禁用磁盘、USB、音频与设备重定向。如曾手动关闭并切换为基本会话，可在所有受保护环境正常关机后恢复主机增强会话原值。", 11), Row(Action("恢复主机增强会话设置", async (_, _) => {
             if (busy || state.Options.PlatformId != "hyperv") { Notice("请先载入原来的 Hyper-V 任务。"); return; }
             if (MessageBox.Show(this, "恢复主机增强会话设置会结束本任务的基本会话保护。请先正常关闭虚拟机。是否继续？", "恢复主机设置", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
             await Perform(async (_, token) => await Engine().RestoreHyperVConsole(state, token));
@@ -314,8 +330,10 @@ public sealed partial class SetupWindow : Window
     }
     public void Go(int index)
     {
-        SetDesktopSidebar(false);
+        CloseInlineModal();
         page = index; MarkSection(1);
+        ApplySectionSurfaceMode(1);
+        SetDesktopSidebar(false);
         title.Text = "准备你的专属环境"; subtitle.Text = titles[index] + " · " + subtitles[index];
         main.Children.Clear(); main.Children.Add(pages[index]); shellContentScroll?.ScrollToTop();
         steps.Visibility = Visibility.Visible; steps.Children.Clear(); footer.Visibility = Visibility.Visible;
@@ -328,7 +346,7 @@ public sealed partial class SetupWindow : Window
             steps.Children.Add(button);
         }
         previous.Visibility = index == 0 ? Visibility.Collapsed : Visibility.Visible; next.Visibility = index == 5 ? Visibility.Collapsed : Visibility.Visible;
-        banner.Text = "准备到哪一步，下次就从哪里继续。";
+        banner.Text = mediaBusy ? "⬇ 后台正在准备 Windows 镜像 · 可先点「下一步」配置网络节点与账号" : "准备到哪一步，下次就从哪里继续。";
     }
     private void RefreshHost()
     {
@@ -393,15 +411,137 @@ public sealed partial class SetupWindow : Window
         });
     }
 
+    private bool IsSameMediaWorkspace(SessionState expectedTask, string expectedWorkspaceId, string expectedRoot)
+    {
+        if (!ReferenceEquals(state, expectedTask) || state.Options.WorkspaceId != expectedWorkspaceId)
+            return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(root.Text.Trim()), expectedRoot, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void PauseMediaWork()
+    {
+        mediaCancellation?.Cancel();
+        if (mediaInElevatedInspect)
+        {
+            mediaStatusText.Text = "正在等待管理员授权 / 镜像检查子进程（DISM）安全结束后暂停…";
+            banner.Text = "正在等待镜像检查子进程安全结束后暂停，请完成或关闭管理员窗口…";
+            return;
+        }
+        banner.Text = "正在暂停后台镜像任务，已下载部分已保留（支持断点续传）。";
+    }
+
+    private void UpdateMediaLockState(string? statusMessage = null)
+    {
+        var mediaEditable = !busy && !mediaBusy;
+        foreach (var el in new UIElement?[] { root, fixedNtfsDrives, pickRootBtn, applySuggestedRootBtn, iso, isoUrl, isoHash, candidateIsos, selectIsoBtn, scanIsoBtn, adoptIsoBtn, downloadIsoBtn, inspectMediaBtn, windowsImages })
+            if (el is not null) el.IsEnabled = mediaEditable;
+        if (pauseIsoBtn is not null) pauseIsoBtn.IsEnabled = mediaBusy;
+        license.IsEnabled = mediaEditable && windowsImages.SelectedItem is WindowsImageChoice image && !image.IsHomeChinaBlocked;
+        if (statusMessage is not null)
+        {
+            mediaStatusText.Text = statusMessage;
+            mediaStatusText.Visibility = Visibility.Visible;
+        }
+        else if (!mediaBusy && string.IsNullOrWhiteSpace(mediaStatusText.Text))
+        {
+            mediaStatusText.Visibility = Visibility.Collapsed;
+            mediaProgressBar.Visibility = Visibility.Collapsed;
+        }
+    }
+
     private async Task DownloadIsoFromUrlAsync()
     {
-        await Perform(async (o, token) =>
+        if (Machine.HyperVStandaloneIneligibilityReason() is { } ineligibility)
         {
-            var (path, computedSha) = await Engine().DownloadIso(o, token);
+            Notice(ineligibility);
+            return;
+        }
+        if (busy || mediaBusy)
+        {
+            Notice("Windows 镜像或部署任务正在进行中；此时可先切换到「网络节点」和「本机资料」配置节点与账号。");
+            return;
+        }
+        SetupOptions o;
+        try
+        {
+            o = Options();
+        }
+        catch (Exception ex)
+        {
+            Notice(Redaction.SafeError(ex));
+            return;
+        }
+        var expectedTask = state;
+        var expectedWorkspaceId = o.WorkspaceId;
+        var expectedRoot = Path.GetFullPath(o.Root);
+        using var operation = new CancellationTokenSource();
+        mediaCancellation = operation;
+        mediaBusy = true;
+        mediaInElevatedInspect = false;
+        UpdateMediaLockState("正在连接微软官方下载节点… 可先点击「下一步」配置网络节点与账号资料");
+        mediaProgressBar.Visibility = Visibility.Visible;
+        mediaProgressBar.IsIndeterminate = true;
+        banner.Text = "⬇ 后台正在下载 Windows ISO · 您现在可先配置「网络节点」与「本机资料」";
+        try
+        {
+            var mediaEngine = new Deployment(
+                new Progress<string>(message =>
+                {
+                    log.AppendText(message + Environment.NewLine);
+                    log.ScrollToEnd();
+                    mediaStatusText.Text = message + "（可先切换至网络节点 / 账号资料继续配置）";
+                    banner.Text = "⬇ 后台下载镜像：" + message;
+                }),
+                new Progress<DownloadProgress>(p =>
+                {
+                    progressText.Text = p.Display;
+                    mediaProgressBar.IsIndeterminate = p.Total is not > 0;
+                    mediaProgressBar.Value = p.Total > 0 ? p.Received * 100d / p.Total.Value : 0;
+                    mediaStatusText.Text = p.Display + " · 可先配置「网络节点」与「本机资料」";
+                    banner.Text = $"⬇ 后台下载镜像：{p.Display} · 可先配置网络与账号";
+                }));
+            var (path, computedSha) = await mediaEngine.DownloadIso(o, operation.Token);
+            if (operation.IsCancellationRequested || !IsSameMediaWorkspace(expectedTask, expectedWorkspaceId, expectedRoot))
+            {
+                banner.Text = "Windows ISO 下载已完成，但当前任务或目录已变更，未覆盖当前设置。";
+                return;
+            }
             iso.Text = path;
             isoHash.Text = computedSha;
-            Notice($"Windows ISO 已下载完成并记录 SHA-256 指纹：\n{path}\n\n请接着点击下方「读取镜像版本」选择要安装的版本（如 Windows 11 专业版）。");
-        });
+            mediaProgressBar.IsIndeterminate = false;
+            mediaProgressBar.Value = 100;
+            mediaStatusText.Text = "下载完成，已记录 SHA-256 指纹。请点击下方「读取镜像版本」。";
+            banner.Text = "Windows ISO 下载完成！请点击「读取镜像版本」选择版本。";
+            Notice($"Windows ISO 已下载完成并记录 SHA-256 指纹：\n{path}\n\n请接着点击「Windows 镜像 → 读取镜像版本」选择要安装的版本（如 Windows 11 专业版）。");
+        }
+        catch (OperationCanceledException) when (operation.IsCancellationRequested)
+        {
+            mediaProgressBar.IsIndeterminate = false;
+            mediaStatusText.Text = "下载已暂停，已接收分片已安全保留（.part），可随时继续。";
+            banner.Text = "Windows ISO 下载已暂停，可随时继续断点续传。";
+        }
+        catch (Exception ex)
+        {
+            mediaProgressBar.IsIndeterminate = false;
+            var message = Redaction.SafeError(ex);
+            mediaStatusText.Text = message;
+            banner.Text = message;
+            if (!closeAfterPause) Notice(message);
+        }
+        finally
+        {
+            mediaBusy = false;
+            mediaCancellation = null;
+            UpdateMediaLockState();
+            CompleteCloseAfterPause();
+        }
     }
     private void ApplyRecommendedCpuIfNotCustom()
     {
@@ -457,7 +597,12 @@ public sealed partial class SetupWindow : Window
     private void ShowInstallationProgress(InstallationProgress value)
     {
         progressText.Text=value.Display;banner.Text=value.Display;RecordTaskActivity(value.Display);
-        if(framebufferConflictVm != state.VmId && !desktopConnectionPolicy.Suspended && !closeAfterPause && busy && value.Display.StartsWith("4 / 7") && value.Display.Contains("等待") && !string.IsNullOrEmpty(state.VmId) && !state.Completed.Contains("guest-ready")) {autoConnectDesktop=true;if(section!=7)Navigate(7);}
+        if(framebufferConflictVm != state.VmId && !desktopConnectionPolicy.Suspended && !closeAfterPause && busy && !autoJumpedToDesktopThisRun && value.Display.StartsWith("4 / 7") && !string.IsNullOrEmpty(state.VmId) && !state.Completed.Contains("guest-ready"))
+        {
+            autoJumpedToDesktopThisRun = true;
+            autoConnectDesktop = true;
+            if (section != 7) Navigate(7);
+        }
         progress.IsIndeterminate=value.Percent is null;
         if(value.Percent is double percent)progress.Value=percent;
     }
@@ -465,9 +610,9 @@ public sealed partial class SetupWindow : Window
     {
         for(var i=0;i<navigationButtons.Count;i++)navigationButtons[i].IsEnabled=allowed || i==7;
         foreach(var panel in pages.Take(5)) panel.IsEnabled=allowed;
-        consent.IsEnabled=allowed; license.IsEnabled=allowed && windowsImages.SelectedItem is WindowsImageChoice; previous.IsEnabled=next.IsEnabled=allowed;
-        if(desktopNavigation is not null)desktopNavigation.IsEnabled=allowed;
+        consent.IsEnabled=allowed; license.IsEnabled=allowed && !mediaBusy && windowsImages.SelectedItem is WindowsImageChoice; previous.IsEnabled=next.IsEnabled=allowed;
         RefreshCreationFields();UpdateDesktopActivity();
+        if(allowed) UpdateMediaLockState();
     }
     private async Task Perform(Func<SetupOptions, CancellationToken, Task> operation, bool useSavedOptions = false)
     {
@@ -476,7 +621,13 @@ public sealed partial class SetupWindow : Window
             Notice(ineligibility);
             return;
         }
+        if (mediaBusy)
+        {
+            Notice("Windows 镜像正在后台下载或读取版本中。您可以先前往「网络节点」与「本机资料」完成配置，或暂停下载后再开始部署。");
+            return;
+        }
         if (busy) { Notice("请等待当前操作完成，或先暂停。"); return; }
+        autoJumpedToDesktopThisRun = false;
         try { taskFaulted=false;installationNetworkFailed=false;latestTaskDownload="";RecordTaskActivity("正在核对原任务与所选节点…"); var o = useSavedOptions ? state.Options : Options(); busy = true; AllowEditing(false);SetDesktopConnectionStatus(DesktopWaitingText()); cancellation = new(); await operation(o, cancellation.Token); }
         catch(OperationCanceledException){state.Status="已暂停，可继续原任务";RecordTaskActivity("任务已暂停，原任务与磁盘保留。");SetDesktopConnectionStatus("任务已暂停，点击继续原任务后恢复。");SaveCurrentTask();}
         catch (Exception ex)
@@ -581,23 +732,26 @@ public sealed partial class SetupWindow : Window
         if (adsPending is not null)
             Notice(adsPending.Title + "\n\n" + string.Join("\n", adsPending.Steps));
         else
-            Notice(state.Stage + "\n\n进入虚拟机桌面，按左侧待办完成浏览器验收。");
+            Notice(state.Stage + "\n\n已进入专属桌面，按上方状态或「安全验真」完成浏览器验收。");
     }
-    private async Task ParseNodes()
+    private async Task ParseNodes(bool interactive = true)
     {
         if (busy) return;
         try
         {
             busy = true; cancellation = new(); AllowEditing(false); var selected = source.SelectedItem?.ToString();
-            if (selected == "稍后配置") { nodes = []; node.ItemsSource = nodes; Notice("已选择稍后配置网络。安装结果会保留网络待配置状态。"); return; }
+            if (selected == "稍后配置") { nodes = []; node.ItemsSource = nodes; UpdateRouteActionsVisibility(); if (interactive) Notice("已选择稍后配置网络。安装结果会保留网络待配置状态。"); return; }
             if (selected == "手动 HTTP / SOCKS5 节点") { ManualNode(); return; }
             var text = selected == "已有订阅链接" ? await NetworkImport.Fetch(subscription.Text.Trim(), cancellation.Token) : networkText.Text;
             var parsed = NetworkImport.Parse(text);
             ReplaceFinalDraft(parsed);
-            Notice($"载入 {nodes.Count} 个支持的节点。请由你选择一个；可导入不代表已测通。" + (parsed.Unsupported > 0 ? $"另有 {parsed.Unsupported} 个未支持的节点未导入。" : ""));
+            UpdateRouteActionsVisibility();
+            var parsedSummary = $"载入 {nodes.Count} 个支持的节点。请由你选择一个；可导入不代表已测通。" + (parsed.Unsupported > 0 ? $"另有 {parsed.Unsupported} 个未支持的节点未导入。" : "");
+            banner.Text = parsedSummary;
+            if (interactive) Notice(parsedSummary);
         }
         catch (OperationCanceledException) when (cancellation?.IsCancellationRequested == true) { }
-        catch (Exception ex) { if (!closeAfterPause) Notice(Redaction.SafeError(ex)); }
+        catch (Exception ex) { if (interactive && !closeAfterPause) Notice(Redaction.SafeError(ex)); }
         finally { busy = false; cancellation?.Dispose(); cancellation = null; AllowEditing(true); CompleteCloseAfterPause(); }
     }
     private async Task ProbeSelectedNode()
@@ -665,13 +819,13 @@ public sealed partial class SetupWindow : Window
             if (!int.TryParse(port.Text, out var number)) throw new SetupException("请填写正确的端口。");
             var scheme = protocol.SelectedItem?.ToString() ?? "socks5";
             var proxy = NetworkImport.Validate(new() { ["name"] = "手动节点", ["type"] = scheme == "https" ? "http" : scheme, ["server"] = server.Text.Trim(), ["port"] = number, ["username"] = proxyUser.Text, ["password"] = proxyPassword.Password, ["tls"] = scheme == "https" });
-            source.SelectedIndex = 2; nodes = [proxy]; node.ItemsSource = nodes; node.SelectedIndex = 0; importedInput = ManualFingerprint(); Notice("已采用手动节点。请核对出口地区与时区。");
+            source.SelectedIndex = 2; nodes = [proxy]; node.ItemsSource = nodes; node.SelectedIndex = 0; importedInput = ManualFingerprint(); UpdateRouteActionsVisibility(); Notice("已采用手动节点。请核对出口地区与时区。");
         }
         catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
     }
     private async Task StartIndependentTask()
     {
-        if (busy || installationFinished is not null || recoveringDisplay || string.IsNullOrEmpty(state.VmId)) return;
+        if (busy || mediaBusy || installationFinished is not null || recoveringDisplay || string.IsNullOrEmpty(state.VmId)) return;
         var previous = state;
         if (MessageBox.Show(this,
             "将保存当前任务并暂停其受控连接，然后打开独立的新建向导。旧虚拟机、磁盘和任务记录会保留。若原 ISO 仍在，将预填路径供重新核验。继续吗？",
@@ -723,6 +877,7 @@ public sealed partial class SetupWindow : Window
 
     private void LoadTask(string? selectedPath = null, bool loadSecrets = true, bool interactive = true)
     {
+        if (mediaBusy) { if (interactive) Notice("Windows 镜像正在后台下载或读取中，请先暂停或等待完成后再切换任务。"); return; }
         try
         {
             if (selectedPath is null) { var dialog = new OpenFileDialog { Filter = "安装状态|setup-state.json" }; if (dialog.ShowDialog() != true) return; selectedPath = dialog.FileName; }
@@ -762,6 +917,7 @@ public sealed partial class SetupWindow : Window
         routeMeasurements.Clear();
         pendingBackupRoutes = null;
         UpdateRouteSummary();
+        UpdateRouteActionsVisibility();
         taskFaulted=false;installationNetworkFailed=false;latestTaskActivity="";latestTaskDownload="";
         if(state.PendingActions.RemoveAll(a=>a.Id=="isolation-boundary")>0){state.Status="旧任务已载入，请重新检查当前方案";state.Stage="按当前流程重新确认镜像与隔离配置";}
         var o = state.Options;
@@ -774,7 +930,7 @@ public sealed partial class SetupWindow : Window
         finally { updatingCpuRecommendation = false; }
         chain.IsChecked=o.ChainEnabled&&!o.ChainFromImport;upstreamSource.SelectedItem=o.UpstreamSource;
         if(WindowsMedia.Saved(o) is { } media) ApplyMedia(media,o.WindowsImageIndex);
-        desktopTimer.Stop();autoConnectDesktop=false;desktopConnectionPolicy.ResumeExplicitly();lastConsoleWindow=null;pendingConsole=null;if(desktopGuidePanel is not null)navigation.Children.Remove(desktopGuidePanel);if(desktopNavigation is not null)navigation.Children.Remove(desktopNavigation);desktopView=null;consoleHost=null;desktopGuidePanel=null;desktopNavigation=null;guideStepChoice=null;guideStepText=null;guidePhase="";
+        desktopTimer.Stop();autoConnectDesktop=false;desktopConnectionPolicy.ResumeExplicitly();lastConsoleWindow=null;pendingConsole=null;desktopView=null;consoleHost=null;desktopTopBar=null;desktopDetailDrawer=null;desktopGuidePanel=null;consoleIdleOverlay=null;idleWizardButton=null;desktopClipboardPopup=null;desktopMaintenancePopup=null;desktopMaintenanceExpander=null;desktopStepGuideExpander=null;guideStepChoice=null;guideStepText=null;guidePhase="";
         RefreshCreationFields();taskFaulted=false;latestTaskActivity="";latestTaskDownload="";
         consent.IsChecked = false; license.IsChecked = false;
         secretsLoaded = !o.Remember || loadSecrets;
@@ -874,13 +1030,21 @@ public sealed partial class SetupWindow : Window
             applyUpdateButton = Action("一键更新并重启", async (_, _) => await ApplyPendingOnlineUpdateAsync(), true);
             applyUpdateButton.Visibility = Visibility.Collapsed;
             localZipUpdateButton = Action("从本地 ZIP 更新", async (_, _) => await ApplyLocalZipUpdateAsync());
-            overviewUpdateCard = Card(
-                Text("版本与本地更新", 15, false),
-                updateStatusText,
-                updateProgressBar,
-                Row(applyUpdateButton, checkUpdateButton, localZipUpdateButton));
-            overviewUpdateCard.Padding = new Thickness(20, 16, 20, 14);
-            overviewUpdateCard.Margin = new Thickness(0, 0, 5, 8);
+            var actionButtons = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            actionButtons.Children.Add(applyUpdateButton);
+            actionButtons.Children.Add(checkUpdateButton);
+            actionButtons.Children.Add(localZipUpdateButton);
+            DockPanel.SetDock(actionButtons, Dock.Right);
+            var updateDock = new DockPanel();
+            updateDock.Children.Add(actionButtons);
+            var updateLeft = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 14, 0) };
+            updateStatusText.Margin = new Thickness(0, 2, 0, 0);
+            updateStatusText.FontSize = 11.5;
+            updateLeft.Children.Add(new TextBlock { Text = "版本与本地更新", FontSize = 13.5, FontWeight = FontWeights.SemiBold, Foreground = Ink });
+            updateLeft.Children.Add(updateStatusText);
+            updateLeft.Children.Add(updateProgressBar);
+            updateDock.Children.Add(updateLeft);
+            overviewUpdateCard = new Border { Background = Surface, BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14), Padding = new Thickness(18, 11, 18, 11), Margin = new Thickness(0, 0, 5, 6), Child = updateDock };
         }
         if (overviewUpdateCard.Parent is Panel prior) prior.Children.Remove(overviewUpdateCard);
         return overviewUpdateCard;

@@ -39,13 +39,27 @@ public sealed partial class SetupWindow
         };
     }
 
-    private Border BuildRouteActions() => Card(Text("当前线路与配置草稿", 16, false),
-        routeSummary,
-        Text("编辑、刷新和测速不会切换连接。现有环境在点击「应用线路」后才更新。", 11),
-        Row(Action("应用线路", async (_, _) => await ApplyRouteFromPage(), true),
-            Action("多选线路 / 测速", (_, _) => SelectBackupRoutes()),
-            Action("已保存的备用线路", async (_, _) => await PickSavedRoute()),
-            Action("测速当前来宾", async (_, _) => await MeasureCurrentGuest())));
+    private Border? routeActionsCard;
+
+    private Border BuildRouteActions()
+    {
+        routeActionsCard = Card(Text("当前线路与配置草稿", 16, false),
+            routeSummary,
+            Text("编辑、刷新和测速不会切换连接；仅在需要更新已创建环境时点击「应用线路」。", 11),
+            Row(Action("应用线路", async (_, _) => await ApplyRouteFromPage(), true),
+                Action("多选线路 / 测速", (_, _) => SelectBackupRoutes()),
+                Action("已保存的备用线路", async (_, _) => await PickSavedRoute()),
+                Action("测速当前来宾", async (_, _) => await MeasureCurrentGuest())));
+        UpdateRouteActionsVisibility();
+        return routeActionsCard;
+    }
+
+    private void UpdateRouteActionsVisibility()
+    {
+        if (routeActionsCard is null) return;
+        var hasContext = !string.IsNullOrEmpty(state.VmId) || nodes.Count > 0 || !string.IsNullOrEmpty(appliedSecrets?.SelectedNodeJson);
+        routeActionsCard.Visibility = hasContext ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     private Task MeasureCurrentGuest() => Perform(async (_, token) =>
     {

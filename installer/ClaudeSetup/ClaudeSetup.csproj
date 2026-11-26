@@ -35,6 +35,8 @@
     <EmbeddedResource Include="..\artifacts\ClaudomeGuestNetwork.exe" LogicalName="ClaudeSetup.Guest.ClaudomeGuestNetwork.exe" />
     <EmbeddedResource Include="$(NuGetPackageRoot)yamldotnet/18.1.0/lib/netstandard2.0/YamlDotNet.dll" LogicalName="ClaudeSetup.Guest.YamlDotNet.dll" />
     <Resource Include="Brand\Claudome.png" />
+    <Resource Include="Brand\DomeBackdrop.jpg" />
+    <Resource Include="Brand\DomeHero.jpg" />
     <EmbeddedResource Include="..\artifacts\ClaudeNetworkGateway.exe" LogicalName="ClaudeSetup.Guest.ClaudeNetworkGateway.exe" />
     <EmbeddedResource Include="..\artifacts\Gateway-THIRD-PARTY-NOTICES.txt" LogicalName="ClaudeSetup.Gateway-THIRD-PARTY-NOTICES.txt" />
   </ItemGroup>

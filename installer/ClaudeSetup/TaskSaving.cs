@@ -11,7 +11,6 @@ internal enum TaskSaveOutcome { NotInitialized, Saved, KeptNewer, LockedByAnothe
 public sealed partial class SetupWindow
 {
     private readonly DispatcherTimer taskSaveTimer=new(){Interval=TimeSpan.FromSeconds(15)};
-    private TextBlock? taskSaveStatus;
     private bool closeAfterPause,closingPrompt,taskSavingEnabled;
     internal static TaskSaveOutcome TrySaveTaskState(SessionState state)
     {
@@ -39,21 +38,8 @@ public sealed partial class SetupWindow
         if(!taskSavingEnabled||string.IsNullOrEmpty(state.VmId))return true;
         try {
             var outcome = TrySaveTaskState(state);
-            if (outcome == TaskSaveOutcome.LockedByAnotherInstance)
-            {
-                if (taskSaveStatus is not null) taskSaveStatus.Text = "另一窗口正在操作此任务，保留其最新进度";
-                return true;
-            }
-            if (outcome == TaskSaveOutcome.KeptNewer)
-            {
-                if (taskSaveStatus is not null) taskSaveStatus.Text = "已保留更新的任务记录";
-                return true;
-            }
-            if (outcome == TaskSaveOutcome.Saved && taskSaveStatus is not null)
-                taskSaveStatus.Text = "已自动保存 · " + DateTime.Now.ToString("HH:mm:ss");
             return true;
         }catch(Exception error) {
-            if(taskSaveStatus is not null)taskSaveStatus.Text="自动保存未完成 · 请检查任务目录权限与磁盘空间";
             if(showFailure)Notice("当前进度尚未保存，原任务与上一份保存保留。\n"+Redaction.SafeError(error));
             return false;
         }
@@ -62,7 +48,7 @@ public sealed partial class SetupWindow
     {
         taskSavingEnabled=enabled;taskSaveTimer.Tick+=(_,_)=>SaveCurrentTask();if(enabled)taskSaveTimer.Start();
         Closing+=OnTaskClosing;
-        Closed+=(_,_)=>{taskSaveTimer.Stop();desktopConnectionCancellation?.Cancel();desktopTimer.Stop();};
+        Closed+=(_,_)=>{taskSaveTimer.Stop();desktopConnectionCancellation?.Cancel();mediaCancellation?.Cancel();desktopTimer.Stop();};
     }
     private void PauseCurrentTask()
     {
@@ -70,12 +56,12 @@ public sealed partial class SetupWindow
         BoundaryRuntime.RevokeWindowsSignInHold(state);
         if (consoleHost?.IsAttached != true) desktopConnectionCancellation?.Cancel();
         if(!busy)state.Status="已暂停，可继续原任务";
-        SaveCurrentTask();cancellation?.Cancel();
+        SaveCurrentTask();cancellation?.Cancel();mediaCancellation?.Cancel();
         SetDesktopConnectionStatus(busy?"正在保存并暂停，完成当前可中断步骤后保留原任务。":"任务已保存并暂停。");
     }
     private void CompleteCloseAfterPause()
     {
-        if (closeAfterPause) _ = Dispatcher.BeginInvoke(new Action(Close));
+        if (closeAfterPause && !busy && !mediaBusy) _ = Dispatcher.BeginInvoke(new Action(Close));
     }
 
     private bool pendingConsoleClose;
@@ -87,7 +73,7 @@ public sealed partial class SetupWindow
 
     private void OnTaskClosing(object? sender,CancelEventArgs e)
     {
-        if (!busy) {
+        if (!busy && !mediaBusy) {
             if (closingDesktop) { e.Cancel = pendingConsoleClose; return; }
             if (taskSavingEnabled && !closingPrompt && !closeAfterPause && BoundaryRuntime.BackendFor(state) is not null &&
                 MessageBox.Show(this, "退出会保存进度并结束受控连接。需要保持虚拟机联网时，可以取消并最小化。确认退出？",
@@ -105,9 +91,14 @@ public sealed partial class SetupWindow
         try {
             SaveCurrentTask();
             var dialog=new Window{Title="任务正在进行",Owner=this,Width=440,Height=235,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Surface};
-            var body=new StackPanel{Margin=new Thickness(22)};body.Children.Add(Text("当前任务正在进行。可以继续等待完成，也可以保存并暂停后退出。已完成的步骤和原磁盘会保留。",14));
+            var promptText = mediaBusy && mediaInElevatedInspect
+                ? "正在执行管理员镜像检查，需等待检查子进程（DISM）安全结束后才能退出。可选择等待完成后继续，或请求在子进程结束后自动退出。"
+                : mediaBusy && !busy
+                    ? "Windows 镜像正在后台下载或核验。选择「保存并暂停后退出」会保留断点续传进度并安全退出。"
+                    : "当前任务正在进行。可以继续等待完成，也可以保存并暂停后退出。已完成的步骤和原磁盘会保留。";
+            var body=new StackPanel{Margin=new Thickness(22)};body.Children.Add(Text(promptText,14));
             body.Children.Add(Row(Action("继续任务",(_,_)=>{dialog.DialogResult=false;}),Action("保存并暂停后退出",(_,_)=>{dialog.DialogResult=true;},true)));dialog.Content=body;
-            if(dialog.ShowDialog()==true){closeAfterPause=true;PauseCurrentTask();if(!busy)_ = Dispatcher.BeginInvoke(new Action(Close));}
+            if(dialog.ShowDialog()==true){closeAfterPause=true;PauseCurrentTask();if(!busy && !mediaBusy)_ = Dispatcher.BeginInvoke(new Action(Close));}
         }finally{closingPrompt=false;}
     }
 }

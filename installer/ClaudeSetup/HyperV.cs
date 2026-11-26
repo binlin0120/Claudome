@@ -102,11 +102,11 @@ public sealed class HyperV : IVmBackend
                     "VM_KEY_PROTECTOR_SETUP_FAILED" => "未能创建或回读本任务的本地密钥保护器。请保留原任务并查看 Hyper-V-VMMS 管理日志。",
                     "VM_TPM_ENABLE_FAILED" => "Hyper-V 未能启用虚拟 TPM。已保留原密钥保护器，请查看 Hyper-V-VMMS 管理日志。",
                     "DISK_SCOPE" => "虚拟磁盘身份校验失败，未执行分区或格式化。",
-                    "HYPERV_NOT_READY" => "Hyper-V 尚未运行，请核对固件虚拟化、功能启用状态和系统重启。",
-                    "HYPERV_MODULE_UNAVAILABLE" => "已启用 Hyper-V，但未能加载管理模块。请检查 Hyper-V 管理工具，安装完成或重启后继续。",
-                    "HYPERV_VMMS_MISSING" => "找不到 Hyper-V 虚拟机管理服务 vmms，请核对 Windows 功能安装状态。",
-                    "HYPERV_VMMS_DISABLED" => "Hyper-V 虚拟机管理服务 vmms 已被禁用，请由电脑管理员检查本机策略。",
-                    "HYPERV_VMMS_STOPPED" => "Hyper-V 虚拟机管理服务 vmms 未运行，请由电脑管理员检查服务状态。",
+                    "HYPERV_NOT_READY" => "Hyper-V 尚未就绪。请在宿主机排查：1) 进入主板 BIOS 确认开启 VT-x / AMD-V 与 SLAT 虚拟化；2) 在「启用或关闭 Windows 功能」勾选全部 Hyper-V 项并重启电脑；3) 以管理员身份重新运行 Claudome。",
+                    "HYPERV_MODULE_UNAVAILABLE" => "已启用 Hyper-V，但未能加载 PowerShell Hyper-V 模块。请在宿主机打开「控制面板 → 程序 → 启用或关闭 Windows 功能」，勾选「Hyper-V 管理工具（Hyper-V Module for Windows PowerShell）」并重启后继续。",
+                    "HYPERV_VMMS_MISSING" => "找不到 Hyper-V 虚拟机管理服务（vmms）。请确认宿主机系统为 Windows 11 专业版/企业版（非家庭版），并在「Windows 功能」完整安装「Hyper-V 平台」。",
+                    "HYPERV_VMMS_DISABLED" => "Hyper-V 虚拟机管理服务（vmms）已被禁用。请在宿主机运行 services.msc 找到“Hyper-V 虚拟机管理”，将启动类型改为“自动”后启动该服务。",
+                    "HYPERV_VMMS_STOPPED" => "Hyper-V 虚拟机管理服务（vmms）当前未运行。请在管理员 PowerShell 执行 Start-Service vmms 启动服务后重试。",
                     "GUEST_SHUTDOWN_PENDING" => "尚未确认 Windows 已关机，请检查来宾状态和正在关闭的应用。",
                     "BOUNDARY_NICS" => "Hyper-V 仍存在普通虚拟网卡，请正常关机后继续，由程序核对专用通道。",
                     "BOUNDARY_SERVICE" => "Hyper-V 专用通道注册与当前任务不符，未开放联网。",
@@ -193,8 +193,30 @@ public sealed class HyperV : IVmBackend
     }
     public Task VerifyOffline(SessionState s, CancellationToken token) => Call(s.Options,"boundary-offline",Context(s),token);
     public Task<string> RestoreConsole(SessionState s,CancellationToken token)=>Call(s.Options,"console-restore",Context(s),token);
-    internal Task<string> SetEnhancedSessionClipboard(SessionState s, bool enabled, CancellationToken token) =>
-        Call(s.Options, "set-clipboard", new { vmId = s.VmId, enabled }, token);
+    internal sealed record HyperVClipboardHostStatus(bool HostEnhanced, bool HvSocket);
+
+    internal static HyperVClipboardHostStatus ParseClipboardHostStatus(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return new(false, false);
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+            var hostEnhanced = root.TryGetProperty("hostEnhanced", out var h) && h.ValueKind == JsonValueKind.True;
+            var hvSocket = root.TryGetProperty("hvSocket", out var s) && s.ValueKind == JsonValueKind.True;
+            return new(hostEnhanced, hvSocket);
+        }
+        catch (JsonException)
+        {
+            return new(false, false);
+        }
+    }
+
+    internal async Task<HyperVClipboardHostStatus> SetEnhancedSessionClipboard(SessionState s, bool enabled, CancellationToken token) =>
+        ParseClipboardHostStatus(await Call(s.Options, "set-clipboard", new { vmId = s.VmId, enabled }, token));
+
+    internal async Task<HyperVClipboardHostStatus> ReadClipboardHostStatus(SessionState s, CancellationToken token) =>
+        ParseClipboardHostStatus(await Call(s.Options, "clipboard-status", new { vmId = s.VmId }, token));
     public async Task InstallWindows(SessionState s, Secrets secrets, CancellationToken token)
     {
         Machine.CheckRun(s.Options, true);

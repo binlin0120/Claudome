@@ -118,20 +118,30 @@ public static class WindowsMedia
         return found.OrderByDescending(x => x.ModifiedUtc).ThenByDescending(x => x.SizeBytes).Take(maxResults).ToList();
     }
     public static async Task<WindowsMediaIdentity> Inspect(string workspaceRoot, string isoPath,
-        IProgress<string> messages, IProgress<DownloadProgress> progress, CancellationToken token)
+        IProgress<string> messages, IProgress<DownloadProgress> progress, CancellationToken token,
+        Action? onElevationStart = null, Action? onWaitingWhileElevated = null)
     {
-        RequireIsoFile(isoPath);
-        isoPath = Path.GetFullPath(isoPath);
-        Paths.EnsureWorkspace(workspaceRoot);
-        var privateDirectory = Paths.Under(workspaceRoot, "private");
-        SecretStore.RestrictDirectory(privateDirectory);
+        var (fullIsoPath, privateDirectory, resource) = await Task.Run(() =>
+        {
+            token.ThrowIfCancellationRequested();
+            RequireIsoFile(isoPath);
+            var resolved = Path.GetFullPath(isoPath);
+            Paths.EnsureWorkspace(workspaceRoot);
+            var priv = Paths.Under(workspaceRoot, "private");
+            SecretStore.RestrictDirectory(priv);
+            return (resolved, priv, Catalog.Resources.Single(x => x.Id == "pwsh"));
+        }, token);
+        isoPath = fullIsoPath;
 
-        var resource = Catalog.Resources.Single(x => x.Id == "pwsh");
         using var downloader = new Downloader();
         messages.Report("正在准备已核验的镜像读取工具…");
         var archive = await downloader.Get(resource, Paths.Under(workspaceRoot, "downloads"), progress, token);
         var runtime = Paths.Under(privateDirectory, "media-pwsh");
-        HostRuntime.ExtractVerified(archive, runtime);
+        await Task.Run(() =>
+        {
+            token.ThrowIfCancellationRequested();
+            HostRuntime.ExtractVerified(archive, runtime);
+        }, token);
 
         messages.Report("正在计算 ISO 文件指纹，大文件可能需要一些时间…");
         var hash = await Downloader.Hash(isoPath, token);
@@ -142,22 +152,29 @@ public static class WindowsMedia
         using var script = new PrivateFile(privateDirectory, Catalog.EmbeddedText("InspectWindowsMedia.ps1"), ".ps1");
         token.ThrowIfCancellationRequested();
         messages.Report("正在只读检查镜像中的系统版本、架构和安装索引，请确认管理员提示。");
-        var exit = await WindowsHostEnvironment.ElevatedInstaller(Path.Combine(runtime, "pwsh.exe"),
-            ["-NoLogo", "-NoProfile", "-File", script.FileName, "-InputPath", input.FileName]);
+        onElevationStart?.Invoke();
+        var exit = await WindowsHostEnvironment.ElevatedInstaller(
+            Path.Combine(runtime, "pwsh.exe"),
+            ["-NoLogo", "-NoProfile", "-File", script.FileName, "-InputPath", input.FileName],
+            token,
+            onWaitingWhileElevated);
         token.ThrowIfCancellationRequested();
 
-        using var json = JsonDocument.Parse(File.ReadAllText(resultFile.FileName));
-        var result = json.RootElement;
-        if (exit != 0 || !result.TryGetProperty("runId", out var run) || run.GetString() != runId ||
-            !result.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
-            throw new SetupException("未能识别受支持的 Windows 11 x64 镜像。请确认管理员提示，并使用微软官方完整 ISO；本轮没有创建或安装虚拟机。");
-        var media = result.GetProperty("identity").Deserialize<WindowsMediaIdentity>(JsonFile.Format)
-            ?? throw new SetupException("镜像识别记录缺失。");
-        media.Validate();
-        if (media.Sha256 != hash || !Path.GetFullPath(media.IsoPath).Equals(isoPath, StringComparison.OrdinalIgnoreCase) ||
-            media.Bytes != new FileInfo(isoPath).Length)
-            throw new SetupException("镜像在检查时发生变化，请重新读取。");
-        JsonFile.Write(Record(workspaceRoot), media);
-        return media;
+        return await Task.Run(() =>
+        {
+            using var json = JsonDocument.Parse(File.ReadAllText(resultFile.FileName));
+            var result = json.RootElement;
+            if (exit != 0 || !result.TryGetProperty("runId", out var run) || run.GetString() != runId ||
+                !result.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
+                throw new SetupException("未能识别受支持的 Windows 11 x64 镜像。请确认管理员提示，并使用微软官方完整 ISO；本轮没有创建或安装虚拟机。");
+            var media = result.GetProperty("identity").Deserialize<WindowsMediaIdentity>(JsonFile.Format)
+                ?? throw new SetupException("镜像识别记录缺失。");
+            media.Validate();
+            if (media.Sha256 != hash || !Path.GetFullPath(media.IsoPath).Equals(isoPath, StringComparison.OrdinalIgnoreCase) ||
+                media.Bytes != new FileInfo(isoPath).Length)
+                throw new SetupException("镜像在检查时发生变化，请重新读取。");
+            JsonFile.Write(Record(workspaceRoot), media);
+            return media;
+        }, token);
     }
 }

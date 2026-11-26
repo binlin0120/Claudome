@@ -273,6 +273,7 @@ function Guard-Console($Vm){
     $target=(-not $basic)
     if($current -ne $target){Set-VMHost -EnableEnhancedSessionMode $target}
     if([bool](Get-VMHost).EnableEnhancedSessionMode -ne $target){throw 'HYPERV_CONSOLE_POLICY'}
+    if($target -and (Get-Command Set-VM -ErrorAction SilentlyContinue)){Set-VM -VM $Vm -EnhancedSessionTransportType HvSocket}
     }
 }
 function Verify-Console($Vm){
@@ -611,6 +612,7 @@ try {
                             Enable-TaskVirtualTpm $vm
                             if(-not (Get-VMSecurity -VM $vm).TpmEnabled -or [string](Get-VMFirmware -VM $vm).SecureBoot -ne 'On'){throw 'VM_SECURITY'}
                             Set-VM -VM $vm -AutomaticStartAction Nothing -AutomaticStopAction ShutDown
+                            try{Set-VM -VM $vm -EnhancedSessionTransportType HvSocket -ErrorAction SilentlyContinue}catch{}
                             $value='configured'
                         }
                         'launch-verifier' {
@@ -640,6 +642,8 @@ try {
                             if($null -eq $o.PSObject.Properties['SharedClipboardEnabled']){Add-Member -InputObject $o -MemberType NoteProperty -Name SharedClipboardEnabled -Value $want -Force}
                             else{$o.SharedClipboardEnabled=$want}
                             $o.HyperVBasicConsoleConfirmed=(-not $want)
+                            $hvSocket=$false
+                            $hostEnhanced=$false
                             Invoke-ConsolePolicyLock {
                                 $root='HKLM:\SOFTWARE\Claudome\HyperVConsolePolicy';$current=[bool](Get-VMHost).EnableEnhancedSessionMode
                                 if(-not(Test-Path -LiteralPath $root)){New-Item -Path $root -Force | Out-Null;New-ItemProperty -Path $root -Name OriginalEnabled -PropertyType DWord -Value ([int]$current) | Out-Null}
@@ -647,9 +651,21 @@ try {
                                 if(Test-Path -LiteralPath $owner){if((Get-ItemPropertyValue -LiteralPath $owner -Name WorkspaceId) -ne $o.WorkspaceId){throw 'VM_SCOPE'}}
                                 else{New-Item -Path $owner -Force | Out-Null;New-ItemProperty -Path $owner -Name WorkspaceId -Value ([string]$o.WorkspaceId) -PropertyType String | Out-Null}
                                 if($current -ne $want){Set-VMHost -EnableEnhancedSessionMode $want}
-                                if([bool](Get-VMHost).EnableEnhancedSessionMode -ne $want){throw 'HYPERV_CONSOLE_POLICY'}
+                                $hostEnhanced=[bool](Get-VMHost).EnableEnhancedSessionMode
+                                if($hostEnhanced -ne $want){throw 'HYPERV_CONSOLE_POLICY'}
+                                if($want -and (Get-Command Set-VM -ErrorAction SilentlyContinue)){
+                                    Set-VM -VM $vm -EnhancedSessionTransportType HvSocket
+                                }
+                                $vmRead=Get-VM -Id $vm.Id
+                                $hvSocket=([string]$vmRead.EnhancedSessionTransportType -eq 'HvSocket')
                             }
-                            $value=if($want){'enabled'}else{'disabled'}
+                            $value=@{'hostEnhanced'=$hostEnhanced;'hvSocket'=$hvSocket} | ConvertTo-Json -Compress
+                        }
+                        'clipboard-status' {
+                            $vm=Target-VM $d
+                            $hostEnhanced=[bool](Get-VMHost).EnableEnhancedSessionMode
+                            $hvSocket=([string]$vm.EnhancedSessionTransportType -eq 'HvSocket')
+                            $value=@{'hostEnhanced'=$hostEnhanced;'hvSocket'=$hvSocket} | ConvertTo-Json -Compress
                         }
                         'windows' {Install-WindowsDisk $d;$value='started'}
                         'shutdown' {

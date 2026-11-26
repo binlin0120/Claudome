@@ -7,6 +7,11 @@ public static class AppearanceColorExtensions
     extension(Appearance)
     {
         public static Color Color(string hex) => (Color)ColorConverter.ConvertFromString(hex);
+        public static Color WithAlpha(Color color, double opacity)
+        {
+            var alpha = (byte)Math.Clamp((int)Math.Round(Appearance.ClampOpacity(opacity) * 255d), 13, 255);
+            return System.Windows.Media.Color.FromArgb(alpha, color.R, color.G, color.B);
+        }
         public static Color Mix(Color a, Color b, double amount) => System.Windows.Media.Color.FromRgb((byte)(a.R * (1 - amount) + b.R * amount), (byte)(a.G * (1 - amount) + b.G * amount), (byte)(a.B * (1 - amount) + b.B * amount));
         public static double Luminance(Color color)
         {

@@ -225,7 +225,7 @@ public static class SelfUpdater
         if ((int)response.StatusCode == 404)
         {
             if (ProductProfile.IsHyperVStandalone)
-                throw new SetupException("在线更新暂未开放（远端未提供专版清单），请前往预发布页手动下载。");
+                throw new SetupException("当前更新通道尚未开放自动下载，请前往发布页手动下载最新安装包，或使用「从本地 ZIP 更新」。");
             return new UpdateCheckResult(false, null, "", $"当前已是最新版本（v{currentVersion.ToString(3)}）。");
         }
         response.EnsureSuccessStatusCode();

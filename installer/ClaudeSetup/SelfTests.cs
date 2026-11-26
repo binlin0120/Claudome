@@ -585,9 +585,11 @@ public static class SelfTests
             Assert(Platforms.Recommend(mac with { ParallelsInstalled = true })[0].Id == "parallels", "existing licensed route not preferred");
         }));
         await Check("appearance-persistence-invalid-color-and-contrast", () => Sync(() => {
-            var file = Path.Combine(root, "appearance-fixture.json"); var chosen = new Appearance("fixture", "#8732AC", "#16202C"); chosen.Save(file);
+            var file = Path.Combine(root, "appearance-fixture.json"); var chosen = new Appearance("fixture", "#8732AC", "#16202C") { Opacity = 0.05 }; chosen.Save(file);
             Assert(Appearance.Load(file) == chosen, "custom appearance did not persist");
             Reject(() => Appearance.Validate(chosen with { Accent = "invalid" }), "invalid color accepted");
+            Reject(() => Appearance.Validate(chosen with { Opacity = 0.04 }), "opacity below 5% accepted");
+            Reject(() => Appearance.Validate(chosen with { Opacity = 1.01 }), "opacity above 100% accepted");
             foreach (var preset in Appearance.Presets) { var bg = Appearance.Color(preset.Background); Assert(Appearance.Contrast(bg, Appearance.Legible(bg)) >= 4.5, "illegible foreground"); }
         }));
         await Check("windows-answer-is-well-formed-and-does-not-embed-plaintext-password", () => Sync(() => {
@@ -1560,7 +1562,7 @@ public static class SelfTests
         await Check("product-profile-isolates-directories-and-rejects-cross-edition-packages", async () =>
         {
             var expectedFolder = ProductProfile.IsHyperVStandalone ? "ClaudomeHyperVSetup" : "ClaudeEnvironmentSetup";
-            var expectedWorkspace = ProductProfile.IsHyperVStandalone ? "ClaudomeHyperVWorkspace" : "ClaudeWorkspace";
+            var expectedWorkspace = ProductProfile.IsHyperVStandalone ? "Claudome" : "ClaudeWorkspace";
             var expectedProduct = ProductProfile.IsHyperVStandalone ? "Claudome Hyper-V" : "Claudome";
             Assert(ProductProfile.AppDataFolderName == expectedFolder &&
                    ProductProfile.DefaultWorkspaceFolderName == expectedWorkspace &&
@@ -1629,6 +1631,46 @@ public static class SelfTests
             }
         });
         await StorageCleanupTests.Run(Check, output);
+        await Check("overview-host-view-aligns-home-pending-reboot-missing-feature-and-ready", () => Sync(() =>
+        {
+            var homeHost = new HostInfo("CoreCountrySpecific", 16L << 30, 8L << 30, 16, true, 26100, null);
+            var homeFacts = new PlatformFacts("Windows", "x64", "CoreCountrySpecific", true, true, 16, false, false, Build: 26100);
+            var homePreflight = new Machine.HyperVHostPreflight(false, "系统受限", true, "硬件虚拟化：已就绪", "missing", "Hyper-V 功能：尚未启用", false, false, false, "");
+            var homeReason = ProductProfile.IsHyperVStandalone
+                ? Machine.HyperVStandaloneIneligibilityReason(homeHost, homeFacts)
+                : $"当前电脑系统为 Windows {homeHost.EditionName}，不符合 Hyper-V 独立版支持范围，请升级至 Win11 专业版。";
+            var homeView = SetupWindow.BuildOverviewHostView(homeHost, homePreflight, homeReason, hasVm: false, setupFinished: false, stageText: "", isHyperVStandalone: true);
+            Assert(homeView.PillText == "受限" && homeView.VirtualizationValue.Contains("不支持") && homeView.TrackStatusText.Contains("专业版") && !homeView.TrackStatusText.Contains("本机条件已核对"),
+                "Home edition overview stayed falsely ready");
+
+            var proHost = new HostInfo("Professional", 16L << 30, 8L << 30, 16, true, 26100, null);
+            var rebootPreflight = new Machine.HyperVHostPreflight(true, "系统符合", true, "硬件虚拟化：已就绪", "stopped", "Hyper-V 等待重启生效", RebootPending: true, AllReady: false, CanOfferEnableHyperV: false, "");
+            var rebootView = SetupWindow.BuildOverviewHostView(proHost, rebootPreflight, null, false, false, "", true);
+            Assert(rebootView.PillText == "待重启" && rebootView.TrackStatusText.Contains("重启"), "Pending reboot state mismatch");
+
+            var missingPreflight = new Machine.HyperVHostPreflight(true, "系统符合", true, "硬件虚拟化：已就绪", "missing", "Hyper-V 功能：尚未启用", false, false, true, "");
+            var missingView = SetupWindow.BuildOverviewHostView(proHost, missingPreflight, null, false, false, "", true);
+            Assert(missingView.PillText == "待启用" && missingView.VirtualizationValue.Contains("尚未启用") && missingView.TrackStatusText.Contains("电脑检查"), "Unenabled Hyper-V state mismatch");
+
+            var readyPreflight = new Machine.HyperVHostPreflight(true, "系统符合", true, "硬件虚拟化：已就绪", "running", "Hyper-V vmms 服务：运行中", false, true, false, "");
+            var readyView = SetupWindow.BuildOverviewHostView(proHost, readyPreflight, null, false, false, "", true);
+            Assert(readyView.PillText == "已就绪" && readyView.VirtualizationValue.Contains("已就绪") && readyView.TrackStatusText.Contains("开启构建"), "Ready Hyper-V state mismatch");
+        }));
+        await Check("hyperv-clipboard-readback-requires-host-hvsocket-and-guest-ready", () => Sync(() =>
+        {
+            var fullOk = HyperV.ParseClipboardHostStatus("""{"hostEnhanced":true,"hvSocket":true}""");
+            var hostOnly = HyperV.ParseClipboardHostStatus("""{"hostEnhanced":true,"hvSocket":false}""");
+            var malformed = HyperV.ParseClipboardHostStatus("enabled");
+            Assert(fullOk.HostEnhanced && fullOk.HvSocket && hostOnly.HostEnhanced && !hostOnly.HvSocket && !malformed.HvSocket,
+                "Hyper-V clipboard host JSON parser failed");
+            Assert(SetupWindow.IsHyperVClipboardVerified(true, fullOk.HostEnhanced, fullOk.HvSocket, true, true),
+                "Verified Hyper-V clipboard unexpectedly rejected");
+            Assert(!SetupWindow.IsHyperVClipboardVerified(false, fullOk.HostEnhanced, fullOk.HvSocket, true, true) &&
+                   !SetupWindow.IsHyperVClipboardVerified(true, hostOnly.HostEnhanced, hostOnly.HvSocket, true, true) &&
+                   !SetupWindow.IsHyperVClipboardVerified(true, fullOk.HostEnhanced, fullOk.HvSocket, false, true) &&
+                   !SetupWindow.IsHyperVClipboardVerified(true, fullOk.HostEnhanced, fullOk.HvSocket, true, false),
+                "Unverified Hyper-V clipboard falsely reported ready");
+        }));
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));

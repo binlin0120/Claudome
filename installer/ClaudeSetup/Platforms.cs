@@ -50,7 +50,7 @@ public static class Platforms
                 new("hyperv", "Hyper-V", 1, win11Host && pro && hardware, true, reason,
                     ["检查 Windows 11 专业版/企业版、管理员权限、Hyper-V 功能与 vmms 服务；如需启用，保存进度并由本人确认重启后继续。",
                      "创建 Generation 2 虚拟机、启用安全启动与虚拟 TPM，关闭普通网卡，经受控总线通道联网并完成四维网络验收。",
-                     "旧 VirtualBox / VMware 任务仍由原版 Claudome 管理，本专版不会覆盖或迁移旧磁盘。"])
+                     "旧 VirtualBox / VMware 任务仍由原版 Claudome 管理，当前程序不会覆盖或迁移旧磁盘。"])
             ];
         }
         var list = new List<PlatformChoice>

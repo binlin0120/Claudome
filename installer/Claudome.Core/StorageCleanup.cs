@@ -963,7 +963,7 @@ public static class StorageCleanupService
             if (!MatchesExpectedArchivePackage(full, context.ExpectedPackagePrefix))
             {
                 add(MakeFileCandidate(BackupCategory.UserArchives, "用户选择的交付目录", dir, Path.GetFileName(dir), full, len, mtime,
-                    CleanupItemStatus.Retained, "非当前专版确认归属的交付包（普通版或其他压缩包），已隔离保留", canSelect: false, dir));
+                    CleanupItemStatus.Retained, "非当前产品系列确认归属的交付包，已安全隔离保留", canSelect: false, dir));
                 continue;
             }
             if (full.Equals(activeArchive, StringComparison.OrdinalIgnoreCase))
