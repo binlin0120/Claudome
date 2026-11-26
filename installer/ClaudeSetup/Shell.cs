@@ -486,6 +486,9 @@ public sealed partial class SetupWindow
         }
         shellContentScroll?.ScrollToTop();
     }
+    private bool CanEnterDesktopWorkspace() =>
+        !string.IsNullOrEmpty(state.VmId) && ResumePlan.HasWindowsInstallStarted(state);
+
     private void DrawOverview()
     {
         subtitle.Text = "为 Claude 留出一处安静独立的居所，与日常主机互不打扰。";
@@ -656,8 +659,14 @@ public sealed partial class SetupWindow
         taskMeta.Children.Add(new TextBlock { Text = state.Status, FontSize = 11, Foreground = Muted, TextTrimming = TextTrimming.CharacterEllipsis });
         taskBadgeRow.Children.Add(taskMeta);
         var taskInner = new Border { Background = Pale, BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(11), Padding = new Thickness(10), Margin = new Thickness(0, 0, 0, 12), Child = taskBadgeRow };
-        var taskAction = Action(string.IsNullOrEmpty(state.VmId) ? "载入已有环境" : "继续进入空间  →",
-            async (_, _) => { if (!string.IsNullOrEmpty(state.VmId)) await EnterOriginalWorkspace(); else LoadTask(); });
+        var canEnter = CanEnterDesktopWorkspace();
+        var taskAction = Action(string.IsNullOrEmpty(state.VmId) ? "载入已有环境" : canEnter ? "继续进入空间  →" : "继续构建空间  →",
+            async (_, _) =>
+            {
+                if (canEnter) await EnterOriginalWorkspace();
+                else if (!string.IsNullOrEmpty(state.VmId)) Go(5);
+                else LoadTask();
+            });
         var taskCard = Card(taskHeader, taskInner, taskAction);
         taskCard.Margin = new Thickness(0);
         Grid.SetRow(taskCard, 2);
@@ -726,7 +735,8 @@ public sealed partial class SetupWindow
             main.Children.Add(Card(Text("还没有专属虚拟机", 20, false), Text("完成安装后，这里会出现你的 Windows 环境。\n已经装过？载入原任务即可继续管理。"), Row(Action("安装一个新环境", (_, _) => Go(0), true), Action("载入已有环境", (_, _) => LoadTask())))); return;
         }
         var status = state.Status;
-        main.Children.Add(Card(Text("WINDOWS / 专属环境", 11), Text(state.Options.VmName, 23, false), Text(status, 13), Text($"{state.Options.MemoryMb / 1024d:F0} GB 内存  ·  {state.Options.CpuCount} 个 CPU  ·  {state.Options.DiskGb} GB 虚拟磁盘", 11), Row(Action("进入虚拟机", async (_, _) => await EnterOriginalWorkspace(), true), Action(state.SetupFinished ? "检测与修复" : "继续安装 / 检查", (_, _) => { if(state.SetupFinished) Navigate(5); else Go(5); }), Action("打开存储目录", (_, _) => OpenWorkspace()), Action("新建独立环境任务", async (_, _) => await StartIndependentTask())), Text(state.SetupFinished ? "设置已完成。日常使用从这里进入原桌面。" : "已有安装进度会保留。完成配置与防护检查后可结束设置。", 11)));
+        var canEnter = CanEnterDesktopWorkspace();
+        main.Children.Add(Card(Text("WINDOWS / 专属环境", 11), Text(state.Options.VmName, 23, false), Text(status, 13), Text($"{state.Options.MemoryMb / 1024d:F0} GB 内存  ·  {state.Options.CpuCount} 个 CPU  ·  {state.Options.DiskGb} GB 虚拟磁盘", 11), Row(Action(canEnter ? "进入虚拟机" : "继续构建空间", async (_, _) => { if (canEnter) await EnterOriginalWorkspace(); else Go(5); }, true), Action(state.SetupFinished ? "检测与修复" : "继续安装 / 检查", (_, _) => { if(state.SetupFinished) Navigate(5); else Go(5); }), Action("打开存储目录", (_, _) => OpenWorkspace()), Action("新建独立环境任务", async (_, _) => await StartIndependentTask())), Text(state.SetupFinished ? "设置已完成。日常使用从这里进入原桌面。" : canEnter ? "已有安装进度会保留。完成配置与防护检查后可结束设置。" : "尚未完成 Windows 系统写入。请先前往「6 开始安装」继续部署。", 11)));
     }
     private void DrawDownloads()
     {

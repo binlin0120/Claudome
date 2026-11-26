@@ -15,6 +15,14 @@ internal enum HyperVGuestStatus
     FailedInitializing, FailedPreparingBootstrap, FailedPreparingRemoting, FailedPreparingLoopback, FailedVerifyingEndpoint, RepairFailed
 }
 
+internal enum HyperVWindowsInstallState
+{
+    Empty,
+    ImageReady,
+    Ready,
+    NeedsRecovery
+}
+
 // A single elevated, current-user-only pipe session avoids repeated UAC prompts.
 // Passwords travel in the protected pipe; command lines contain only the pipe name.
 public sealed class HyperV : IVmBackend
@@ -108,6 +116,8 @@ public sealed class HyperV : IVmBackend
                     "HYPERV_VMMS_MISSING" => "找不到 Hyper-V 虚拟机管理服务（vmms）。请确认宿主机系统为 Windows 11 专业版/企业版（非家庭版），并在「Windows 功能」完整安装「Hyper-V 平台」。",
                     "HYPERV_VMMS_DISABLED" => "Hyper-V 虚拟机管理服务（vmms）已被禁用。请在宿主机运行 services.msc 找到“Hyper-V 虚拟机管理”，将启动类型改为“自动”后启动该服务。",
                     "HYPERV_VMMS_STOPPED" => "Hyper-V 虚拟机管理服务（vmms）当前未运行。请在管理员 PowerShell 执行 Start-Service vmms 启动服务后重试。",
+                    "HYPERV_FEATURE_NOT_FOUND" => "当前系统找不到 Windows 可选功能「Microsoft-Hyper-V-All」。请在本机打开「控制面板 → 启用或关闭 Windows 功能」核对 Hyper-V 项是否存在；若缺失，请使用微软官方 Windows 11 专业版 ISO 执行保留应用与文件的原位修复安装。",
+                    "HYPERV_FEATURE_QUERY_FAILED" => "查询本机 Hyper-V 可选功能状态失败。请确认已通过管理员授权、DISM 服务未被安全软件拦截，并查看 C:\\Windows\\Logs\\DISM\\dism.log。",
                     "GUEST_SHUTDOWN_PENDING" => "尚未确认 Windows 已关机，请检查来宾状态和正在关闭的应用。",
                     "BOUNDARY_NICS" => "Hyper-V 仍存在普通虚拟网卡，请正常关机后继续，由程序核对专用通道。",
                     "BOUNDARY_SERVICE" => "Hyper-V 专用通道注册与当前任务不符，未开放联网。",
@@ -135,7 +145,8 @@ public sealed class HyperV : IVmBackend
                     "GUEST_COPY_DISK_FULL" => "来宾磁盘空间不足，旧文件已保留。",
                     "GUEST_COPY_HASH" => "收到的来宾资源未通过大小或 SHA-256 核验，旧文件已保留。",
                     "HYPERV_STEP_FAILED" when operation == "windows" => "请核对客户机同一时间的 Hyper-V 或 DISM 日志，原任务已保留。",
-                    _ => "请查看虚拟机中的许可、首次设置或管理员提示，再继续原任务。"
+                    "HYPERV_STEP_FAILED" => FallbackOperationDetail(operation),
+                    _ => FallbackOperationDetail(operation)
                 };
                 if (operation == "windows") detail = CommandFailure.HyperVWindowsStage(result.RootElement) + detail;
                 if (code == "VM_TPM_ENABLE_FAILED" && result.RootElement.TryGetProperty("tpmErrorHResult", out var tpmResult) &&
@@ -158,11 +169,52 @@ public sealed class HyperV : IVmBackend
                     } : "传送文件";
                     detail = $"在「{phase}」未完成。{detail} 诊断：{category} / 0x{nativeCode:X8}。";
                 }
+                else if (code is "HYPERV_STEP_FAILED" or "HYPERV_FEATURE_NOT_FOUND" or "HYPERV_FEATURE_QUERY_FAILED")
+                {
+                    detail += FormatSafeHyperVDiagnostic(result.RootElement);
+                }
                 throw new SetupException(CommandFailure.HyperV(operation, code, detail));
             }
             return result.RootElement.GetProperty("value").GetString() ?? "";
         } finally { serial.Release(); }
     }
+    internal static string FallbackOperationDetail(string operation) => operation switch
+    {
+        "init" or "prepare" => "宿主机检查或启用 Hyper-V 功能未完成。请核对：1) 本机系统为完整 Windows 11 专业版/企业版且硬件虚拟化已开启；2) 已通过管理员确认且未被安全软件拦截；3) 若下方附带错误码，请据此排查系统功能或 DISM 日志。",
+        "ensure" or "windows-install-state" => "在宿主机创建虚拟机或核对系统盘检查点时未完成。请检查目标工作区目录权限、剩余空间及 Hyper-V 虚拟机管理服务（vmms）状态。",
+        "configure" => "在配置虚拟机的 CPU、静态内存、安全启动或虚拟 TPM 时未完成。请确认虚拟机处于关机状态、可用内存充足，并检查 Hyper-V-VMMS 管理日志。",
+        "open" or "running" or "shutdown" => "在读取、启动或关闭虚拟机状态时未完成。请在宿主机确认 Hyper-V 虚拟机管理服务（vmms）和虚拟机当前状态后继续。",
+        "boundary-prepare" or "boundary-verify" or "boundary-offline" => "在配置或核验 Hyper-V 受控总线边界时未完成。请核对宿主机管理员权限及 Hyper-V 服务状态。",
+        "set-clipboard" or "clipboard-status" or "console-restore" => "在读写宿主机 Hyper-V 会话或剪贴板设置时未完成。请确认管理员权限与虚拟机状态后重试。",
+        "windows" => "在写入 Windows 系统盘或配置启动引导时未完成。请核对目标盘剩余空间、ISO 完整性与宿主机 DISM 日志，原任务已保留。",
+        "guest" or "ready" or "repair-guest-session" or "copy-to" or "copy-from" or "file-exists" => "在虚拟机内执行命令或传输资源时未完成。请查看来宾中的管理员提示、Windows 登录状态与磁盘空间后再继续。",
+        _ => "该 Hyper-V 管理操作未完成。请核对宿主机管理员权限、vmms 服务与当前任务状态后继续。"
+    };
+
+    internal static string FormatSafeHyperVDiagnostic(JsonElement report)
+    {
+        var parts = new List<string>();
+        if (report.TryGetProperty("errorSubstage", out var substageEl) && substageEl.ValueKind == JsonValueKind.String)
+        {
+            var label = CommandFailure.HyperVSubstageLabel(substageEl.GetString());
+            if (!string.IsNullOrEmpty(label)) parts.Add($"子步骤「{label}」");
+        }
+        if (report.TryGetProperty("errorCategory", out var catEl) && catEl.ValueKind == JsonValueKind.String &&
+            catEl.GetString() is { Length: > 0 and <= 32 } cat && cat.All(char.IsAsciiLetter))
+        {
+            parts.Add(cat);
+        }
+        if (report.TryGetProperty("errorHResult", out var hrEl) && hrEl.ValueKind == JsonValueKind.Number && hrEl.TryGetInt32(out var hr))
+        {
+            parts.Add($"0x{unchecked((uint)hr):X8}");
+        }
+        if (report.TryGetProperty("errorNativeCode", out var nativeEl) && nativeEl.ValueKind == JsonValueKind.Number && nativeEl.TryGetInt32(out var native))
+        {
+            parts.Add($"退出码 {native}");
+        }
+        return parts.Count > 0 ? " 诊断：" + string.Join(" · ", parts) + "。" : "";
+    }
+
     public Task Prepare(SetupOptions options, CancellationToken token) => Call(options, "prepare", null, token);
     public async Task<string> EnsureMachine(SessionState state, CancellationToken token)
     {
@@ -233,6 +285,16 @@ public sealed class HyperV : IVmBackend
     internal Task ShutdownOriginal(SessionState state, CancellationToken token) =>
         Call(state.Options, "shutdown", Context(state), token);
     public async Task<bool> IsRunning(SessionState s, CancellationToken token) => await Call(s.Options, "running", Context(s), token) == "True";
+    internal async Task<HyperVWindowsInstallState> ProbeWindowsInstallState(SessionState s, CancellationToken token) =>
+        ParseWindowsInstallState(await Call(s.Options, "windows-install-state", Context(s), token));
+
+    internal static HyperVWindowsInstallState ParseWindowsInstallState(string value) => value switch
+    {
+        "empty" => HyperVWindowsInstallState.Empty,
+        "image-ready" => HyperVWindowsInstallState.ImageReady,
+        "ready" => HyperVWindowsInstallState.Ready,
+        _ => HyperVWindowsInstallState.NeedsRecovery
+    };
     public async Task<bool> GuestReady(SessionState s, Secrets secrets, CancellationToken token) =>
         await ReadGuestStatus(s, secrets, token) == HyperVGuestStatus.Ready;
 

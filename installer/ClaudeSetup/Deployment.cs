@@ -87,6 +87,62 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         }
     }
 
+    internal static async Task ExecuteHyperVWindowsStageAsync(
+        SessionState state,
+        Func<Task<HyperVWindowsInstallState>> probeInstallStateAsync,
+        Func<Task<bool>> isRunningAsync,
+        Func<Task> installWindowsAsync,
+        Func<Task> openVmAsync)
+    {
+        if (!state.Completed.Contains("guest-ready"))
+        {
+            var probe = await probeInstallStateAsync();
+            if (state.Completed.Contains("windows-started"))
+            {
+                if (probe == HyperVWindowsInstallState.Empty)
+                {
+                    state.Completed.RemoveAll(x => x == "windows-started");
+                    state.Save();
+                }
+                else if (probe == HyperVWindowsInstallState.NeedsRecovery)
+                {
+                    if (await isRunningAsync())
+                        throw new HandoffException(new("先安全关闭原虚拟机以核对磁盘", [
+                            "原任务已记录进入安装阶段，但当前虚拟机正在运行且未核验到完整的 Windows 启动盘检查点。",
+                            "请先在虚拟机操作栏或 Hyper-V 管理器安全关机（不会覆盖现有磁盘），然后回到助手继续核对磁盘。"
+                        ], "vm-stop-before-install"));
+                    await installWindowsAsync();
+                    return;
+                }
+            }
+
+            if (ResumePlan.For(state).InstallWindows)
+            {
+                var running = await isRunningAsync();
+                if (probe == HyperVWindowsInstallState.Ready)
+                {
+                    state.Completed.Add("windows-started");
+                    state.Save();
+                    if (!running) await openVmAsync();
+                    return;
+                }
+                if (running)
+                {
+                    throw new HandoffException(new("先安全关闭尚未安装系统的虚拟机", [
+                        "检测到当前虚拟机正在运行（可能停留在 UEFI 启动画面），但尚未核验到可启动的 Windows 系统盘。",
+                        "请先在「专属桌面」操作栏或 Hyper-V 管理器安全关闭虚拟机（不会自动格式化或覆盖任何磁盘），再返回「开始安装」点击「开始 / 继续部署」。"
+                    ], "vm-stop-before-install"));
+                }
+                await installWindowsAsync();
+                state.Completed.Add("windows-started");
+                state.Save();
+                return;
+            }
+        }
+
+        if (!await isRunningAsync()) await openVmAsync();
+    }
+
     internal static void RecordHyperVRestartPending(SessionState state)
     {
         state.Stage = "等待重启电脑以完成 Hyper-V 启用";
@@ -239,7 +295,17 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 throw new SetupException("本任务缺少可回读的网络检查点，请使用「重新配置本任务网络」。");
             var continueBrowser = browserCheckpoint && resumeNetwork;
             var refreshGuestScripts = continueBrowser || state.GuestFilesStamp != resourceStamp || !state.Completed.Contains("guest-files");
-            if (plan.InstallWindows)
+            if (box is HyperV hvBox)
+            {
+                await ExecuteHyperVWindowsStageAsync(
+                    state,
+                    () => hvBox.ProbeWindowsInstallState(state, token),
+                    () => box.IsRunning(state, token),
+                    () => { Stage(state, "4 / 7  安装 Windows"); return box.InstallWindows(state, secrets, token); },
+                    () => box.Open(state, token));
+                plan = ResumePlan.For(state);
+            }
+            else if (plan.InstallWindows)
             {
                 if (!await box.IsRunning(state, token)) { Stage(state, "4 / 7  安装 Windows"); await box.InstallWindows(state, secrets, token); }
                 state.Completed.Add("windows-started"); state.Save();
@@ -281,9 +347,9 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                                 if (++unreadableStatusChecks == 4)
                                     throw new HandoffException(new("VirtualBox 未能从来宾读回 Windows 状态",
                                         state.AwaitingGuestTools
-                                            ? ["在右侧桌面处理 Windows 安装或重启提示，然后继续原任务。"]
+                                            ? ["在「专属桌面」虚拟机画面中处理 Windows 安装或重启提示，然后继续原任务。"]
                                             : ["原任务已记录 Windows 和来宾工具安装完成。本次回读失败，外网会保持阻断。",
-                                               "请先保存右侧桌面的工作，在虚拟机内通过「开始 → 电源 → 重启」重启 Windows。进入来宾桌面后点击「继续原任务并连接」。"],
+                                               "请先保存虚拟机桌面内的工作，在虚拟机内通过「开始 → 电源 → 重启」重启 Windows。进入来宾桌面后点击「继续原任务并连接」。"],
                                         "guest-status-unreadable"));
                                 var check = state.AwaitingGuestTools ? "4 / 7  正在重试 Windows 安装状态读取" : "恢复检查：正在重试 VirtualBox 来宾控制回读";
                                 installation?.Report(new($"{check}（{unreadableStatusChecks}/4）"));

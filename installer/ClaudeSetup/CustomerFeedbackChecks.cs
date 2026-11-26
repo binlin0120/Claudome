@@ -185,14 +185,14 @@ public sealed partial class SetupWindow
         {
             user.Text = fixtureUser;
             var readInvoked = false;
-            var selectedIndex = fixtureUser.Length == 0 ? 1 : 6;
-            imageIndex.Text = selectedIndex.ToString();
+            var expectedIndex = fixtureUser.Length == 0 ? 6 : 1;
+            imageIndex.Text = "1";
             await InspectMedia((workspace, selectedIso, _, _, _) =>
             {
                 readInvoked = workspace == root.Text.Trim() && selectedIso == fixtureMedia.IsoPath;
                 return Task.FromResult(fixtureMedia);
             });
-            var passed = readInvoked && Equals(windowsImages.SelectedValue, selectedIndex) &&
+            var passed = readInvoked && Equals(windowsImages.SelectedValue, expectedIndex) &&
                 license.IsChecked != true && !busy && pages[2].IsEnabled;
             if (!passed) failed++;
             rows.Add(new { name = fixtureUser.Length == 0
@@ -340,7 +340,7 @@ public sealed partial class SetupWindow
             using (var installToken = new CancellationTokenSource())
             {
                 cancellation = installToken;
-                SetDesktopConnectionStatus("检测到 VirtualBox 显示缓冲冲突。可在左侧直接恢复画面。");
+                SetDesktopConnectionStatus("检测到 VirtualBox 显示缓冲冲突。可在顶部操作栏直接恢复画面。");
                 UpdateDesktopActivity();
                 var otherStepBlocked = desktopRecoverDisplay is { Visibility: Visibility.Visible, IsEnabled: false };
                 state.AwaitingGuestTools = true;
@@ -846,6 +846,106 @@ public sealed partial class SetupWindow
         var allV6Ok = v6ChecksOk && routeHiddenWhenIdle && jumpedToDesktop;
         if (!allV6Ok) failed++;
         rows.Add(new { name = "centered-translucent-config-modal-settings-menu-and-nonblocking-media-download", passed = allV6Ok, v6ChecksOk, routeHiddenWhenIdle, jumpedToDesktop });
+
+        // Verify empty VM cannot trigger desktop entry and saved two-hop route resumes without subscription refetch
+        var p1FlowOk = false;
+        var savedVmForP1 = state.VmId;
+        var savedWinStarted = state.Completed.Contains("windows-started");
+        var savedSetupFinished = state.SetupFinished;
+        var savedOptsSnapshot = Clone(state.Options);
+        var savedAppliedSnapshot = appliedSecrets;
+        var emptyBlocked = false;
+        var startedAllowed = false;
+        var snapshotOk = false;
+        var draftDetected = false;
+        var badDetected = false;
+        var step0Fits = false;
+        double step0Bottom = 0, step0Viewport = 0;
+        try
+        {
+            state.VmId = "55555555-5555-5555-5555-555555555555";
+            state.Completed.Remove("windows-started");
+            state.Completed.Remove("guest-ready");
+            state.SetupFinished = false;
+            Navigate(0);
+            var overviewNoWin = Descendants<Button>(main).Select(b => b.Content?.ToString() ?? "").ToList();
+            Navigate(2);
+            var machinesNoWin = Descendants<Button>(main).Select(b => b.Content?.ToString() ?? "").ToList();
+            emptyBlocked = !CanEnterDesktopWorkspace() &&
+                overviewNoWin.Any(t => t.Contains("继续构建空间")) && !overviewNoWin.Any(t => t.Contains("继续进入空间")) &&
+                machinesNoWin.Any(t => t.Contains("继续构建空间")) && !machinesNoWin.Any(t => t == "进入虚拟机");
+
+            state.Completed.Add("windows-started");
+            Navigate(0);
+            var overviewWithWin = Descendants<Button>(main).Select(b => b.Content?.ToString() ?? "").ToList();
+            Navigate(2);
+            var machinesWithWin = Descendants<Button>(main).Select(b => b.Content?.ToString() ?? "").ToList();
+            startedAllowed = CanEnterDesktopWorkspace() &&
+                overviewWithWin.Any(t => t.Contains("继续进入空间")) &&
+                machinesWithWin.Any(t => t == "进入虚拟机");
+
+            var twoHopYml = """
+                proxies:
+                  - {name: Hop1, type: socks5, server: hop1.example, port: 1080}
+                  - {name: Exit2, type: socks5, server: exit2.example, port: 2080}
+                """;
+            var twoHopParsed = NetworkImport.Parse(twoHopYml).Nodes;
+            var twoHopOpts = new SetupOptions
+            {
+                Root = autoRestoreDir,
+                NetworkSource = "已有订阅链接",
+                NodeName = twoHopParsed[1].Name,
+                ChainEnabled = true,
+                UpstreamSource = "节点链接 / 本地配置",
+                UpstreamName = twoHopParsed[0].Name,
+                Country = "US",
+                TimeZoneId = "Pacific Standard Time",
+                Remember = true
+            };
+            var twoHopSecrets = new Secrets
+            {
+                VmPassword = "TwoHopPassword!12",
+                SubscriptionUrl = "https://example.invalid/offline-sub",
+                SelectedNodeJson = twoHopParsed[1].Json,
+                UpstreamNodeJson = twoHopParsed[0].Json,
+                UpstreamNetworkText = twoHopYml
+            };
+            state.VmId = "66666666-6666-6666-6666-666666666666";
+            state.Completed.Remove("software");
+            state.Options = twoHopOpts;
+            state.Save();
+            SecretStore.Save(twoHopOpts.Private, twoHopSecrets);
+            ApplyLoadedTask(state, loadSecrets: true, interactive: false);
+            snapshotOk = HasSavedRouteSnapshot() && !HasUnappliedNetworkDraft(Options(), ReadSecrets(), state.Options, ResolveAppliedSnapshotSecrets());
+            country.SelectedValue = "JP";
+            draftDetected = HasUnappliedNetworkDraft(Options(), ReadSecrets(), state.Options, ResolveAppliedSnapshotSecrets());
+            country.SelectedValue = "US";
+            ValidateSavedRouteSnapshot(state.Options, ResolveAppliedSnapshotSecrets());
+            try { ValidateSavedRouteSnapshot(state.Options, new Secrets { SelectedNodeJson = "{invalid" }); }
+            catch (SetupException) { badDetected = true; }
+
+            Go(0);
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+            UpdateLayout();
+            await SaveAlignmentView("install-host-step0");
+            if (shellContentScroll is not null && pages[0].Children.Count >= 2 && pages[0].Children[1] is FrameworkElement secondCard)
+            {
+                step0Bottom = secondCard.TranslatePoint(new Point(0, secondCard.ActualHeight), main).Y;
+                step0Viewport = shellContentScroll.ViewportHeight;
+                step0Fits = step0Bottom <= step0Viewport + 4;
+            }
+            p1FlowOk = emptyBlocked && startedAllowed && snapshotOk && draftDetected && badDetected && step0Fits;
+        }
+        finally
+        {
+            state.VmId = savedVmForP1;
+            if (!savedWinStarted) state.Completed.Remove("windows-started");
+            state.SetupFinished = savedSetupFinished;
+            state.Options = savedOptsSnapshot;
+            appliedSecrets = savedAppliedSnapshot;
+        }
+        if (!p1FlowOk) failed++;
+        rows.Add(new { name = "empty-vm-routes-to-build-step-and-resumed-route-snapshot-avoids-refetch", passed = p1FlowOk, emptyBlocked, startedAllowed, snapshotOk, draftDetected, badDetected, step0Fits, step0Bottom, step0Viewport });
 
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);

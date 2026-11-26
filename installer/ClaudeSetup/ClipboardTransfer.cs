@@ -356,7 +356,7 @@ public sealed partial class SetupWindow
             var received = await ClipboardTransfer.Transfer(state, credentials, toGuest, text, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             if (!toGuest) Clipboard.SetText(received, TextDataFormat.UnicodeText);
-            Status(toGuest ? "文字已放入虚拟机剪贴板。点击右侧输入框后按 Ctrl+V。" : "文字已放入主机剪贴板，可以在主机按 Ctrl+V。");
+            Status(toGuest ? "文字已放入虚拟机剪贴板。点击虚拟机内输入框后按 Ctrl+V。" : "文字已放入主机剪贴板，可以在主机按 Ctrl+V。");
             if (toGuest && !closeAfterPause) consoleHost?.FocusGuest();
         }
         catch (ExternalException) { Status("主机剪贴板暂时无法读取或写入，请稍后再试。"); }

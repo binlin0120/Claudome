@@ -156,9 +156,12 @@ public sealed class SessionState
 }
 public sealed record UserAction(string Title, string[] Steps, string Id);
 public class SetupException(string message) : Exception(message);
-public sealed class HandoffException(UserAction action) : SetupException(action.Title + "。请按右侧操作指引完成后继续。")
+public sealed class HandoffException(UserAction action) : SetupException(FormatMessage(action))
 {
     public UserAction Action { get; } = action;
+    private static string FormatMessage(UserAction action) => action.Steps.Length == 0
+        ? action.Title
+        : action.Title + "\n\n" + string.Join("\n", action.Steps.Select((step, index) => $"{index + 1}. {step}"));
 }
 
 public static class JsonFile

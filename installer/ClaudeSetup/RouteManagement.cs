@@ -41,12 +41,16 @@ public sealed partial class SetupWindow
 
     private Border? routeActionsCard;
 
+    private Button? restoreRouteDraftButton;
+
     private Border BuildRouteActions()
     {
+        restoreRouteDraftButton = Action("恢复原已保存线路", (_, _) => RestoreSavedRouteDraft());
         routeActionsCard = Card(Text("当前线路与配置草稿", 16, false),
             routeSummary,
             Text("编辑、刷新和测速不会切换连接；仅在需要更新已创建环境时点击「应用线路」。", 11),
             Row(Action("应用线路", async (_, _) => await ApplyRouteFromPage(), true),
+                restoreRouteDraftButton,
                 Action("多选线路 / 测速", (_, _) => SelectBackupRoutes()),
                 Action("已保存的备用线路", async (_, _) => await PickSavedRoute()),
                 Action("测速当前来宾", async (_, _) => await MeasureCurrentGuest())));
@@ -57,8 +61,160 @@ public sealed partial class SetupWindow
     private void UpdateRouteActionsVisibility()
     {
         if (routeActionsCard is null) return;
-        var hasContext = !string.IsNullOrEmpty(state.VmId) || nodes.Count > 0 || !string.IsNullOrEmpty(appliedSecrets?.SelectedNodeJson);
+        var hasSaved = HasSavedRouteSnapshot();
+        if (restoreRouteDraftButton is not null)
+            restoreRouteDraftButton.Visibility = hasSaved ? Visibility.Visible : Visibility.Collapsed;
+        var hasContext = hasSaved || !string.IsNullOrEmpty(state.VmId) || nodes.Count > 0 || !string.IsNullOrEmpty(appliedSecrets?.SelectedNodeJson);
         routeActionsCard.Visibility = hasContext ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    internal bool HasSavedRouteSnapshot() =>
+        state.Completed.Contains("software") ||
+        (!string.IsNullOrEmpty(state.VmId) && (appliedSecrets is not null || state.Options.NetworkSource == "稍后配置")) ||
+        (File.Exists(state.Options.StatePath) && (!string.IsNullOrEmpty(appliedSecrets?.SelectedNodeJson) || state.Options.NetworkSource == "稍后配置"));
+
+    private Secrets ResolveAppliedSnapshotSecrets()
+    {
+        if (appliedSecrets is { SelectedNodeJson.Length: > 0 } || state.Options.NetworkSource == "稍后配置")
+            return AppliedLogin();
+        if (state.Options.Remember && File.Exists(state.Options.StatePath))
+        {
+            try
+            {
+                var loaded = SecretStore.Load(state);
+                if (loaded is not null)
+                {
+                    RememberAppliedSecrets(loaded);
+                    return AppliedLogin();
+                }
+            }
+            catch (SetupException) { }
+        }
+        return AppliedLogin();
+    }
+
+    internal static void ValidateSavedRouteSnapshot(SetupOptions savedOptions, Secrets saved)
+    {
+        if (savedOptions.NetworkSource == "稍后配置") return;
+        if (string.IsNullOrWhiteSpace(saved.SelectedNodeJson))
+            throw new SetupException("已保存的线路快照缺失或无效。请前往「4 网络节点」重新读取、选择并点击「应用线路」。");
+        try
+        {
+            var parsed = NetworkImport.Parse("{\"proxies\":[" + saved.SelectedNodeJson + "]}").Nodes;
+            if (parsed.Count != 1) throw new SetupException("已保存的主用节点无效。");
+            var raw = JsonSerializer.Deserialize<Dictionary<string, object?>>(saved.SelectedNodeJson)!
+                .ToDictionary(p => p.Key, p => p.Value is JsonElement e ? UnwrapRouteJson(e) : p.Value);
+            _ = NetworkImport.Validate(raw);
+            if (savedOptions.ChainEnabled)
+            {
+                if (string.IsNullOrWhiteSpace(saved.UpstreamNodeJson))
+                    throw new SetupException("已保存的链式前置节点缺失。");
+                var upstreamParsed = NetworkImport.Parse("{\"proxies\":[" + saved.UpstreamNodeJson + "]}").Nodes;
+                if (upstreamParsed.Count != 1 || upstreamParsed[0].Upstream is not null)
+                    throw new SetupException("已保存的前置节点无效。");
+                var rawUp = JsonSerializer.Deserialize<Dictionary<string, object?>>(saved.UpstreamNodeJson)!
+                    .ToDictionary(p => p.Key, p => p.Value is JsonElement e ? UnwrapRouteJson(e) : p.Value);
+                _ = NetworkImport.Validate(rawUp);
+            }
+            if (!string.IsNullOrEmpty(saved.ExpectedExitIp) &&
+                (!IPAddress.TryParse(saved.ExpectedExitIp, out var ip) || ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork))
+                throw new SetupException("已保存的预期固定出口 IPv4 无效。");
+        }
+        catch (SetupException ex)
+        {
+            throw new SetupException("已保存的线路快照无效（" + ex.Message + "）。请前往「4 网络节点」重新读取、选择并点击「应用线路」。");
+        }
+        catch
+        {
+            throw new SetupException("已保存的线路快照无效或已损坏。请前往「4 网络节点」重新读取、选择并点击「应用线路」。");
+        }
+    }
+
+    private static object? UnwrapRouteJson(JsonElement element) => element.ValueKind switch
+    {
+        JsonValueKind.String => element.GetString(),
+        JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDouble(),
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        JsonValueKind.Array => element.EnumerateArray().Select(UnwrapRouteJson).ToList(),
+        JsonValueKind.Object => element.EnumerateObject().ToDictionary(p => p.Name, p => UnwrapRouteJson(p.Value)),
+        _ => null
+    };
+
+    private bool HasUnappliedNetworkDraft(SetupOptions uiOptions, Secrets uiSecrets, SetupOptions savedOptions, Secrets savedSecrets)
+    {
+        if (uiOptions.NetworkSource != savedOptions.NetworkSource) return true;
+        if (savedOptions.NetworkSource == "稍后配置") return false;
+        var currentInput = uiOptions.NetworkSource == "已有订阅链接"
+            ? subscription.Text.Trim()
+            : uiOptions.NetworkSource == "手动 HTTP / SOCKS5 节点"
+                ? ManualFingerprint()
+                : networkText.Text;
+        if (string.IsNullOrWhiteSpace(currentInput) || node.SelectedItem is not ProxyNode || importedInput != currentInput)
+            return true;
+        if (!NetworkImport.SameSavedDefinition(uiSecrets.SelectedNodeJson, savedSecrets.SelectedNodeJson)) return true;
+        if (uiOptions.ChainEnabled != savedOptions.ChainEnabled) return true;
+        if (uiOptions.ChainEnabled && !NetworkImport.SameSavedDefinition(uiSecrets.UpstreamNodeJson, savedSecrets.UpstreamNodeJson)) return true;
+        if (uiSecrets.ExpectedExitIp != savedSecrets.ExpectedExitIp) return true;
+        if (uiOptions.Country != savedOptions.Country || uiOptions.TimeZoneId != savedOptions.TimeZoneId) return true;
+        return false;
+    }
+
+    private static Secrets MergeRuntimeCredentials(Secrets saved, Secrets currentUi) => new()
+    {
+        VmPassword = string.IsNullOrEmpty(currentUi.VmPassword) ? saved.VmPassword : currentUi.VmPassword,
+        VmMicrosoftAddress = string.IsNullOrEmpty(currentUi.VmMicrosoftAddress) ? saved.VmMicrosoftAddress : currentUi.VmMicrosoftAddress,
+        AdsPowerApiKey = string.IsNullOrEmpty(currentUi.AdsPowerApiKey) ? saved.AdsPowerApiKey : currentUi.AdsPowerApiKey,
+        SubscriptionUrl = saved.SubscriptionUrl,
+        NetworkText = saved.NetworkText,
+        SelectedNodeJson = saved.SelectedNodeJson,
+        UpstreamNodeJson = saved.UpstreamNodeJson,
+        UpstreamSubscriptionUrl = saved.UpstreamSubscriptionUrl,
+        UpstreamNetworkText = saved.UpstreamNetworkText,
+        ExpectedExitIp = saved.ExpectedExitIp,
+        BackupRoutes = [.. (currentUi.BackupRoutes.Count > 0 ? currentUi.BackupRoutes : saved.BackupRoutes)]
+    };
+
+    private void RestoreSavedRouteDraft()
+    {
+        if (busy) return;
+        var saved = ResolveAppliedSnapshotSecrets();
+        var o = state.Options;
+        updatingCpuRecommendation = true;
+        try
+        {
+            source.SelectedItem = o.NetworkSource;
+            country.SelectedValue = o.Country;
+            timeZone.SelectedValue = o.TimeZoneId;
+            chain.IsChecked = o.ChainEnabled && !o.ChainFromImport;
+            upstreamSource.SelectedItem = o.UpstreamSource;
+        }
+        finally { updatingCpuRecommendation = false; }
+        subscription.Text = saved.SubscriptionUrl;
+        networkText.Text = saved.NetworkText;
+        expectedIp.Text = saved.ExpectedExitIp;
+        LoadChainSecrets(saved);
+        if (!string.IsNullOrEmpty(saved.SelectedNodeJson))
+        {
+            var parsed = NetworkImport.Parse("{\"proxies\":[" + saved.SelectedNodeJson + "]}");
+            nodes = parsed.Nodes;
+            node.ItemsSource = nodes;
+            node.SelectedIndex = 0;
+            RestoreChainRelationship(saved, o);
+            importedInput = o.NetworkSource == "已有订阅链接"
+                ? subscription.Text.Trim()
+                : o.NetworkSource == "手动 HTTP / SOCKS5 节点"
+                    ? ManualFingerprint()
+                    : networkText.Text;
+            currentFinalSubscription = false;
+        }
+        else
+        {
+            nodes = [];
+            node.ItemsSource = nodes;
+            importedInput = "";
+        }
+        Notice("已恢复为当前任务已保存的线路配置。");
     }
 
     private Task MeasureCurrentGuest() => Perform(async (_, token) =>
@@ -77,7 +233,41 @@ public sealed partial class SetupWindow
     private async Task ApplyRouteFromPage()
     {
         if (busy) return;
-        if (!state.Completed.Contains("software")) { Go(5); return; }
+        if (!state.Completed.Contains("software"))
+        {
+            if (!HasSavedRouteSnapshot()) { Go(5); return; }
+            await Perform(async (o, token) =>
+            {
+                if (o.NetworkSource != "稍后配置" && (country.SelectedValue is null || timeZone.SelectedValue is null))
+                    throw new SetupException("请按节点实际地区选择国家和城市时区。");
+                var currentNetworkInput = o.NetworkSource == "已有订阅链接" ? subscription.Text.Trim() : o.NetworkSource == "手动 HTTP / SOCKS5 节点" ? ManualFingerprint() : networkText.Text;
+                if (o.NetworkSource != "稍后配置" && (string.IsNullOrWhiteSpace(currentNetworkInput) || node.SelectedItem is not ProxyNode || importedInput != currentNetworkInput))
+                    throw new SetupException("请先读取并选择一个节点；网络资料已变化或尚未载入时需重新读取。");
+                var candidate = ReadSecrets();
+                candidate.BackupRoutes = [.. (pendingBackupRoutes ?? appliedSecrets?.BackupRoutes ?? [])];
+                await RefreshSelectedRoutes(o, candidate, token);
+                ValidateSavedRouteSnapshot(o, candidate);
+                var updated = Clone(state);
+                updated.Options.NetworkSource = o.NetworkSource;
+                updated.Options.NodeName = o.NodeName;
+                updated.Options.ChainEnabled = o.ChainEnabled;
+                updated.Options.ChainFromImport = o.ChainFromImport;
+                updated.Options.UpstreamSource = o.UpstreamSource;
+                updated.Options.UpstreamName = o.UpstreamName;
+                updated.Options.Country = o.Country;
+                updated.Options.TimeZoneId = o.TimeZoneId;
+                updated.Options.Remember = o.Remember;
+                using var taskLock = WorkspaceLock.Acquire(updated);
+                if (updated.Options.Remember)
+                    SecretStore.SaveMerged(updated.Options.Private, candidate, updated.Options.NetworkSource == "稍后配置", !secretsLoaded, updated.CredentialsRevision);
+                updated.Save();
+                state = updated;
+                RememberAppliedSecrets(candidate);
+                Notice("已保存本任务的新线路配置；可点击「继续部署」按新线路继续。");
+                Go(5);
+            });
+            return;
+        }
         if (MessageBox.Show(this, "应用时虚拟机网络可能短暂中断。准备好后继续？",
             "应用线路", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         consent.IsChecked = true;

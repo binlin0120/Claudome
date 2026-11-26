@@ -467,6 +467,46 @@ function Confirm-WindowsDisk($Checkpoint,$Vm,[switch]$AllowAttached) {
     if($vhd.Attached -and -not $AllowAttached){throw 'HYPERV_DISK_MOUNTED'}
     return $vhd
 }
+function Get-WindowsInstallProbe($Vm) {
+    $path=Assert-LocalPath (Join-Path $Vm.Path '.windows-install.json') $Vm.Path
+    $defaultDisk=Assert-InstallDiskPath (Join-Path $Vm.Path 'Windows11.vhdx') $Vm
+    try { $drives=@(Assert-InstallDrives $Vm $defaultDisk) } catch { return 'needs-recovery' }
+    if([IO.File]::Exists($path)) {
+        try {
+            if(([IO.FileInfo]::new($path)).Length -gt 65536){return 'needs-recovery'}
+            $c=[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
+            if($c.schema -ne 1 -or $c.vmId -ne [string]$Vm.Id -or $c.workspaceId -ne $o.WorkspaceId -or $c.isoSha256 -ne $o.IsoSha256 -or $c.imageIndex -ne $o.WindowsImageIndex -or $c.userName -ne $o.UserName -or $c.diskGb -ne $o.DiskGb -or $c.phase -notin @('planned','applying','image-ready','ready')){return 'needs-recovery'}
+            $disk=Assert-InstallDiskPath ([string]$c.diskPath) $Vm
+            $drives=@(Assert-InstallDrives $Vm $disk)
+            if($c.phase -eq 'ready') {
+                if($drives.Count -ne 1){return 'needs-recovery'}
+                $null=Confirm-WindowsDisk $c $Vm -AllowAttached:$true
+                return 'ready'
+            }
+            if($c.phase -eq 'image-ready') {
+                if($drives.Count -ne 0){return 'needs-recovery'}
+                $null=Confirm-WindowsDisk $c $Vm
+                return 'image-ready'
+            }
+            if($drives.Count -gt 0 -or [IO.File]::Exists($disk)){return 'needs-recovery'}
+            return 'empty'
+        } catch { return 'needs-recovery' }
+    }
+    $ready=Assert-LocalPath (Join-Path $Vm.Path '.windows-applied') $Vm.Path
+    $legacy=([IO.File]::Exists($ready)) -and ([IO.File]::ReadAllText($ready)).Trim() -eq 'applied'
+    if($legacy) {
+        try {
+            if(-not [IO.File]::Exists($defaultDisk)){return 'needs-recovery'}
+            $vhd=Get-VHD -Path $defaultDisk
+            if($vhd.Size -ne ([long]$o.DiskGb*1GB) -or $vhd.VhdFormat -ne 'VHDX' -or $vhd.VhdType -ne 'Dynamic' -or $vhd.ParentPath){return 'needs-recovery'}
+            if($drives.Count -eq 1){return 'ready'}
+            if($drives.Count -eq 0 -and -not $vhd.Attached){return 'image-ready'}
+            return 'needs-recovery'
+        } catch { return 'needs-recovery' }
+    }
+    if($drives.Count -eq 0 -and -not [IO.File]::Exists($defaultDisk)){return 'empty'}
+    return 'needs-recovery'
+}
 function Complete-WindowsDisk($Vm,$Checkpoint) {
     $script:windowsInstallStage='attach-vhd'
     $path=Assert-InstallDiskPath ([string]$Checkpoint.diskPath) $Vm
@@ -584,11 +624,13 @@ try {
     while($null -ne ($line=$reader.ReadLine())) {
         $script:windowsInstallStage=''
         $script:windowsNativeCode=$null
+        $script:hypervSubstage=''
         $response=@{ok=$false;value='';code='HYPERV_STEP_FAILED'}
         try {
             $request=$line | ConvertFrom-Json;$d=$request.data
             if($request.operation -eq 'exit'){break}
             if($request.operation -eq 'init') {
+                $script:hypervSubstage='init-options'
                 $o=$d.options
                 $verificationOnly=[bool]$d.verificationOnly
                 if(-not $o -or $o.PlatformId -ne 'hyperv' -or $o.VmName -notmatch '^[a-zA-Z0-9_-]{1,50}$' -or -not [IO.Path]::IsPathFullyQualified($o.Root) -or $o.Root.StartsWith('\\') -or ([IO.Path]::GetPathRoot($o.Root).TrimEnd('\') -eq $o.Root.TrimEnd('\'))){throw 'VM_SCOPE'}
@@ -598,33 +640,70 @@ try {
                 if(-not $o){throw 'VM_SCOPE'}
                 if($verificationOnly -and $request.operation -ne 'boundary-verify'){throw 'UNSUPPORTED_OPERATION'}
                 if($request.operation -eq 'prepare') {
+                    $script:hypervSubstage='edition-check'
                     $edition=(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
                     if($edition -notmatch '^(Professional|Enterprise|Education)'){throw 'HYPERV_EDITION'}
-                    $feature=Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
+                    $script:hypervSubstage='query-feature'
+                    try {
+                        $feature=Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop
+                    } catch {
+                        $hr=[int]$_.Exception.GetBaseException().HResult
+                        if($hr -eq -2146498548){throw 'HYPERV_FEATURE_NOT_FOUND'}
+                        throw 'HYPERV_FEATURE_QUERY_FAILED'
+                    }
+                    if(-not $feature){throw 'HYPERV_FEATURE_NOT_FOUND'}
                     if($feature.State -in @('EnablePending','DisablePending')){throw 'HYPERV_RESTART'}
-                    if($feature.State -ne 'Enabled') {Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart | Out-Null;throw 'HYPERV_RESTART'}
+                    if($feature.State -ne 'Enabled') {
+                        $script:hypervSubstage='enable-feature'
+                        try {
+                            Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart -ErrorAction Stop | Out-Null
+                        } catch {
+                            $hr=[int]$_.Exception.GetBaseException().HResult
+                            if($hr -eq -2146498548){throw 'HYPERV_FEATURE_NOT_FOUND'}
+                            throw
+                        }
+                        throw 'HYPERV_RESTART'
+                    }
+                    $script:hypervSubstage='import-module'
                     try { Import-Module Hyper-V -ErrorAction Stop } catch { throw 'HYPERV_MODULE_UNAVAILABLE' }
+                    $script:hypervSubstage='check-vmms'
                     $service = Get-Service vmms -ErrorAction SilentlyContinue
                     if (!$service) { throw 'HYPERV_VMMS_MISSING' }
                     if ($service.StartType -eq 'Disabled') { throw 'HYPERV_VMMS_DISABLED' }
                     if ($service.Status -ne 'Running') { throw 'HYPERV_VMMS_STOPPED' }
                     $value='ready'
                 } else {
+                    $script:hypervSubstage='import-module'
                     Import-Module Hyper-V -ErrorAction Stop
                     switch($request.operation) {
                         'ensure' {
+                            $script:hypervSubstage='resolve-vm'
                             $value=Resolve-OrCreateTaskVm $d
                         }
+                        'windows-install-state' {
+                            $vm=Target-VM $d
+                            $value=Get-WindowsInstallProbe $vm
+                        }
                         'configure' {
+                            $script:hypervSubstage='target-vm'
                             $vm=Target-VM $d;if($vm.State -ne 'Off'){throw 'VM_SCOPE'}
+                            $script:hypervSubstage='remove-nics'
                             Get-VMNetworkAdapter -VM $vm | Remove-VMNetworkAdapter
+                            $script:hypervSubstage='guard-console'
                             Guard-Console $vm
+                            $script:hypervSubstage='disable-metadata'
                             Disable-HostMetadata $vm
+                            $script:hypervSubstage='set-processor'
                             Set-VMProcessor -VM $vm -Count ([int]$o.CpuCount)
+                            $script:hypervSubstage='set-memory'
                             Set-VMMemory -VM $vm -DynamicMemoryEnabled $false -StartupBytes ([long]$o.MemoryMb*1MB)
+                            $script:hypervSubstage='set-firmware'
                             Set-VMFirmware -VM $vm -EnableSecureBoot On -SecureBootTemplate MicrosoftWindows
+                            $script:hypervSubstage='enable-vtpm'
                             Enable-TaskVirtualTpm $vm
+                            $script:hypervSubstage='verify-security'
                             if(-not (Get-VMSecurity -VM $vm).TpmEnabled -or [string](Get-VMFirmware -VM $vm).SecureBoot -ne 'On'){throw 'VM_SECURITY'}
+                            $script:hypervSubstage='set-vm-options'
                             Set-VM -VM $vm -AutomaticStartAction Nothing -AutomaticStopAction ShutDown
                             try{Set-VM -VM $vm -EnhancedSessionTransportType HvSocket -ErrorAction SilentlyContinue}catch{}
                             $value='configured'
@@ -784,12 +863,20 @@ try {
             $response=@{ok=$true;value=[string]$value;code='OK'}
         }catch {
             $code=$_.Exception.Message
-            if($code -notmatch '^(GUEST_BRIDGE_(2[0-9]|3[01])|GUEST_COPY_(INVALID|DIRECTORY|DISK_FULL|HASH|SOURCE)|HYPERV_(MODULE_UNAVAILABLE|VMMS_MISSING|VMMS_DISABLED|VMMS_STOPPED))$' -and $code -notin @('HYPERV_RESTART','HYPERV_EDITION','HYPERV_SWITCH','HYPERV_NOT_READY','VM_SCOPE','VM_COLLISION','DISK_SCOPE','HYPERV_DISK_RECOVERY','HYPERV_DISK_MOUNTED','WINDOWS_MEDIA_UNSUPPORTED','WINDOWS_IMAGE_APPLY_FAILED','WINDOWS_BOOT_FILES_FAILED','GUEST_COMMAND_FAILED','GUEST_SHUTDOWN_PENDING','BOUNDARY_NICS','BOUNDARY_SERVICE','BOUNDARY_METADATA','HYPERV_CONSOLE_CONSENT','HYPERV_CONSOLE_SHUTDOWN','HYPERV_CONSOLE_POLICY','GUEST_LOGIN_REQUIRED','VM_SECURITY','VM_KEY_PROTECTOR_READ_FAILED','VM_KEY_PROTECTOR_SETUP_FAILED','VM_TPM_ENABLE_FAILED','UNSUPPORTED_OPERATION')){$code='HYPERV_STEP_FAILED'}
+            if($code -notmatch '^(GUEST_BRIDGE_(2[0-9]|3[01])|GUEST_COPY_(INVALID|DIRECTORY|DISK_FULL|HASH|SOURCE)|HYPERV_(MODULE_UNAVAILABLE|VMMS_MISSING|VMMS_DISABLED|VMMS_STOPPED|FEATURE_NOT_FOUND|FEATURE_QUERY_FAILED))$' -and $code -notin @('HYPERV_RESTART','HYPERV_EDITION','HYPERV_SWITCH','HYPERV_NOT_READY','VM_SCOPE','VM_COLLISION','DISK_SCOPE','HYPERV_DISK_RECOVERY','HYPERV_DISK_MOUNTED','WINDOWS_MEDIA_UNSUPPORTED','WINDOWS_IMAGE_APPLY_FAILED','WINDOWS_BOOT_FILES_FAILED','GUEST_COMMAND_FAILED','GUEST_SHUTDOWN_PENDING','BOUNDARY_NICS','BOUNDARY_SERVICE','BOUNDARY_METADATA','HYPERV_CONSOLE_CONSENT','HYPERV_CONSOLE_SHUTDOWN','HYPERV_CONSOLE_POLICY','GUEST_LOGIN_REQUIRED','VM_SECURITY','VM_KEY_PROTECTOR_READ_FAILED','VM_KEY_PROTECTOR_SETUP_FAILED','VM_TPM_ENABLE_FAILED','UNSUPPORTED_OPERATION')){$code='HYPERV_STEP_FAILED'}
             $response=@{ok=$false;value='';code=$code}
+            $cause=$_.Exception.GetBaseException()
+            $response.errorOperation=[string]$request.operation
+            $substage=if($script:windowsInstallStage){$script:windowsInstallStage}elseif($script:hypervSubstage){$script:hypervSubstage}else{''}
+            if($substage){$response.errorSubstage=[string]$substage}
+            if($null -ne $cause){$response.errorHResult=[int]$cause.HResult}
+            if($cause -is [ComponentModel.Win32Exception]){$response.errorNativeCode=[int]$cause.NativeErrorCode}
+            elseif($LASTEXITCODE -and $LASTEXITCODE -ne 0){$response.errorNativeCode=[int]$LASTEXITCODE}
+            if($_.CategoryInfo -and $_.CategoryInfo.Category){$response.errorCategory=[string]$_.CategoryInfo.Category}
             if($code -eq 'HYPERV_STEP_FAILED' -and $request.operation -in @('copy-to','copy-from')){
                 $response.copyErrorStage = $script:copyStage
                 $response.copyErrorCategory=[string]$_.CategoryInfo.Category
-                $response.copyErrorHResult=[int]$_.Exception.GetBaseException().HResult
+                $response.copyErrorHResult=[int]$cause.HResult
             }
             if($code -eq 'VM_TPM_ENABLE_FAILED' -and $null -ne $script:tpmErrorHResult){
                 $response.tpmErrorHResult = $script:tpmErrorHResult
@@ -799,7 +886,6 @@ try {
                 if($null -ne $script:windowsNativeCode){
                     $response.windowsNativeCode=[int]$script:windowsNativeCode
                 }elseif($code -eq 'HYPERV_STEP_FAILED'){
-                    $cause=$_.Exception.GetBaseException()
                     if($cause -is [ComponentModel.Win32Exception]){$response.windowsNativeCode=$cause.NativeErrorCode}
                     elseif($cause -isnot [Management.Automation.RuntimeException]){$response.windowsNativeCode=$cause.HResult}
                 }

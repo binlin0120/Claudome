@@ -10,10 +10,12 @@ public sealed record ResumePlan(bool CreateMachine,bool InstallWindows,string Re
     {
         if(state.Completed.Any(x=>new[]{"machine","windows-started","guest-ready","guest-files","software"}.Contains(x)) && !Guid.TryParse(state.VmId,out _))throw new SetupException("任务记录缺少原虚拟机身份，未重新创建虚拟机。请载入完整的原任务。");
         var create=string.IsNullOrEmpty(state.VmId);
-        var install=!state.Completed.Contains("windows-started")&&!state.Completed.Contains("guest-ready");
+        var install=!HasWindowsInstallStarted(state);
         var title=state.Completed.Contains("guest-ready")?"恢复任务：继续来宾配置与验收":state.Completed.Contains("windows-started")?"恢复任务：等待原 Windows 安装与来宾工具":"恢复任务：继续准备 Windows 安装";
         return new(create,install,title);
     }
+    internal static bool HasWindowsInstallStarted(SessionState state) =>
+        state.Completed.Contains("windows-started") || state.Completed.Contains("guest-ready");
     internal static bool CanResumeBrowser(SessionState state, bool checkSavedNetwork = false) =>
         Guid.TryParse(state.VmId, out _) && state.Options.NetworkSource != "稍后配置" &&
         // This checkpoint selects the next phase. The guest must still verify the live network.

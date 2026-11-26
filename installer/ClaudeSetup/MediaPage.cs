@@ -36,12 +36,22 @@ public sealed partial class SetupWindow
         selectedMedia=null;windowsImages.ItemsSource=null;license.IsChecked=false;
         mediaDetails.Text="尚未识别镜像。Windows 10、Server、ARM64、Linux 及无法识别的介质不会进入当前 Windows 11 x64 安装流程。";RefreshConsent();
     }
-    private void ApplyMedia(WindowsMediaIdentity media,int preferredIndex)
+    internal static int ResolvePreferredImageIndex(WindowsMediaIdentity media, int? explicitIndex, bool preserveExplicitSelection)
     {
-        media.Validate();selectedMedia=media;isoHash.Text=media.Sha256;
-        windowsImages.ItemsSource=media.Images;windowsImages.SelectedValue=preferredIndex;
-        if(windowsImages.SelectedIndex<0)windowsImages.SelectedIndex=0;
-        license.IsChecked=false;RefreshConsent();
+        if (preserveExplicitSelection && explicitIndex is int target &&
+            media.Images.FirstOrDefault(x => x.Index == target && !x.IsHomeChinaBlocked) is { } preserved)
+            return preserved.Index;
+        if (media.Images.FirstOrDefault(x => !x.IsHomeChinaBlocked && x.Edition.Equals("Professional", StringComparison.OrdinalIgnoreCase)) is { } pro)
+            return pro.Index;
+        return media.Images.FirstOrDefault(x => !x.IsHomeChinaBlocked)?.Index ?? media.Images[0].Index;
+    }
+
+    private void ApplyMedia(WindowsMediaIdentity media, int preferredIndex)
+    {
+        media.Validate(); selectedMedia = media; isoHash.Text = media.Sha256;
+        windowsImages.ItemsSource = media.Images; windowsImages.SelectedValue = preferredIndex;
+        if (windowsImages.SelectedIndex < 0) windowsImages.SelectedIndex = 0;
+        license.IsChecked = false; RefreshConsent();
     }
     private delegate Task<WindowsMediaIdentity> MediaReader(string workspaceRoot, string isoPath,
         IProgress<string> messages, IProgress<DownloadProgress> downloads, CancellationToken token);
@@ -70,6 +80,7 @@ public sealed partial class SetupWindow
         var expectedRoot = System.IO.Path.GetFullPath(workspaceRoot);
         var isoPath = iso.Text.Trim();
         var preferredIndex = int.TryParse(imageIndex.Text, out var index) ? index : 1;
+        var previousMediaSha = selectedMedia?.Sha256 ?? "";
         using var operation = new CancellationTokenSource();
         mediaCancellation = operation;
         mediaBusy = true;
@@ -109,8 +120,15 @@ public sealed partial class SetupWindow
                 banner.Text = "镜像检查结果未应用（操作已取消或当前任务目录已切换）。";
                 return;
             }
-            ApplyMedia(media, preferredIndex);
-            banner.Text = "已读取镜像版本。请选择你的许可对应的版本，并重新确认授权。";
+            var sameSavedMedia = (!string.IsNullOrWhiteSpace(previousMediaSha) && previousMediaSha.Equals(media.Sha256, StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrWhiteSpace(state.Options.IsoSha256) && state.Options.IsoSha256.Equals(media.Sha256, StringComparison.OrdinalIgnoreCase));
+            var resolvedIndex = ResolvePreferredImageIndex(media, preferredIndex, sameSavedMedia);
+            ApplyMedia(media, resolvedIndex);
+            var picked = windowsImages.SelectedItem as WindowsImageChoice;
+            var hasPro = media.Images.Any(x => !x.IsHomeChinaBlocked && x.Edition.Equals("Professional", StringComparison.OrdinalIgnoreCase));
+            banner.Text = !sameSavedMedia && !hasPro && picked is not null
+                ? $"已读取镜像版本（未检测到专业版，已暂选「{picked.Name}」）。请核对选择你的许可对应版本，并重新确认授权。"
+                : "已读取镜像版本。请核对所选版本是否符合你的使用许可，并重新确认授权。";
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {

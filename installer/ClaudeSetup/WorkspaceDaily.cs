@@ -24,6 +24,12 @@ public sealed partial class SetupWindow
             return;
         }
         if (string.IsNullOrEmpty(state.VmId)) return;
+        if (!ResumePlan.HasWindowsInstallStarted(state))
+        {
+            Notice("原虚拟机尚未开始写入 Windows 系统，请先前往「安装向导 → 6 开始安装」点击「开始 / 继续部署」。");
+            Go(5);
+            return;
+        }
         enteringWorkspace = true;
         try
         {

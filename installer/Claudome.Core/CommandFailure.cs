@@ -48,7 +48,40 @@ public static class CommandFailure
         _ => "执行来宾操作"
     };
     private static string HyperVOperation(string operation)=>operation switch {
-        "init" or "prepare"=>"准备管理组件","ensure"=>"核对原虚拟机身份","configure"=>"配置原虚拟机","windows"=>"安装 Windows","ready"=>"检查来宾就绪状态","running"=>"读取原虚拟机状态","shutdown"=>"请求原虚拟机正常关机","guest"=>"执行来宾命令","copy-to" or "copy-from"=>"传送来宾文件","cleanup" or "cleanup-recovery"=>"清理任务安装介质","open"=>"连接原虚拟机","boundary-prepare" or "boundary-verify" or "boundary-offline"=>"核对任务网络通道","console-restore"=>"恢复会话设置",_=>"执行管理操作"
+        "init" or "prepare"=>"准备管理组件","ensure"=>"核对原虚拟机身份","configure"=>"配置原虚拟机","windows"=>"安装 Windows","windows-install-state"=>"核对系统盘检查点","ready"=>"检查来宾就绪状态","running"=>"读取原虚拟机状态","shutdown"=>"请求原虚拟机正常关机","guest"=>"执行来宾命令","copy-to" or "copy-from"=>"传送来宾文件","cleanup" or "cleanup-recovery"=>"清理任务安装介质","open"=>"连接原虚拟机","boundary-prepare" or "boundary-verify" or "boundary-offline"=>"核对任务网络通道","console-restore"=>"恢复会话设置","set-clipboard" or "clipboard-status"=>"读写剪贴板与会话策略",_=>"执行管理操作"
+    };
+    internal static string HyperVSubstageLabel(string? substage) => substage switch
+    {
+        "init-options" => "校验任务目录与身份",
+        "edition-check" => "核对宿主机系统版本",
+        "query-feature" => "查询 Hyper-V 可选功能",
+        "enable-feature" => "启用 Hyper-V 可选功能",
+        "import-module" => "加载 Hyper-V PowerShell 模块",
+        "check-vmms" => "检查 vmms 服务状态",
+        "resolve-vm" => "创建或核对任务虚拟机",
+        "target-vm" => "核对虚拟机身份",
+        "remove-nics" => "清理普通虚拟网卡",
+        "guard-console" => "应用控制台安全策略",
+        "disable-metadata" => "关闭主机数据交换服务",
+        "set-processor" => "配置虚拟 CPU",
+        "set-memory" => "配置静态内存",
+        "set-firmware" => "启用 UEFI 安全启动",
+        "enable-vtpm" => "启用虚拟 TPM",
+        "verify-security" => "回读安全启动与 vTPM",
+        "set-vm-options" => "设置启停与传输选项",
+        "checkpoint" => "核对安装检查点",
+        "new-vhd" => "创建虚拟硬盘",
+        "mount-vhd" => "挂载虚拟硬盘",
+        "partitions" => "创建并格式化虚拟硬盘分区",
+        "mount-iso" => "挂载并定位安装镜像",
+        "read-image" => "读取安装索引",
+        "apply-image" => "写入 Windows 系统映像",
+        "bootstrap" => "准备来宾首次启动文件",
+        "bcdboot" => "写入 Windows 引导文件",
+        "attach-vhd" => "将系统盘接入原虚拟机",
+        "boot-config" => "设置原虚拟机的启动顺序",
+        "start-vm" => "启动原虚拟机",
+        _ => ""
     };
     internal static string HyperVWindowsStage(JsonElement report)
     {
@@ -78,7 +111,7 @@ public static class CommandFailure
 
     public static string HyperV(string operation,string? code,string message)
     {
-        var known=new[]{"GUEST_BRIDGE_20","GUEST_BRIDGE_21","GUEST_BRIDGE_22","GUEST_BRIDGE_23","GUEST_BRIDGE_24","GUEST_BRIDGE_25","GUEST_BRIDGE_26","GUEST_BRIDGE_27","GUEST_BRIDGE_28","GUEST_BRIDGE_29","GUEST_BRIDGE_30","GUEST_BRIDGE_31","GUEST_COPY_INVALID","GUEST_COPY_DIRECTORY","GUEST_COPY_DISK_FULL","GUEST_COPY_HASH","GUEST_COPY_SOURCE","HYPERV_STEP_FAILED","HYPERV_RESTART","HYPERV_EDITION","HYPERV_SWITCH","HYPERV_NOT_READY","HYPERV_MODULE_UNAVAILABLE","HYPERV_VMMS_MISSING","HYPERV_VMMS_DISABLED","HYPERV_VMMS_STOPPED","VM_SCOPE","VM_COLLISION","DISK_SCOPE","VM_SECURITY","VM_KEY_PROTECTOR_READ_FAILED","VM_KEY_PROTECTOR_SETUP_FAILED","VM_TPM_ENABLE_FAILED","BOUNDARY_NICS","BOUNDARY_SERVICE","BOUNDARY_METADATA","HYPERV_CONSOLE_POLICY","WINDOWS_MEDIA_UNSUPPORTED","WINDOWS_IMAGE_APPLY_FAILED","WINDOWS_BOOT_FILES_FAILED","GUEST_COMMAND_FAILED","GUEST_SHUTDOWN_PENDING","UNSUPPORTED_OPERATION"};
+        var known=new[]{"GUEST_BRIDGE_20","GUEST_BRIDGE_21","GUEST_BRIDGE_22","GUEST_BRIDGE_23","GUEST_BRIDGE_24","GUEST_BRIDGE_25","GUEST_BRIDGE_26","GUEST_BRIDGE_27","GUEST_BRIDGE_28","GUEST_BRIDGE_29","GUEST_BRIDGE_30","GUEST_BRIDGE_31","GUEST_COPY_INVALID","GUEST_COPY_DIRECTORY","GUEST_COPY_DISK_FULL","GUEST_COPY_HASH","GUEST_COPY_SOURCE","HYPERV_STEP_FAILED","HYPERV_RESTART","HYPERV_EDITION","HYPERV_SWITCH","HYPERV_NOT_READY","HYPERV_MODULE_UNAVAILABLE","HYPERV_VMMS_MISSING","HYPERV_VMMS_DISABLED","HYPERV_VMMS_STOPPED","HYPERV_FEATURE_NOT_FOUND","HYPERV_FEATURE_QUERY_FAILED","VM_SCOPE","VM_COLLISION","DISK_SCOPE","VM_SECURITY","VM_KEY_PROTECTOR_READ_FAILED","VM_KEY_PROTECTOR_SETUP_FAILED","VM_TPM_ENABLE_FAILED","BOUNDARY_NICS","BOUNDARY_SERVICE","BOUNDARY_METADATA","HYPERV_CONSOLE_POLICY","WINDOWS_MEDIA_UNSUPPORTED","WINDOWS_IMAGE_APPLY_FAILED","WINDOWS_BOOT_FILES_FAILED","GUEST_COMMAND_FAILED","GUEST_SHUTDOWN_PENDING","UNSUPPORTED_OPERATION"};
         return $"Hyper-V 在“{HyperVOperation(operation)}”时未完成（{(known.Contains(code)?code:"HYPERV_STEP_FAILED")}）。{message}";
     }
     public static string Vix(string operation,ulong code)

@@ -13,7 +13,7 @@ public static class CustomerGuide
     internal static UserAction ManualAdsPower() => new("手动配置与检查 AdsPower", [
         ManualProfile,
         ManualProxyType + ProxyChecks,
-        "按左侧指引检查 Windows 和 WebRTC 等设置，保存后打开该环境，访问 https://ip.net.coffee/claude/ 核对实际出口。"
+        "按「检测出错问题 → 操作指引与检测网址」核对 Windows 和 WebRTC 等设置，保存后打开该环境，访问 https://ip.net.coffee/claude/ 核对实际出口。"
     ], ManualAdsPowerId);
 
     public static string Country(string code)=>RegionCatalog.All.FirstOrDefault(r=>r.Code.Equals(code,StringComparison.OrdinalIgnoreCase))?.Label??"所选节点的实际出口地区";
@@ -21,16 +21,16 @@ public static class CustomerGuide
         new CustomerGuideStep("language","1. Windows 语言","使用中文镜像时选择简体中文；使用英文镜像时可选 English (United States)。显示语言按本人习惯选择，不决定网络出口。"),
         new("region","2. 国家或地区","国家/地区按本任务出口选择："+Country(options.Country)+"。美国线路就选美国，语言和键盘可以继续使用中文。"),
         new("keyboard","3. 键盘与输入法","需要中文输入时选择微软拼音；英文输入可保留 US 键盘。是否添加第二种键盘按本人习惯，暂不需要时点“跳过”。"),
-        new("network","4. 连接网络","程序会经所选节点自动准备安装网络，检查通过后在 Windows 点“下一步”。仍显示“无 Internet”时点左侧“一键连接网络”，复用原任务检查。\n\n“安装驱动程序”会打开驱动文件夹选择器；只有明确缺少网卡驱动时才使用，不是连接网络按钮。不要随便选择安装光盘目录。"),
+        new("network","4. 连接网络","程序会经所选节点自动准备安装网络，检查通过后在 Windows 点“下一步”。仍显示“无 Internet”时点「检测出错问题 → 一键连接网络」，复用原任务检查。\n\n“安装驱动程序”会打开驱动文件夹选择器；只有明确缺少网卡驱动时才使用，不是连接网络按钮。不要随便选择安装光盘目录。"),
         new("account","5. 账号与密码","如已自动进入桌面，直接继续。需要输入本地账号时使用本任务设置的独立账号“"+options.UserName+"”及本人保存的虚拟机密码。微软账号、验证码与许可页面由本人决定和完成；不要在反馈截图中显示密码。"),
         new("privacy","6. 隐私与附加服务","隐私选项按本人需要选择。出现 OneDrive、Microsoft 365 或设备用途页面时，可按实际按钮选择跳过或继续；程序不会替你订阅、付款或处理账号验证。"),
-        new("updates","7. 更新和首次启动","Windows 更新、自动重启与“请稍候”期间保持助手开启。程序保留原磁盘与安装进度。持续没有变化时查看“黑屏与启动诊断”，不要反复新建虚拟机。"),
-        new("tools","8. 来宾工具与桌面","新建任务会自动完成本地账号与来宾工具安装。若此前手动完成了 Windows 初始设置：进入桌面后程序会自动挂载来宾工具光盘，在虚拟机打开「此电脑」双击 VirtualBox Guest Additions 运行 VBoxWindowsAdditions.exe 安装；若账号或密码与助手记录不同，点击左侧「同步虚拟机账号密码」即可自动进入第 5/7 步。")
+        new("updates","7. 更新和首次启动","Windows 更新、自动重启与“请稍候”期间保持助手开启。程序保留原磁盘与安装进度。持续没有变化时查看「检测出错问题 → 黑屏与启动诊断」，不要反复新建虚拟机。"),
+        new("tools","8. 来宾工具与桌面","新建任务会自动完成本地账号与来宾工具安装。若此前手动完成了 Windows 初始设置：进入桌面后" + (options.PlatformId == "virtualbox" ? "程序会自动挂载来宾工具光盘，在虚拟机打开「此电脑」双击 VirtualBox Guest Additions 运行 VBoxWindowsAdditions.exe 安装；" : "请在桌面顶部操作栏核对连接与剪贴板状态；") + "若账号或密码与助手记录不同，点击「检测出错问题 → 同步虚拟机账号密码」（或顶部操作栏「同步虚拟机密码」）即可自动进入第 5/7 步。")
     };
     public static IReadOnlyList<CustomerGuideStep> Software(SetupOptions options)=>new[] {
         new CustomerGuideStep("ads-login","1. 打开 AdsPower 和专用环境", options.ManualAdsPower
             ? ManualProfile
-            : "在虚拟机中打开 AdsPower Browser，登录自己的账号。使用助手创建并绑定的 Claude 专用环境（名称形如 Claude-xxxxxxxx）。如果要自己配置现有环境，可在左侧切换到手动模式。"),
+            : "在虚拟机中打开 AdsPower Browser，登录自己的账号。使用助手创建并绑定的 Claude 专用环境（名称形如 Claude-xxxxxxxx）。如果要自己配置现有环境，可在桌面顶部操作栏切换到手动模式。"),
         new("ads-os","2. 检查基础设置","在「基础设置」核对操作系统为 Windows。若当前选中 Linux 的企鹅图标，切换到 Windows 图标。User-Agent 保持「全部」。"),
         new("ads-proxy","3. 检查代理信息", options.ManualAdsPower
             ? ManualProxyType + "\n\n" + ProxyChecks

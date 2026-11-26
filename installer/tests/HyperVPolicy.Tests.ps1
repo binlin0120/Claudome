@@ -7,7 +7,7 @@ $ErrorActionPreference='Stop'
 $worker=Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($worker,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'PRODUCTION_PARSE_FAILED'}
-$names=@('Invoke-ConsolePolicyLock','Console-Owner','Use-BasicConsolePolicy','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm','Assert-LocalPath','Test-OwnedVmMarker','Save-OwnedVmMarker','Resolve-OrCreateTaskVm')
+$names=@('Invoke-ConsolePolicyLock','Console-Owner','Use-BasicConsolePolicy','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm','Assert-LocalPath','Test-OwnedVmMarker','Save-OwnedVmMarker','Resolve-OrCreateTaskVm','Assert-InstallDiskPath','Assert-InstallDrives','Confirm-WindowsDisk','Get-WindowsInstallProbe')
 foreach($name in $names){$definition=$ast.FindAll({param($a)$a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq $name},$true) | Select-Object -First 1;if(-not $definition){throw 'FUNCTION_MISSING'};Invoke-Expression -Command $definition.Extent.Text}
 $script:store=@{};$script:policyEnabled=$true;$script:nicCount=0;$script:metadataEnabled=$true;$script:changes=0
 $script:o=[pscustomobject]@{WorkspaceId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';HyperVBasicConsoleConfirmed=$false}
@@ -294,6 +294,40 @@ Check 'clipboard-guest-script-stops-sync-and-verifies-policy-with-read-only-refr
     $script:clipboardFixturePolicy['fDisableCdm'] = 0
     Assert-Case ((& $guestScript -Mode ReadEnabled) -ceq 'CLIP_POLICY_MISMATCH')
     Assert-Case ($script:clipboardFixtureWrites -eq 16)
+}
+Check 'hyperv-windows-install-probe-distinguishes-empty-ready-and-needs-recovery' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('hv-probe-' + [guid]::NewGuid().ToString('N'))
+    $vmDir = Join-Path $tempRoot 'machines\ProbeVm'
+    $savedO = $script:o
+    $savedGetDrives = ${function:Get-VMHardDiskDrive}
+    $savedGetVhd = ${function:Get-VHD}
+    try {
+        [IO.Directory]::CreateDirectory($vmDir) | Out-Null
+        $vmId = [guid]'77777777-7777-7777-7777-777777777777'
+        $vm = [pscustomobject]@{ Id = $vmId; Path = $vmDir; Name = 'ProbeVm' }
+        $script:o = [pscustomobject]@{ Root = $tempRoot; WorkspaceId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; IsoSha256 = ('a' * 64); WindowsImageIndex = 4; UserName = 'ClaudeUser'; DiskGb = 80 }
+        $script:probeDrives = @()
+        $diskPath = Join-Path $vmDir 'Windows11.vhdx'
+        $script:probeDiskGuid = [guid]'88888888-8888-8888-8888-888888888888'
+        function script:Get-VMHardDiskDrive($VM) { $script:probeDrives }
+        function script:Get-VHD([string]$Path) { [pscustomobject]@{ Path = $Path; DiskIdentifier = $script:probeDiskGuid; Size = 80L * 1GB; VhdFormat = 'VHDX'; VhdType = 'Dynamic'; ParentPath = $null; Attached = $true } }
+
+        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'empty')
+        $script:probeDrives = @([pscustomobject]@{ Path = $diskPath })
+        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'needs-recovery')
+        $cpPath = Join-Path $vmDir '.windows-install.json'
+        @{ schema = 1; vmId = [string]$vmId; workspaceId = $script:o.WorkspaceId; isoSha256 = $script:o.IsoSha256; imageIndex = 4; userName = 'ClaudeUser'; diskGb = 80; diskPath = $diskPath; diskId = [string]$script:probeDiskGuid; phase = 'ready'; preservedDisks = @() } |
+            ConvertTo-Json | Set-Content -LiteralPath $cpPath -Encoding utf8NoBOM
+        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'ready')
+        @{ schema = 1; vmId = [string]$vmId; workspaceId = 'wrong-workspace'; isoSha256 = $script:o.IsoSha256; imageIndex = 4; userName = 'ClaudeUser'; diskGb = 80; diskPath = $diskPath; diskId = [string]$script:probeDiskGuid; phase = 'ready'; preservedDisks = @() } |
+            ConvertTo-Json | Set-Content -LiteralPath $cpPath -Encoding utf8NoBOM
+        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'needs-recovery')
+    } finally {
+        $script:o = $savedO
+        if ($savedGetDrives) { Set-Item function:script:Get-VMHardDiskDrive -Value $savedGetDrives } else { Remove-Item function:script:Get-VMHardDiskDrive -ErrorAction SilentlyContinue }
+        if ($savedGetVhd) { Set-Item function:script:Get-VHD -Value $savedGetVhd } else { Remove-Item function:script:Get-VHD -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 # Call the real .NET file API directly; the mock registry provider remains scoped

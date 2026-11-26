@@ -183,16 +183,34 @@ public sealed partial class SetupWindow : Window
     private void BuildPages()
     {
         for (int i = 0; i < 6; i++) pages.Add(new StackPanel());
-        hostText.FontSize = 16; hostText.TextWrapping = TextWrapping.Wrap; hostText.LineHeight = 29; hostText.Margin = new Thickness(0, 0, 0, 14);
-        hostNote.TextWrapping = TextWrapping.Wrap; hostNote.Foreground = Muted; hostNote.LineHeight = 23;
+        hostText.FontSize = 15; hostText.TextWrapping = TextWrapping.Wrap; hostText.LineHeight = 22; hostText.Margin = new Thickness(0, 0, 0, 5);
+        hostNote.TextWrapping = TextWrapping.Wrap; hostNote.Foreground = Muted; hostNote.FontSize = 12; hostNote.LineHeight = 18; hostNote.Margin = new Thickness(0, 0, 0, 6);
         var hostActions = Row(Action("重新检查", (_, _) => RefreshHost()), Action("载入已有安装任务", (_, _) => LoadTask()));
+        hostActions.Margin = new Thickness(0, 2, 0, 2);
         if (ProductProfile.IsHyperVStandalone)
             hostActions.Children.Add(Action("启用 / 核对 Hyper-V 功能", async (_, _) => await EnableHyperVHostFeatureAsync()));
-        pages[0].Children.Add(Card(Text("当前电脑", 16, false), hostText, hostNote, hostActions));
+        var hostTitle = Text("当前电脑", 15, false);
+        hostTitle.Margin = new Thickness(0, 0, 0, 6);
+        var hostCard = Card(hostTitle, hostText, hostNote, hostActions);
+        hostCard.Padding = new Thickness(18, 12, 18, 12);
+        hostCard.Margin = new Thickness(0, 0, 5, 9);
+        pages[0].Children.Add(hostCard);
         platform.DisplayMemberPath = "Label"; platform.SelectedValuePath = "Id";
         platform.SelectionChanged += (_, _) => { if(hyperVConsoleCard is not null) hyperVConsoleCard.Visibility = platform.SelectedValue?.ToString() == "hyperv" ? Visibility.Visible : Visibility.Collapsed; ApplyRecommendedCpuIfNotCustom(); UpdateCreationCpuNemWarning(); if (platform.SelectedItem is PlatformChoice choice) { platformReason.Text = choice.Reason + "\n" + string.Join("\n", choice.Instructions); RefreshConsent(); } };
         RefreshPlatforms();
-        pages[0].Children.Add(Card(Field("选择虚拟机方案（按这台电脑的推荐度排序）", platform), platformReason, Text("推荐度综合系统版本、架构、硬件虚拟化与已有软件；自动部署能力单独标明。Mac 在项目中另有 Fusion / Parallels / UTM 流程，此 Windows 程序不在 Mac 上运行。", 11)));
+        platformReason.FontSize = 12;
+        platformReason.LineHeight = 18;
+        platformReason.Margin = new Thickness(0, 0, 0, 6);
+        var platformField = Field("选择虚拟机方案（按这台电脑的推荐度排序）", platform);
+        platformField.Margin = new Thickness(0, 0, 0, 8);
+        if (platformField.Children[0] is TextBlock pfLabel) pfLabel.Margin = new Thickness(0, 0, 0, 6);
+        var platformFootNote = Text("推荐度综合系统版本、架构、硬件虚拟化与已有软件；自动部署能力单独标明。Mac 在项目中另有 Fusion / Parallels / UTM 流程，此 Windows 程序不在 Mac 上运行。", 11);
+        platformFootNote.LineHeight = 16;
+        platformFootNote.Margin = new Thickness(0);
+        var platformCard = Card(platformField, platformReason, platformFootNote);
+        platformCard.Padding = new Thickness(18, 12, 18, 12);
+        platformCard.Margin = new Thickness(0, 0, 5, 9);
+        pages[0].Children.Add(platformCard);
         pages[0].Children.Add(Card(Text("这次会做什么", 16, false), Text("创建独立的 Windows 虚拟机，准备网络代理与 AdsPower 环境。你可以继续使用已有订阅，自行选择节点。"), Text("所有目录选择、组件许可与管理员权限均在执行前清晰提示，现有虚拟机和本机资料不会被覆盖。"), Row(Action("查看组件来源与许可", (_, _) => ShowLicenses()))));
         pages[1].Children.Add(Card(Text("已有虚拟机？", 16, false), Text("先查看当前电脑已注册的环境，再决定新建还是载入原任务。", 12), Row(Action("扫描本机已有虚拟机", async (_, _) => await ScanMachines()), Action("载入已有安装任务", (_, _) => LoadTask())), inventoryPanel));
         cpuNemWarning.Foreground = Accent;
@@ -233,7 +251,7 @@ public sealed partial class SetupWindow : Window
         downloadIsoBtn = Action("从官网链接下载 ISO", async (_, _) => await DownloadIsoFromUrlAsync(), true);
         pages[2].Children.Add(Card(
             Text("方式二：粘贴微软官网下载链接，由程序自主下载", 17, false),
-            Text("前往微软官网选择「Windows 11（多版本 ISO）」→ 选择简体中文或英文 → 右键「立即下载（64位）」复制链接粘贴到下方，即可由程序后台高速下载并记录指纹（下载或读取镜像期间，可先点击「下一步」配置网络节点与账号资料）。", 12),
+            Text("前往微软官网找到「下载适用于 x64 设备的 Windows 11 磁盘映像 (ISO)」→ 下拉选择「Windows 11（适用于 x64 设备的多版本 ISO）」→ 点击「立即下载」→ 语言选择「简体中文」并确认 → 对随后出现的「64 位 下载」按钮右键「复制链接地址」并粘贴到下方（下载或读取镜像期间，可先点击「下一步」配置网络节点与账号资料）。", 12),
             Field("微软官网 ISO 下载直链（HTTPS）", isoUrl, "仅接受微软官方下载域（*.microsoft.com / windowsupdate.com），支持断点续传。"),
             Field("微软官网公布的 SHA-256（可选，建议填写以严格校验）", isoHash, "填写后下载完成立即核验；留空则在下载完成后由程序自动计算并记录指纹。"),
             Row(Action("打开微软 Windows 11 官网下载页", (_, _) => OpenUrl("https://www.microsoft.com/software-download/windows11")),
@@ -676,34 +694,41 @@ public sealed partial class SetupWindow : Window
         var secrets = ReadSecrets();
         secrets.BackupRoutes = [.. (pendingBackupRoutes ?? appliedSecrets?.BackupRoutes ?? [])];
         if (platform.SelectedItem is PlatformChoice selected && (!selected.Compatible || !selected.Automatic)) throw new SetupException(selected.Name + "：" + selected.Reason + "\n\n" + string.Join("\n", selected.Instructions));
-        if (o.NetworkSource != "稍后配置" && (country.SelectedValue is null || timeZone.SelectedValue is null)) throw new SetupException("请按节点实际地区选择国家和城市时区。程序不会默认采用美国时区。");
-        var currentNetworkInput = o.NetworkSource == "已有订阅链接" ? subscription.Text.Trim() : o.NetworkSource == "手动 HTTP / SOCKS5 节点" ? ManualFingerprint() : networkText.Text;
-        if (o.NetworkSource != "稍后配置" && (string.IsNullOrWhiteSpace(currentNetworkInput) || node.SelectedItem is not ProxyNode || importedInput != currentNetworkInput)) throw new SetupException("请先读取并选择一个节点；网络资料已变化或尚未载入时需重新读取，避免使用旧配置。");
-        if (state.Completed.Contains("software"))
+        var hasSavedSnapshot = HasSavedRouteSnapshot();
+        if (!applyRoute && hasSavedSnapshot)
         {
-            if (applyRoute)
+            var saved = ResolveAppliedSnapshotSecrets();
+            if (state.Options.NetworkSource != "稍后配置")
+            {
+                ValidateSavedRouteSnapshot(state.Options, saved);
+                if (HasUnappliedNetworkDraft(o, secrets, state.Options, saved))
+                    throw new SetupException("存在尚未应用的网络草稿。请在「4 网络节点」点击「应用线路」，或点击「恢复原已保存线路」后再继续部署。");
+                secrets = MergeRuntimeCredentials(saved, secrets);
+                o.NetworkSource = state.Options.NetworkSource;
+                o.NodeName = state.Options.NodeName;
+                o.ChainEnabled = state.Options.ChainEnabled;
+                o.ChainFromImport = state.Options.ChainFromImport;
+                o.UpstreamSource = state.Options.UpstreamSource;
+                o.UpstreamName = state.Options.UpstreamName;
+                o.Country = state.Options.Country;
+                o.TimeZoneId = state.Options.TimeZoneId;
+            }
+            else if (o.NetworkSource != "稍后配置")
+                throw new SetupException("存在尚未应用的网络草稿。请在「4 网络节点」点击「应用线路」，或恢复为「稍后配置」后再继续部署。");
+        }
+        else
+        {
+            if (o.NetworkSource != "稍后配置" && (country.SelectedValue is null || timeZone.SelectedValue is null)) throw new SetupException("请按节点实际地区选择国家和城市时区。程序不会默认采用美国时区。");
+            var currentNetworkInput = o.NetworkSource == "已有订阅链接" ? subscription.Text.Trim() : o.NetworkSource == "手动 HTTP / SOCKS5 节点" ? ManualFingerprint() : networkText.Text;
+            if (o.NetworkSource != "稍后配置" && (string.IsNullOrWhiteSpace(currentNetworkInput) || node.SelectedItem is not ProxyNode || importedInput != currentNetworkInput)) throw new SetupException("请先读取并选择一个节点；网络资料已变化或尚未载入时需重新读取，避免使用旧配置。");
+            if (applyRoute && state.Completed.Contains("software"))
             {
                 await RefreshSelectedRoutes(o, secrets, token);
                 await ApplyConfiguredRoute(o, secrets, token);
                 return;
             }
-            var saved = AppliedLogin();
-            if (state.Options.NetworkSource != "稍后配置")
-            {
-                if (saved.SelectedNodeJson.Length == 0) throw new SetupException("请先载入或重新填写已应用线路。");
-                if (o.NetworkSource != state.Options.NetworkSource ||
-                    !NetworkImport.SameSavedDefinition(secrets.SelectedNodeJson, saved.SelectedNodeJson) ||
-                    !NetworkImport.SameSavedDefinition(secrets.UpstreamNodeJson, saved.UpstreamNodeJson) ||
-                    secrets.ExpectedExitIp != saved.ExpectedExitIp ||
-                    o.Country != state.Options.Country || o.TimeZoneId != state.Options.TimeZoneId)
-                    throw new SetupException("存在尚未应用的网络草稿。请点「应用线路」，或恢复原配置后继续 AdsPower。");
-                secrets = saved;
-                o.NodeName = state.Options.NodeName;
-            }
-            else if (o.NetworkSource != "稍后配置")
-                throw new SetupException("请在「网络节点」点击「应用线路」。");
+            await RefreshSelectedRoutes(o, secrets, token);
         }
-        else await RefreshSelectedRoutes(o, secrets, token);
         if (File.Exists(o.StatePath))
         {
             var existing = JsonFile.Read<SessionState>(o.StatePath);
@@ -716,6 +741,8 @@ public sealed partial class SetupWindow : Window
             state = existing;
         }
         state.Options = o; RememberTask();
+        if (!string.IsNullOrEmpty(secrets.SelectedNodeJson) || o.NetworkSource == "稍后配置")
+            RememberAppliedSecrets(secrets);
         desktopConnectionPolicy.ResumeExplicitly();
         if (consoleHost?.IsAttached == true)
         {
@@ -1087,7 +1114,7 @@ public sealed partial class SetupWindow : Window
         }
         catch (Exception ex) when (interactive)
         {
-            updateStatusText.Text = "检查更新未成功（可确认代理或直接点击右侧“从本地 ZIP 更新”）：" + Redaction.SafeError(ex);
+            updateStatusText.Text = "检查更新未成功（可确认代理或点击下方“从本地 ZIP 更新”）：" + Redaction.SafeError(ex);
         }
         catch { /* Keep startup background check silent when offline. */ }
         finally
@@ -1128,7 +1155,7 @@ public sealed partial class SetupWindow : Window
                 ? string.Join("、", pending.UnrecoveredFiles)
                 : "部分核心文件";
             return (
-                $"上次原地更新失败且回滚未完成，以下文件仍未恢复原版：{filesText}。关闭占用这些文件的程序后，点右侧按钮继续从本地备份恢复。",
+                $"上次原地更新失败且回滚未完成，以下文件仍未恢复原版：{filesText}。关闭占用这些文件的程序后，点击下方按钮继续从本地备份恢复。",
                 "继续恢复原版",
                 false);
         }
@@ -1137,12 +1164,12 @@ public sealed partial class SetupWindow : Window
             if (pending.IsOriginalGroupVerifiedRestored)
             {
                 return (
-                    $"上次原地更新未完成，已核验原版程序及必需文件完整（{pending.ErrorReason}）。关闭占用文件后可点右侧按钮重试。",
+                    $"上次原地更新未完成，已核验原版程序及必需文件完整（{pending.ErrorReason}）。关闭占用文件后可点击下方按钮重试。",
                     "重试检查更新",
                     true);
             }
             return (
-                $"上次原地更新异常且未能确认原版完整（{pending.ErrorReason}）。请核实或点击右侧按钮继续恢复后重试。",
+                $"上次原地更新异常且未能确认原版完整（{pending.ErrorReason}）。请核实或点击下方按钮继续恢复后重试。",
                 "继续恢复原版",
                 false);
         }
@@ -1337,7 +1364,59 @@ public sealed partial class SetupWindow : Window
         }
         catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
     }
-    private void Notice(string text) => MessageBox.Show(this, text, ProductProfile.WindowTitle, MessageBoxButton.OK, MessageBoxImage.Information);
+    private void Notice(string text)
+    {
+        if (text.Length <= 220 && text.Count(c => c == '\n') < 6)
+        {
+            MessageBox.Show(this, text, ProductProfile.WindowTitle, MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var dialog = new Window
+        {
+            Title = ProductProfile.WindowTitle,
+            Owner = this,
+            Width = 560,
+            MinWidth = 420,
+            MaxWidth = 680,
+            SizeToContent = SizeToContent.Height,
+            MaxHeight = Math.Max(360, SystemParameters.WorkArea.Height - 60),
+            ResizeMode = ResizeMode.CanResizeWithGrip,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = ModalSurface,
+            Foreground = Ink,
+            FontFamily = FontFamily,
+            ShowInTaskbar = false
+        };
+        var layout = new Grid { Margin = new Thickness(20, 18, 20, 16) };
+        layout.RowDefinitions.Add(new RowDefinition());
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var scroll = new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            MaxHeight = Math.Max(220, SystemParameters.WorkArea.Height - 180),
+            Content = new TextBox
+            {
+                Text = text,
+                IsReadOnly = true,
+                BorderThickness = new Thickness(0),
+                Background = Brushes.Transparent,
+                Foreground = Ink,
+                FontSize = 13,
+                TextWrapping = TextWrapping.Wrap
+            }
+        };
+        layout.Children.Add(scroll);
+        var ok = Action("确定", (_, _) => dialog.Close(), true);
+        ok.IsDefault = true;
+        ok.IsCancel = true;
+        ok.HorizontalAlignment = HorizontalAlignment.Right;
+        ok.Margin = new Thickness(0, 12, 0, 0);
+        Grid.SetRow(ok, 1);
+        layout.Children.Add(ok);
+        dialog.Content = layout;
+        dialog.ShowDialog();
+    }
     private static void OpenUrl(string url) => Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     private sealed record ChoiceItem(string Id, string Label);
 }

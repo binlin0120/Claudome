@@ -19,8 +19,13 @@ public sealed partial class SetupWindow
     {
         if (action.Id == CustomerGuide.ManualAdsPowerId)
             action = CustomerGuide.ManualAdsPower();
-        var instructions = action.Steps.Select((text, index) => Text($"{index + 1}. {text}", 12)).Cast<UIElement>().ToList();
-        instructions.Insert(0, Text(action.Title, 16, false));
+        var stepList = new StackPanel();
+        foreach (var (text, index) in action.Steps.Select((t, i) => (t, i)))
+            stepList.Children.Add(Text($"{index + 1}. {text}", 12));
+        UIElement stepsBlock = action.Steps.Length > 4
+            ? new ScrollViewer { Content = stepList, MaxHeight = 240, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 0, 0, 8) }
+            : stepList;
+        var instructions = new List<UIElement> { Text(action.Title, 16, false), stepsBlock };
         if (action.Id == CustomerGuide.ManualAdsPowerId)
         {
             instructions.Add(Row(Action("打开程序内虚拟机桌面", (_, _) => Navigate(7), true)));
@@ -46,6 +51,7 @@ public sealed partial class SetupWindow
             return Card(instructions.ToArray());
         }
         if(action.Id=="hyperv-disk-recovery") { instructions.Add(Row(Action("处理后重新检查并恢复",async(_,_)=>await StartInstall(),true))); return Card(instructions.ToArray()); }
+        if(action.Id=="vm-stop-before-install") { instructions.Add(Row(Action("去「专属桌面」关机", (_, _) => Navigate(7)), Action("已关机，继续安装", async (_, _) => await StartInstall(), true))); return Card(instructions.ToArray()); }
         if(action.Id=="hyperv-restart") { instructions.Add(Row(Action("我已重启，重新检查并继续", async (_, _) => await StartInstall(), true))); return Card(instructions.ToArray()); }
         if(action.Id=="windows-media"){instructions.Add(Row(Action("去读取镜像版本",(_,_)=>Go(2),true)));return Card(instructions.ToArray());}
         if(action.Id=="hyperv-console") instructions.Add(Row(Action("允许关闭主机增强会话并继续",async(_,_)=>{
@@ -59,7 +65,10 @@ public sealed partial class SetupWindow
         if (action.Id == "isolation-boundary") { instructions.Add(Text("这是旧构建保存的记录。当前构建已改为实际边界检查，请重新核对方案和镜像后继续。", 12)); instructions.Add(Row(Action("重新检查安装方案",(_,_)=>Go(0),true))); return Card(instructions.ToArray()); }
         if (action.Id == "adspower")
             instructions.Add(Row(Action("不用 API，手动使用 AdsPower", (_, _) => { SelectManualAdsPower(); Navigate(7); })));
-        instructions.Add(Row(Action("打开虚拟机", async (_, _) => await Perform(async (_, token) => await Backends.Open(state, token))), Action("处理后继续部署", async (_, _) => await StartInstall(), true)));
+        var openAction = ResumePlan.HasWindowsInstallStarted(state)
+            ? Action("打开虚拟机", async (_, _) => await Perform(async (_, token) => await Backends.Open(state, token)))
+            : Action("前往「6 开始安装」", (_, _) => Go(5));
+        instructions.Add(Row(openAction, Action("处理后继续部署", async (_, _) => await StartInstall(), true)));
         return Card(instructions.ToArray());
     }
     private void RefreshPending()

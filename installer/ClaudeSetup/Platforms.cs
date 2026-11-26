@@ -56,9 +56,9 @@ public static class Platforms
         var list = new List<PlatformChoice>
         {
             new("hyperv", "Hyper-V", pro ? 1 : 3, supported && pro && hardware, true, (pro ? "符合项目原有完整路线的版本条件；功能启用状态还需确认。" : "家庭版不支持本项目 Hyper-V 路线，优先升级专业版可沿用完整方案。") + note,
-                ["打开 Windows 功能，检查 Hyper-V；如需启用，请保存工作并按系统提示自行重启。", "默认允许 Hyper-V 增强会话双向剪贴板，并在来宾策略中禁用宿主机磁盘、USB 与设备重定向；如需严格基本会话隔离，可在桌面左侧一键关闭（切换主机会话会影响同机其他 Hyper-V 虚拟机）。", "程序创建第二代虚拟机、启用安全启动与虚拟 TPM，关闭普通网卡，经专用 VM 总线通道联网，自动准备 Windows 和来宾软件。", "此路线不会被偷偷替换成 VirtualBox，也不会自动购买升级许可。"]),
+                ["打开 Windows 功能，检查 Hyper-V；如需启用，请保存工作并按系统提示自行重启。", "默认允许 Hyper-V 增强会话双向剪贴板，并在来宾策略中禁用宿主机磁盘、USB 与设备重定向；如需严格基本会话隔离，可在桌面顶部「剪贴板 ▾」一键关闭（切换主机会话会影响同机其他 Hyper-V 虚拟机）。", "程序创建第二代虚拟机、启用安全启动与虚拟 TPM，关闭普通网卡，经专用 VM 总线通道联网，自动准备 Windows 和来宾软件。", "此路线不会被偷偷替换成 VirtualBox，也不会自动购买升级许可。"]),
             new("virtualbox", "Oracle VirtualBox", pro ? 2 : 1, supported && hardware, true, (host.VBoxInstalled ? "检测到已安装，可核验版本后复用。" : "程序自动下载、核验并安装，无需提前安装。") + note,
-                ["使用右侧向导继续，程序负责组件和来宾软件安装。"]),
+                ["按顶部「安装向导」步骤继续，程序负责组件和来宾软件安装。"]),
             new("workstation", "VMware Workstation", pro ? 3 : 2, supported && hardware, true, (host.WorkstationInstalled ? "检测到已有安装，可按项目第三方路线核验后使用。" : "Windows 第三方备选。") + "支持自动建机、Windows 应答安装、Tools 与来宾软件传送；首次下载登录和加密 / TPM 设置需本人确认。",
                 ["程序会接着获取或识别官方安装器、建机并制作 Windows 安装应答介质。Broadcom 要求登录时由本人配合。", "首次按提示确认加密和虚拟 TPM 后，程序继续安装 Windows、Tools、Clash 和 AdsPower；不绕过 Windows 11 的硬件要求。"])
         };

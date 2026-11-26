@@ -416,7 +416,7 @@ public sealed partial class SetupWindow
             {
                 autoConnectDesktop = false;
                 framebufferConflictVm = connectingVm;
-                SetDesktopConnectionStatus("检测到 VirtualBox 显示缓冲冲突。可在左侧直接恢复画面。");
+                SetDesktopConnectionStatus("检测到 VirtualBox 显示缓冲冲突。可在顶部操作栏直接恢复画面。");
                 return;
             }
             framebufferConflictVm = "";
@@ -664,7 +664,7 @@ public sealed partial class SetupWindow
         if (offerMultiCoreRecovery && !notifiedMultiCoreBlankTimeout)
         {
             notifiedMultiCoreBlankTimeout = true;
-            SetDesktopConnectionStatus("多核虚拟机持续无画面（0×0），可能发生 NEM 跨核死锁。请点击左侧“强制关闭并恢复 1 核”。");
+            SetDesktopConnectionStatus("多核虚拟机持续无画面（0×0），可能发生 NEM 跨核死锁。请点击「强制关闭并恢复 1 核」。");
         }
         if (desktopManualAdsPower is not null)
         {
@@ -675,7 +675,7 @@ public sealed partial class SetupWindow
         if (desktopManualAdsGuide is not null)
         {
             desktopManualAdsGuide.Text = ManualAdsPowerReady
-                ? "在右侧 AdsPower 编辑现有 Default Profile，按指引核对 No Proxy 和浏览器设置。"
+                ? "在虚拟机内的 AdsPower 编辑现有 Default Profile，按指引核对 No Proxy 和浏览器设置。"
                 : "已选手动使用 AdsPower。请先连接并核验原任务网络，再使用 No Proxy 环境。";
             desktopManualAdsGuide.Visibility = state.Options.ManualAdsPower ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -705,6 +705,7 @@ public sealed partial class SetupWindow
                 ManualAdsPowerReady ? "查看 AdsPower 指引" :
                 state.PendingActions.Any(ResumePlan.IsGuestNetworkProbe) ? "重试来宾联网检查" :
                 state.Status.Contains("暂停") || state.Options.ManualAdsPower ? "继续任务并连接" :
+                !ResumePlan.HasWindowsInstallStarted(state) ? "继续去「开始安装」" :
                 ResumePlan.CanResumeBrowser(state) ? "继续配置与验收" : "连接到虚拟机";
         }
         var showActivity = busy || taskFaulted;
@@ -746,7 +747,7 @@ public sealed partial class SetupWindow
             manualAdsPower.IsChecked = true;
             RefreshPending();
             UpdateDesktopGuide();
-            RecordTaskActivity(activeNetwork ? CustomerGuide.ManualAdsPowerStage : "已保存手动使用 AdsPower。原任务联网通过后，按左侧指引配置。");
+            RecordTaskActivity(activeNetwork ? CustomerGuide.ManualAdsPowerStage : "已保存手动使用 AdsPower。原任务联网通过后，按「检测出错问题 → 操作指引与检测网址」配置。");
         }
         catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
     }
@@ -777,6 +778,12 @@ public sealed partial class SetupWindow
             return;
         }
         if(string.IsNullOrEmpty(state.VmId)){Go(1);Notice("请先创建或载入一个任务，再继续连接。");return;}
+        if (!ResumePlan.HasWindowsInstallStarted(state))
+        {
+            Go(5);
+            Notice("原虚拟机尚未写入 Windows 系统。请先在「6 开始安装」点击「开始 / 继续部署」，系统开始写入后再连接专属桌面。");
+            return;
+        }
         if(consent.IsChecked!=true)
         {
             if (MessageBox.Show(this,
@@ -1078,7 +1085,7 @@ public sealed partial class SetupWindow
         var panel = new StackPanel { Margin = new Thickness(24, 20, 24, 14) };
         panel.Children.Add(Text("使用来宾 Windows 的实际账号", 18, false));
         panel.Children.Add(Text(
-            "先在右侧来宾登录 Windows。打开来宾的终端，输入 whoami，填写反斜杠后的用户名。登录画面上的显示名称可能不同。\n\n" +
+            "先在虚拟机桌面登录 Windows。打开虚拟机内的终端，输入 whoami，填写反斜杠后的用户名。登录画面上的显示名称可能不同。\n\n" +
             "用微软账号登录时，勾选下方选项并填绑定邮箱及微软账号密码。同步验证要求密码。", 12));
         panel.Children.Add(Field("实际 Windows 用户名", userInput));
         if (virtualBox)

@@ -1682,6 +1682,75 @@ public static class SelfTests
                    !SetupWindow.AreHyperVClipboardSettingsVerified(true, fullOk.HostEnhanced, fullOk.HvSocket, false),
                 "Unverified Hyper-V clipboard configuration falsely reported verified");
         }));
+        await Check("hyperv-windows-install-stage-guards-empty-running-and-recovery-tasks", async () =>
+        {
+            var ws = Path.Combine(root, "hv-install-guards");
+            Paths.EnsureWorkspace(ws);
+            var st1 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = new() { Root = ws, PlatformId = "hyperv" } };
+            var installed = 0; var opened = 0;
+            await Deployment.ExecuteHyperVWindowsStageAsync(st1,
+                () => Task.FromResult(HyperVWindowsInstallState.Empty),
+                () => Task.FromResult(false),
+                () => { installed++; return Task.CompletedTask; },
+                () => { opened++; return Task.CompletedTask; });
+            Assert(installed == 1 && opened == 0 && st1.Completed.Contains("windows-started"), "Empty off VM must install and record windows-started");
+
+            var st2 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = new() { Root = ws, PlatformId = "hyperv" } };
+            var uefiBlocked = false;
+            try
+            {
+                await Deployment.ExecuteHyperVWindowsStageAsync(st2,
+                    () => Task.FromResult(HyperVWindowsInstallState.Empty),
+                    () => Task.FromResult(true),
+                    () => { installed++; return Task.CompletedTask; },
+                    () => { opened++; return Task.CompletedTask; });
+            }
+            catch (HandoffException hex) { uefiBlocked = hex.Action.Id == "vm-stop-before-install"; }
+            Assert(uefiBlocked && installed == 1 && !st2.Completed.Contains("windows-started"), "Running empty UEFI VM must stop before install without recording windows-started");
+
+            var st3 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = new() { Root = ws, PlatformId = "hyperv" } };
+            await Deployment.ExecuteHyperVWindowsStageAsync(st3,
+                () => Task.FromResult(HyperVWindowsInstallState.Ready),
+                () => Task.FromResult(false),
+                () => throw new Exception("Must not re-apply image when Ready checkpoint exists"),
+                () => { opened++; return Task.CompletedTask; });
+            Assert(opened == 1 && st3.Completed.Contains("windows-started"), "Ready checkpoint must backfill windows-started and open VM without re-applying");
+
+            var st4 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Completed = ["windows-started"], Options = new() { Root = ws, PlatformId = "hyperv" } };
+            await Deployment.ExecuteHyperVWindowsStageAsync(st4,
+                () => Task.FromResult(HyperVWindowsInstallState.Empty),
+                () => Task.FromResult(false),
+                () => { installed++; return Task.CompletedTask; },
+                () => Task.CompletedTask);
+            Assert(installed == 2 && st4.Completed.Contains("windows-started"), "Falsely recorded windows-started on empty VM must fall back to install");
+        });
+        await Check("hyperv-diagnostics-context-aware-and-handoff-includes-steps", () => Sync(() =>
+        {
+            using var doc = JsonDocument.Parse("""{"errorSubstage":"enable-feature","errorCategory":"InvalidOperation","errorHResult":-2146498548}""");
+            var diag = HyperV.FormatSafeHyperVDiagnostic(doc.RootElement);
+            Assert(diag.Contains("启用 Hyper-V 可选功能") && diag.Contains("InvalidOperation") && diag.Contains("0x800F080C"),
+                "Hyper-V diagnostic formatter missing substage/HRESULT");
+            var prepareFallback = CommandFailure.HyperV("prepare", "HYPERV_STEP_FAILED", HyperV.FallbackOperationDetail("prepare") + diag);
+            Assert(!prepareFallback.Contains("虚拟机中的许可") && prepareFallback.Contains("宿主机") && prepareFallback.Contains("0x800F080C"),
+                "Prepare fallback must not show misleading guest license message");
+            var hex = new HandoffException(new("请保存工作", ["步骤甲", "步骤乙"], "test-handoff"));
+            Assert(hex.Message.Contains("1. 步骤甲") && hex.Message.Contains("2. 步骤乙") && !hex.Message.Contains("右侧"),
+                "HandoffException must show full action steps without directional wording");
+        }));
+        await Check("media-resolve-preferred-image-picks-professional-first-and-preserves-explicit", () => Sync(() =>
+        {
+            var media = new WindowsMediaIdentity(@"D:\Claudome\downloads\win11.iso", new string('a', 64), 5_000_000_000L, [
+                new(1, "Windows 11 家庭版", "x64", "10.0.26300.9457", "Client", "Core"),
+                new(2, "Windows 11 家庭中文版", "x64", "10.0.26300.9457", "Client", "CoreCountrySpecific"),
+                new(4, "Windows 11 专业版", "x64", "10.0.26300.9457", "Client", "Professional")
+            ]);
+            Assert(SetupWindow.ResolvePreferredImageIndex(media, 1, preserveExplicitSelection: false) == 4,
+                "First read of multi-edition ISO should select Professional by Edition");
+            Assert(SetupWindow.ResolvePreferredImageIndex(media, 1, preserveExplicitSelection: true) == 1,
+                "Re-reading same ISO or saved task should preserve valid explicit Core index");
+            Assert(SetupWindow.ResolvePreferredImageIndex(media, 2, preserveExplicitSelection: true) == (ProductProfile.IsHyperVStandalone ? 4 : 2),
+                "CoreCountrySpecific preservation should follow edition IsHomeChinaBlocked rule");
+        }));
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));
