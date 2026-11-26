@@ -2662,6 +2662,347 @@ public static class SelfTests
             await hvInitMiss.DisposeAsync();
             await Task.WhenAll(initTasks).WaitAsync(TimeSpan.FromSeconds(3));
         });
+        await Check("hyperv-spawner-init-hang-rejection-and-recovery-channel-no-reply-late-reply-and-dispose-cleanup", async () => {
+            var matRoot = Path.Combine(root, "hv-recovery-matrix"); Directory.CreateDirectory(matRoot);
+            var st = new SessionState { VmId = Guid.NewGuid().ToString("D"), Options = new() { Root = matRoot, PlatformId = "hyperv", VmName = "HV-Matrix" } };
+            var sec = new Secrets { VmPassword = "ValidPassword!123" };
+
+            static string? ExtractId(string jsonLine)
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(jsonLine);
+                    return doc.RootElement.TryGetProperty("id", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+                }
+                catch { return null; }
+            }
+
+            // Matrix Test A:
+            // 1) Initial spawner connects but hangs on `init` -> bounded by SpawnerAttachTimeout (220ms) & temp disposed, main stays alive on seq 1.
+            // 2) Rebuild #1: isolated recoveryChannel gets NO reply -> bounded timeout, main pipe NEVER closed & NEVER receives launch-verifier.
+            // 3) Rebuild #2: recoveryChannel sends stale mismatched-id reply BEFORE real reply -> stale discarded; replacement spawner #1 hangs on `init` -> bounded timeout & temp disposed.
+            // 4) Rebuild #3: recoveryChannel succeeds + replacement spawner #2 initializes -> SyncGuestDisplayMode returns 1600x900 on SAME main worker (seq 1, 0 UAC).
+            var mainSawLaunchVerifier = false;
+            var mainRunningReplies = 0;
+            var spawnerAttempt = 0;
+            var recoveryAttempt = 0;
+            var hangReleases = new List<TaskCompletionSource>();
+            var tasks = new List<Task>();
+
+            var hv = new HyperV(
+                connectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeMatMain-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    tasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    var id = ExtractId(line);
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "initialized", code = "OK" }));
+                                    else if (line.Contains("\"running\""))
+                                    {
+                                        Interlocked.Increment(ref mainRunningReplies);
+                                        await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "True", code = "OK" }));
+                                    }
+                                    else if (line.Contains("\"launch-verifier\""))
+                                        mainSawLaunchVerifier = true;
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayConnectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeMatDisp-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    tasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    var id = ExtractId(line);
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "initialized", code = "OK" }));
+                                    else if (line.Contains("\"sync-display\""))
+                                    {
+                                        var payload = JsonSerializer.Serialize(new { before = "1280x720", after = "1600x900", applied = "1600x900", selectedZoom = 1.0, modes = new[] { "1600x900" } });
+                                        await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = payload, code = "OK" }));
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayColdStartViaLauncher: true,
+                spawnerConnectFixture: async (_, ct) => {
+                    var seq = Interlocked.Increment(ref spawnerAttempt);
+                    var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    lock (hangReleases) hangReleases.Add(hold);
+                    var pipeName = "ClaudomeMatSp-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    tasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    var id = ExtractId(line);
+                                    if (line.Contains("\"init\""))
+                                    {
+                                        if (seq == 1) await hold.Task; // Initial spawner hangs on init
+                                        else if (seq == 2) await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = false, value = "", code = "VM_SCOPE" })); // Replacement spawner rejects init
+                                        else if (seq == 3) await hold.Task; // Replacement spawner hangs on init
+                                        else await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "initialized", code = "OK" }));
+                                    }
+                                    else if (line.Contains("\"launch-verifier\""))
+                                        await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "999991", code = "OK" }));
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                recoveryConnectFixture: async (_, ct) => {
+                    var seq = Interlocked.Increment(ref recoveryAttempt);
+                    var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    lock (hangReleases) hangReleases.Add(hold);
+                    var pipeName = "ClaudomeMatRec-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    tasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    var id = ExtractId(line);
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "initialized", code = "OK" }));
+                                    else if (line.Contains("\"launch-verifier\""))
+                                    {
+                                        if (seq == 1)
+                                            await hold.Task; // Recovery channel #1 hangs with NO reply
+                                        else
+                                        {
+                                            // Inject a stale late reply with mismatched id BEFORE the real reply
+                                            await w.WriteLineAsync(JsonSerializer.Serialize(new { id = "stale-late-reply-id", ok = true, value = "999992", code = "OK" }));
+                                            await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "999993", code = "OK" }));
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                });
+            hv.LaunchVerifierTimeout = TimeSpan.FromMilliseconds(240);
+            hv.SpawnerAttachTimeout = TimeSpan.FromMilliseconds(240);
+
+            // Step 1: Initial connect finishes promptly despite spawner #1 hanging on init; temp spawner is disposed; main stays healthy!
+            var swInit = System.Diagnostics.Stopwatch.StartNew();
+            Assert(await hv.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)) &&
+                   swInit.ElapsedMilliseconds < 2000 &&
+                   hv.HasManagementConnection && hv.ConnectionSequence == 1 && hv.DisposedTempSpawnerCount == 1,
+                "Initial connect hung on spawner init or leaked temp spawner");
+
+            // Step 2: Rebuild #1 -> recovery channel #1 hangs with NO reply -> times out cleanly; main pipe stays untouched on seq 1!
+            var rec1Failed = false;
+            try { await hv.SyncGuestDisplayMode(st, sec, 1600, 900, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (SetupException) { rec1Failed = true; }
+            Assert(rec1Failed && await hv.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)) &&
+                   hv.HasManagementConnection && hv.ConnectionSequence == 1 && !mainSawLaunchVerifier,
+                "Recovery no-reply closed or disrupted main management pipe");
+
+            // Step 3: Rebuild #2 -> recovery #2 injects stale id reply (discarded!) + replacement spawner #2 rejects init -> temp disposed; main stays on seq 1!
+            var rec2Rejected = false;
+            try { await hv.SyncGuestDisplayMode(st, sec, 1600, 900, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (SetupException) { rec2Rejected = true; }
+            Assert(rec2Rejected && hv.DisposedTempSpawnerCount == 2 && hv.StaleReplyDiscardedCount >= 1 &&
+                   await hv.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)) &&
+                   hv.ConnectionSequence == 1,
+                "Rejected replacement spawner init was not disposed or stale reply was not discarded");
+
+            // Step 4: Rebuild #3 -> replacement spawner #3 connects & hangs on init -> bounded timeout & temp disposed; main stays on seq 1!
+            var rec3InitHung = false;
+            try { await hv.SyncGuestDisplayMode(st, sec, 1600, 900, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (SetupException) { rec3InitHung = true; }
+            Assert(rec3InitHung && hv.DisposedTempSpawnerCount == 3 &&
+                   await hv.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)) &&
+                   hv.ConnectionSequence == 1,
+                "Hung replacement spawner init was not bounded or leaked temp spawner");
+
+            // Step 5: Rebuild #4 -> replacement spawner #4 initializes -> display sync succeeds on SAME main worker with ZERO UAC!
+            var syncedOk = await hv.SyncGuestDisplayMode(st, sec, 1600, 900, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(syncedOk is not null && syncedOk.After == "1600x900" &&
+                   !mainSawLaunchVerifier && hv.HasManagementConnection && hv.ConnectionSequence == 1 &&
+                   hv.ManagementWorkerLaunchCount == 1 && hv.ElevatedPromptCount == 0 &&
+                   hv.SpawnerRecoveryCount == 1 && mainRunningReplies == 4,
+                "Final retry after recovery failures did not succeed cleanly on same main worker");
+
+            foreach (var h in hangReleases) h.TrySetResult();
+            await hv.DisposeAsync();
+            await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(3));
+
+            // Matrix Test B: DisposeAsync during an in-flight spawner rebuild aborts immediately and cleans up temp spawner!
+            var inFlightInitEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var inFlightHold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var disposeTasks = new List<Task>();
+            var hvDisp = new HyperV(
+                connectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeDispMain-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    disposeTasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    var id = ExtractId(line);
+                                    if (line.Contains("\"init\"")) await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "initialized", code = "OK" }));
+                                    else if (line.Contains("\"running\"")) await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "True", code = "OK" }));
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayConnectFixture: (_, _) => Task.FromException<Stream>(new InvalidOperationException("Should abort before display connect")),
+                displayColdStartViaLauncher: true,
+                spawnerConnectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeDispSp-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    disposeTasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"init\""))
+                                    {
+                                        inFlightInitEntered.TrySetResult();
+                                        await inFlightHold.Task;
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                skipInitialSpawnerAttach: true,
+                recoveryConnectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeDispRec-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    disposeTasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    var id = ExtractId(line);
+                                    if (line.Contains("\"init\"")) await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "initialized", code = "OK" }));
+                                    else if (line.Contains("\"launch-verifier\"")) await w.WriteLineAsync(JsonSerializer.Serialize(new { id, ok = true, value = "999994", code = "OK" }));
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                });
+            hvDisp.SpawnerAttachTimeout = TimeSpan.FromSeconds(10);
+            Assert(await hvDisp.IsRunning(st, CancellationToken.None), "Dispose matrix test initial connect failed");
+            var inFlightSync = hvDisp.SyncGuestDisplayMode(st, sec, 1280, 720, CancellationToken.None);
+            await inFlightInitEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var swDisp = System.Diagnostics.Stopwatch.StartNew();
+            await hvDisp.DisposeAsync();
+            var abortedOnDispose = false;
+            try { await inFlightSync.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch (OperationCanceledException) { abortedOnDispose = true; }
+            catch (ObjectDisposedException) { abortedOnDispose = true; }
+            swDisp.Stop();
+            inFlightHold.TrySetResult();
+            Assert(abortedOnDispose && swDisp.ElapsedMilliseconds < 1500 && hvDisp.DisposedTempSpawnerCount == 1,
+                "DisposeAsync during in-flight rebuild failed to abort promptly or leaked temp spawner");
+            await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(3));
+        });
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));

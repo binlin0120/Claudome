@@ -1,16 +1,22 @@
 ﻿#requires -Version 7.0
-param([string]$PipeName='',[switch]$ProbeGuestStatus,[string]$SpawnerPipeName='',[switch]$SpawnerOnly)
+param([string]$PipeName='',[switch]$ProbeGuestStatus,[string]$SpawnerPipeName='',[string]$RecoveryPipeName='',[switch]$SpawnerOnly)
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
-$script:supervisedChildPids=[Collections.Generic.List[int]]::new()
+$script:supervisedChildPids=[Collections.Concurrent.ConcurrentBag[int]]::new()
+$script:sharedState=[Collections.Concurrent.ConcurrentDictionary[string,string]]::new()
+$script:recoveryStop=[ref]$false
+$script:recoveryPs=$null
+$script:recoveryHandle=$null
 $script:workerScriptPath=$PSCommandPath
 function Stop-SupervisedChildren {
-    foreach($childPid in @($script:supervisedChildPids)) {
+    $seen=[Collections.Generic.HashSet[int]]::new()
+    $childPid=0
+    while($script:supervisedChildPids.TryTake([ref]$childPid)) {
+        if(-not $seen.Add($childPid)){continue}
         try {
             $proc = Get-Process -Id $childPid -ErrorAction SilentlyContinue
             if($proc -and -not $proc.HasExited){ $proc.Kill($true) }
         } catch { }
     }
-    $script:supervisedChildPids.Clear()
 }
 if(-not $ProbeGuestStatus) {
     if($PipeName -notmatch '^ClaudeSetup-[a-f0-9]{32}$'){exit 1}
@@ -22,6 +28,69 @@ if(-not $ProbeGuestStatus) {
             foreach($a in @('-NoLogo','-NoProfile','-File',$PSCommandPath,'-PipeName',$SpawnerPipeName,'-SpawnerOnly')){$spStart.ArgumentList.Add($a)}
             $spProc=[Diagnostics.Process]::Start($spStart)
             if($spProc){$script:supervisedChildPids.Add($spProc.Id)}
+        } catch { }
+    }
+    if($RecoveryPipeName) {
+        if($SpawnerOnly -or $RecoveryPipeName -notmatch '^ClaudeSetup-[a-f0-9]{32}$'){exit 1}
+        try {
+            $script:recoveryPs=[powershell]::Create()
+            $null=$script:recoveryPs.AddScript({
+                param($recPipeName,$workerPath,$psHomePath,$childPids,$shared,$stopRef)
+                $ErrorActionPreference='Stop'
+                while(-not $stopRef.Value) {
+                    $rp=$null;$rr=$null;$rw=$null
+                    try {
+                        $rp=[IO.Pipes.NamedPipeClientStream]::new('.',$recPipeName,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::None,[Security.Principal.TokenImpersonationLevel]::Identification)
+                        $rp.Connect(500)
+                        $rr=[IO.StreamReader]::new($rp,[Text.Encoding]::UTF8,$false,4096,$true)
+                        $rw=[IO.StreamWriter]::new($rp,[Text.UTF8Encoding]::new($false),4096,$true);$rw.AutoFlush=$true
+                        while(-not $stopRef.Value -and $null -ne ($rl=$rr.ReadLine())) {
+                            $req=$null
+                            $resp=@{ok=$false;value='';code='HYPERV_STEP_FAILED'}
+                            try {
+                                $req=$rl | ConvertFrom-Json
+                                $rd=$req.data
+                                if($req.operation -eq 'exit'){break}
+                                if($req.operation -eq 'init') {
+                                    $resp=@{ok=$true;value='initialized';code='OK'}
+                                } elseif($req.operation -eq 'launch-verifier') {
+                                    $rootVal=''
+                                    if(-not $shared.TryGetValue('root',[ref]$rootVal) -or -not $rootVal){throw 'VM_SCOPE'}
+                                    if(([string]$rd.pipeName) -notmatch '^ClaudeSetup-[a-f0-9]{32}$'){throw 'VM_SCOPE'}
+                                    $parentDir=[IO.Path]::GetFullPath((Join-Path $rootVal 'private')).TrimEnd('\')+'\'
+                                    $fullScript=[IO.Path]::GetFullPath([string]$rd.scriptPath)
+                                    if(-not $fullScript.StartsWith($parentDir,[StringComparison]::OrdinalIgnoreCase)){throw 'VM_SCOPE'}
+                                    $part=$fullScript
+                                    while($part){if((Test-Path -LiteralPath $part) -and ((Get-Item -LiteralPath $part -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'VM_SCOPE'};$part=[IO.Path]::GetDirectoryName($part)}
+                                    if((Get-FileHash -LiteralPath $fullScript -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash){throw 'VM_SCOPE'}
+                                    $si=[Diagnostics.ProcessStartInfo]::new((Join-Path $psHomePath 'pwsh.exe'))
+                                    $si.UseShellExecute=$false;$si.CreateNoWindow=$true
+                                    $childArgs=@('-NoLogo','-NoProfile','-File',$fullScript,'-PipeName',[string]$rd.pipeName,'-SpawnerOnly')
+                                    foreach($ca in $childArgs){$si.ArgumentList.Add($ca)}
+                                    $cp=[Diagnostics.Process]::Start($si)
+                                    if($cp){$childPids.Add($cp.Id)}
+                                    $resp=@{ok=$true;value=[string]$cp.Id;code='OK'}
+                                } else {
+                                    throw 'UNSUPPORTED_OPERATION'
+                                }
+                            } catch {
+                                $code=$_.Exception.Message
+                                if($code -notin @('VM_SCOPE','UNSUPPORTED_OPERATION')){$code='HYPERV_STEP_FAILED'}
+                                $resp=@{ok=$false;value='';code=$code}
+                            }
+                            if($null -ne $req -and $null -ne $req.id -and [string]$req.id -ne ''){$resp['id']=[string]$req.id}
+                            $rw.WriteLine(($resp | ConvertTo-Json -Compress -Depth 4))
+                        }
+                    } catch {
+                        if(-not $stopRef.Value){Start-Sleep -Milliseconds 120}
+                    } finally {
+                        if($rw){try{$rw.Dispose()}catch{}}
+                        if($rr){try{$rr.Dispose()}catch{}}
+                        if($rp){try{$rp.Dispose()}catch{}}
+                    }
+                }
+            }).AddArgument($RecoveryPipeName).AddArgument($PSCommandPath).AddArgument($PSHOME).AddArgument($script:supervisedChildPids).AddArgument($script:sharedState).AddArgument($script:recoveryStop)
+            $script:recoveryHandle=$script:recoveryPs.BeginInvoke()
         } catch { }
     }
     $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::None,[Security.Principal.TokenImpersonationLevel]::Identification)
@@ -876,6 +945,7 @@ try {
                 $spawnerOnly=[bool]$SpawnerOnly -or [bool]$d.spawnerOnly
                 if(-not $o -or $o.PlatformId -ne 'hyperv' -or $o.VmName -notmatch '^[a-zA-Z0-9_-]{1,50}$' -or -not [IO.Path]::IsPathFullyQualified($o.Root) -or $o.Root.StartsWith('\\') -or ([IO.Path]::GetPathRoot($o.Root).TrimEnd('\') -eq $o.Root.TrimEnd('\'))){throw 'VM_SCOPE'}
                 $null=Assert-LocalPath (Join-Path $o.Root 'machines') $o.Root
+                $script:sharedState['root']=[string]$o.Root
                 $value='initialized'
             } else {
                 if(-not $o){throw 'VM_SCOPE'}
@@ -1226,7 +1296,8 @@ if([Claudome.GuestDisplaySync]::EnumDisplaySettingsW($null,-1,[ref]$adm)){$after
         }catch {
             $response = Format-HyperVErrorResponse $request $_
         }
+        if($null -ne $request -and $null -ne $request.id -and [string]$request.id -ne ''){$response['id']=[string]$request.id}
         $writer.WriteLine(($response | ConvertTo-Json -Compress -Depth 4))
         $request=$null;$d=$null
     }
-}finally{Stop-SupervisedChildren;if($writer){$writer.Dispose()};if($reader){$reader.Dispose()};if($pipe){$pipe.Dispose()}}
+}finally{$script:recoveryStop.Value=$true;if($script:recoveryPs){try{$script:recoveryPs.Stop();$script:recoveryPs.Dispose()}catch{}};Stop-SupervisedChildren;if($writer){$writer.Dispose()};if($reader){$reader.Dispose()};if($pipe){$pipe.Dispose()}}

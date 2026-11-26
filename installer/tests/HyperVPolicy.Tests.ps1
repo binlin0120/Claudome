@@ -598,6 +598,7 @@ Check 'hyperv-worker-spawner-only-live-process-isolation' {
     $privateDir = Join-Path $tempRoot 'private'
     $mainPipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
     $spawnerPipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
+    $recoveryPipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
     $displayPipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
     $mainPipe = $null; $spawnerPipe = $null; $displayPipe = $null; $mainProc = $null; $displayPid = 0
     try {
@@ -613,7 +614,7 @@ Check 'hyperv-worker-spawner-only-live-process-isolation' {
 
         $psi = [Diagnostics.ProcessStartInfo]::new($pwshExe)
         $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-        foreach ($arg in @('-NoLogo','-NoProfile','-File',$workerCopy,'-PipeName',$mainPipeName,'-SpawnerPipeName',$spawnerPipeName)) { $psi.ArgumentList.Add($arg) }
+        foreach ($arg in @('-NoLogo','-NoProfile','-File',$workerCopy,'-PipeName',$mainPipeName,'-SpawnerPipeName',$spawnerPipeName,'-RecoveryPipeName',$recoveryPipeName)) { $psi.ArgumentList.Add($arg) }
         $mainProc = [Diagnostics.Process]::Start($psi)
         Assert-Case ($null -ne $mainProc)
 
@@ -657,42 +658,66 @@ Check 'hyperv-worker-spawner-only-live-process-isolation' {
         $dispRejected = ($dispR.ReadLine() | ConvertFrom-Json)
         Assert-Case (-not $dispRejected.ok -and $dispRejected.code -eq 'UNSUPPORTED_OPERATION')
 
-        # Even if spawner & display pipes are closed abruptly, main pipe remains alive and can rebuild a fresh
-        # -SpawnerOnly child via launch-verifier (spawnerOnly:true) without replacing main worker or prompting UAC
+        # Even if spawner & display pipes are closed abruptly, main pipe remains alive AND the isolated
+        # -RecoveryPipeName background Runspace rebuilds a fresh -SpawnerOnly child WITHOUT touching main pipe
+        # (and supports reconnecting after an abrupt recovery pipe close)!
         $dispW.Dispose(); $dispR.Dispose(); $displayPipe.Dispose(); $displayPipe = $null
         $spW.Dispose(); $spR.Dispose(); $spawnerPipe.Dispose(); $spawnerPipe = $null
-        $mainW.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $false } } | ConvertTo-Json -Compress -Depth 5))
+        $mainW.WriteLine((@{ id = 'main-req-1'; operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $false } } | ConvertTo-Json -Compress -Depth 5))
         $mainStillAlive = ($mainR.ReadLine() | ConvertFrom-Json)
-        Assert-Case ($mainStillAlive.ok -and $mainStillAlive.value -eq 'initialized' -and -not $mainProc.HasExited)
+        Assert-Case ($mainStillAlive.ok -and $mainStillAlive.value -eq 'initialized' -and $mainStillAlive.id -eq 'main-req-1' -and -not $mainProc.HasExited)
 
         $spawner2PipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
         $display2PipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
+        $recPipe1 = [IO.Pipes.NamedPipeServerStream]::new($recoveryPipeName, [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
         $spawner2Pipe = [IO.Pipes.NamedPipeServerStream]::new($spawner2PipeName, [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
         $display2Pipe = [IO.Pipes.NamedPipeServerStream]::new($display2PipeName, [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
         try {
-            $mainW.WriteLine((@{ operation = 'launch-verifier'; data = @{ pipeName = $spawner2PipeName; scriptPath = $workerCopy; spawnerOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
-            $sp2Launch = ($mainR.ReadLine() | ConvertFrom-Json)
+            $recPipe1.WaitForConnectionAsync($cts.Token).GetAwaiter().GetResult()
+            $recR = [IO.StreamReader]::new($recPipe1,[Text.Encoding]::UTF8,$false,4096,$true)
+            $recW = [IO.StreamWriter]::new($recPipe1,[Text.UTF8Encoding]::new($false),4096,$true); $recW.AutoFlush = $true
+            $recW.WriteLine((@{ id = 'rec-bad-1'; operation = 'running'; data = @{} } | ConvertTo-Json -Compress -Depth 5))
+            $recBad = ($recR.ReadLine() | ConvertFrom-Json)
+            Assert-Case (-not $recBad.ok -and $recBad.code -eq 'UNSUPPORTED_OPERATION' -and $recBad.id -eq 'rec-bad-1')
+
+            $recW.WriteLine((@{ id = 'rec-launch-1'; operation = 'launch-verifier'; data = @{ pipeName = $spawner2PipeName; scriptPath = $workerCopy; spawnerOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
+            $sp2Launch = ($recR.ReadLine() | ConvertFrom-Json)
             $sp2Pid = 0
-            Assert-Case ($sp2Launch.ok -and [int]::TryParse([string]$sp2Launch.value, [ref]$sp2Pid) -and $sp2Pid -gt 0)
+            Assert-Case ($sp2Launch.ok -and $sp2Launch.id -eq 'rec-launch-1' -and [int]::TryParse([string]$sp2Launch.value, [ref]$sp2Pid) -and $sp2Pid -gt 0)
+            $recW.Dispose(); $recR.Dispose(); $recPipe1.Dispose(); $recPipe1 = $null
+
             $spawner2Pipe.WaitForConnectionAsync($cts.Token).GetAwaiter().GetResult()
             $sp2R = [IO.StreamReader]::new($spawner2Pipe,[Text.Encoding]::UTF8,$false,4096,$true)
             $sp2W = [IO.StreamWriter]::new($spawner2Pipe,[Text.UTF8Encoding]::new($false),4096,$true); $sp2W.AutoFlush = $true
-            $sp2W.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $false; spawnerOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
+            $sp2W.WriteLine((@{ id = 'sp2-init'; operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $false; spawnerOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
             $sp2Init = ($sp2R.ReadLine() | ConvertFrom-Json)
-            Assert-Case ($sp2Init.ok -and $sp2Init.value -eq 'initialized')
-            $sp2W.WriteLine((@{ operation = 'launch-verifier'; data = @{ pipeName = $display2PipeName; scriptPath = $displayCopy } } | ConvertTo-Json -Compress -Depth 5))
+            Assert-Case ($sp2Init.ok -and $sp2Init.value -eq 'initialized' -and $sp2Init.id -eq 'sp2-init')
+            $sp2W.WriteLine((@{ id = 'sp2-launch'; operation = 'launch-verifier'; data = @{ pipeName = $display2PipeName; scriptPath = $displayCopy } } | ConvertTo-Json -Compress -Depth 5))
             $d2Launch = ($sp2R.ReadLine() | ConvertFrom-Json)
             $d2Pid = 0
-            Assert-Case ($d2Launch.ok -and [int]::TryParse([string]$d2Launch.value, [ref]$d2Pid) -and $d2Pid -gt 0)
+            Assert-Case ($d2Launch.ok -and $d2Launch.id -eq 'sp2-launch' -and [int]::TryParse([string]$d2Launch.value, [ref]$d2Pid) -and $d2Pid -gt 0)
             $display2Pipe.WaitForConnectionAsync($cts.Token).GetAwaiter().GetResult()
             $d2R = [IO.StreamReader]::new($display2Pipe,[Text.Encoding]::UTF8,$false,4096,$true)
             $d2W = [IO.StreamWriter]::new($display2Pipe,[Text.UTF8Encoding]::new($false),4096,$true); $d2W.AutoFlush = $true
-            $d2W.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
+            $d2W.WriteLine((@{ id = 'd2-init'; operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
             $d2Init = ($d2R.ReadLine() | ConvertFrom-Json)
-            Assert-Case ($d2Init.ok -and $d2Init.value -eq 'initialized')
+            Assert-Case ($d2Init.ok -and $d2Init.value -eq 'initialized' -and $d2Init.id -eq 'd2-init')
             $d2W.WriteLine('{"operation":"exit"}'); $sp2W.WriteLine('{"operation":"exit"}')
             $d2W.Dispose(); $d2R.Dispose(); $sp2W.Dispose(); $sp2R.Dispose()
+
+            # Verify recovery channel cleanly reconnects on a second recovery pipe after abrupt disconnect
+            $recPipe2 = [IO.Pipes.NamedPipeServerStream]::new($recoveryPipeName, [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
+            try {
+                $recPipe2.WaitForConnectionAsync($cts.Token).GetAwaiter().GetResult()
+                $rec2R = [IO.StreamReader]::new($recPipe2,[Text.Encoding]::UTF8,$false,4096,$true)
+                $rec2W = [IO.StreamWriter]::new($recPipe2,[Text.UTF8Encoding]::new($false),4096,$true); $rec2W.AutoFlush = $true
+                $rec2W.WriteLine((@{ id = 'rec-reconn-init'; operation = 'init'; data = @{} } | ConvertTo-Json -Compress -Depth 5))
+                $rec2Ok = ($rec2R.ReadLine() | ConvertFrom-Json)
+                Assert-Case ($rec2Ok.ok -and $rec2Ok.value -eq 'initialized' -and $rec2Ok.id -eq 'rec-reconn-init')
+                $rec2W.Dispose(); $rec2R.Dispose()
+            } finally { try { $recPipe2.Dispose() } catch { } }
         } finally {
+            if ($recPipe1) { try { $recPipe1.Dispose() } catch { } }
             try { $display2Pipe.Dispose() } catch { }
             try { $spawner2Pipe.Dispose() } catch { }
         }
