@@ -24,6 +24,7 @@ function Get-ChildItem {
     foreach($key in @($script:store.Keys)){if($key.StartsWith($LiteralPath+'\') -and -not $key.Substring($LiteralPath.Length+1).Contains('\')){[pscustomobject]@{PSPath=$key}}}
 }
 function Get-VMNetworkAdapter($VM){for($i=0;$i -lt $script:nicCount;$i++){[pscustomobject]@{Name='fake'}}}
+function Set-VM($VM,[string]$EnhancedSessionTransportType){}
 function Get-VMIntegrationService($VM){[pscustomobject]@{Id=[guid]'2a34b1c2-fd73-4043-8a5b-dd2159bc743f';Name='Key-Value Pair Exchange';Enabled=$script:metadataEnabled}}
 function Disable-VMIntegrationService {param([Parameter(ValueFromPipeline)]$InputObject)process{$script:metadataEnabled=$false}}
 $first=[pscustomobject]@{Id=[guid]'11111111-1111-1111-1111-111111111111';State='Off'}
@@ -165,6 +166,18 @@ Check 'hyperv-protector-setup-and-read-failures-stop-before-vtpm' {
     $setupFailed=$false
     try{Enable-TaskVirtualTpm $first}catch{if($_.Exception.Message -eq 'VM_KEY_PROTECTOR_SETUP_FAILED'){$setupFailed=$true}else{throw}}
     Assert-Case ($readFailed -and $setupFailed -and $script:tpmEnables -eq $before -and $script:protectorWrites -eq 2)
+}
+Check 'hyperv-four-byte-empty-header-key-protector-is-provisioned-before-vtpm' {
+    $script:tpm=$false
+    $script:badProtectorWrite=$false
+    $script:badProtectorRead=$false
+    $script:badTpmEnable=$false
+    $beforeWrites=$script:protectorWrites
+    $beforeTpm=$script:tpmEnables
+    $script:protector=[byte[]]@(0,0,0,4)
+    Assert-Case (-not (Test-VMKeyProtectorPresent $first))
+    Enable-TaskVirtualTpm $first
+    Assert-Case ($script:tpm -and $script:protectorWrites -eq ($beforeWrites + 1) -and $script:tpmEnables -eq ($beforeTpm + 1))
 }
 Check 'hyperv-ensure-recovers-owned-vm-after-crash-before-state-save' {
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('hv-ensure-recover-' + [guid]::NewGuid().ToString('N'))

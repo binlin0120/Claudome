@@ -70,9 +70,23 @@ function Resolve-OrCreateTaskVm($Data) {
 }
 function Test-VMKeyProtectorPresent($Vm) {
     $protector=Get-VMKeyProtector -VM $Vm
-    # A cmdlet can emit one object containing a zero-length byte array.
-    # Counting pipeline records would mistake that empty array for a key.
-    return ($null -ne $protector -and ($protector -isnot [System.Collections.ICollection] -or $protector.Count -gt 0))
+    if($null -eq $protector){return $false}
+    if($protector -is [byte[]]){
+        if($protector.Length -eq 0){return $false}
+        # Real Hyper-V VMs without a key protector emit a 4-byte empty header (00-00-00-04).
+        if($protector.Length -eq 4 -and $protector[0] -eq 0 -and $protector[1] -eq 0 -and $protector[2] -eq 0 -and $protector[3] -in @(0, 4)){return $false}
+        return $true
+    }
+    if($protector -is [System.Collections.ICollection]){
+        if($protector.Count -eq 0){return $false}
+        if($protector.Count -eq 1 -and $protector[0] -is [byte[]]){
+            $inner=[byte[]]$protector[0]
+            if($inner.Length -eq 0){return $false}
+            if($inner.Length -eq 4 -and $inner[0] -eq 0 -and $inner[1] -eq 0 -and $inner[2] -eq 0 -and $inner[3] -in @(0, 4)){return $false}
+        }
+        return $true
+    }
+    return $true
 }
 function Enable-TaskVirtualTpm($Vm) {
     if((Get-VMSecurity -VM $Vm).TpmEnabled){return}
