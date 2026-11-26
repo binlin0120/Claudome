@@ -48,7 +48,7 @@ public static class CommandFailure
         _ => "执行来宾操作"
     };
     private static string HyperVOperation(string operation)=>operation switch {
-        "init" or "prepare"=>"准备管理组件","ensure"=>"核对原虚拟机身份","configure"=>"配置原虚拟机","ensure-checkpoint-policy"=>"核对自动检查点策略","windows"=>"安装 Windows","windows-install-state"=>"核对系统盘检查点","windows-install-diagnose"=>"诊断系统盘与检查点","ready"=>"检查来宾就绪状态","running"=>"读取原虚拟机状态","shutdown"=>"请求原虚拟机正常关机","guest"=>"执行来宾命令","copy-to" or "copy-from"=>"传送来宾文件","cleanup" or "cleanup-recovery"=>"清理任务安装介质","open"=>"连接原虚拟机","boundary-prepare" or "boundary-verify" or "boundary-offline"=>"核对任务网络通道","console-restore"=>"恢复会话设置","set-clipboard" or "clipboard-status"=>"读写剪贴板与会话策略",_=>"执行管理操作"
+        "init" or "prepare"=>"准备管理组件","ensure"=>"核对原虚拟机身份","configure"=>"配置原虚拟机","ensure-checkpoint-policy"=>"核对自动检查点策略","windows"=>"安装 Windows","windows-install-state"=>"核对系统盘检查点","windows-install-diagnose"=>"诊断系统盘与检查点","ready"=>"检查来宾就绪状态","running"=>"读取原虚拟机状态","shutdown"=>"请求原虚拟机正常关机","guest"=>"执行来宾命令","copy-to" or "copy-from"=>"传送来宾文件","cleanup" or "cleanup-recovery"=>"清理任务安装介质","open"=>"连接原虚拟机","boundary-prepare" or "boundary-verify" or "boundary-offline"=>"核对任务网络通道","console-restore"=>"恢复会话设置","set-clipboard" or "clipboard-status"=>"读写剪贴板与会话策略","sync-display"=>"同步来宾显示模式",_=>"执行管理操作"
     };
     internal static string HyperVSubstageLabel(string? substage) => substage switch
     {

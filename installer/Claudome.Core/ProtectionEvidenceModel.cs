@@ -14,6 +14,7 @@ public sealed class ProtectionEvidence
     public ProtectionCheck Exit { get; set; } = new();
     public ProtectionCheck Browser { get; set; } = new();
     public ProtectionCheck Dns { get; set; } = new();
+    public string DnsEvidenceDetail { get; set; } = "";
     public string BlockAuditNote { get; set; } = "";
     public ProtectionCheck Outage { get; set; } = new();
 

@@ -200,7 +200,11 @@ Check 'dns-check-explains-disabled-audit-and-remains-read-only' {
     function Get-TaskUplink {return @{ifIndex=18;Name='fixture-link'}}
     function Get-NetAdapter {return @{ifIndex=18;Name='fixture-link';Status='Up'}}
     function Get-NetRoute {param($InterfaceIndex,$AddressFamily,$DestinationPrefix,$ErrorAction)}
-    function Invoke-RestMethod {return @{Status=0}}
+    function Invoke-RestMethod {
+        param([string]$Uri)
+        $qName=if($Uri -match 'name=([^&]+)'){[Uri]::UnescapeDataString($Matches[1])}else{''}
+        return @{Status=0;TC=$false;Question=@(@{name=$qName;type=1})}
+    }
     function Test-PhysicalProbe {return 'UNVERIFIED'}
     function Get-GuestBlockAuditStatus {return 'DISABLED'}
     function Set-GuestBlockAuditFailure {throw 'read-only diagnostic tried to change audit policy'}

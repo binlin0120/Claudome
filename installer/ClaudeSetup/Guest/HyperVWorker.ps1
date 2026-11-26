@@ -997,6 +997,101 @@ try {
                             $hvSocket=([string]$vm.EnhancedSessionTransportType -eq 'HvSocket')
                             $value=@{'hostEnhanced'=$hostEnhanced;'hvSocket'=$hvSocket} | ConvertTo-Json -Compress
                         }
+                        'sync-display' {
+                            $vm=Target-VM $d
+                            $targetW=[Math]::Clamp([int]$d.width,320,7680)
+                            $targetH=[Math]::Clamp([int]$d.height,240,4320)
+                            $session=$null
+                            try {
+                                $session=Guest-Session $d
+                                $value=[string](Invoke-Command -Session $session -ScriptBlock {
+                                    param($user,$vmId,$workspaceId,$tw,$th)
+                                    $ErrorActionPreference='Stop'
+                                    if($user -notmatch '^[a-zA-Z][a-zA-Z0-9_-]{0,19}$' -or $vmId -notmatch '^[a-fA-F0-9-]{36}$' -or $workspaceId -notmatch '^[a-fA-F0-9]{32}$'){throw 'VM_SCOPE'}
+                                    $sys=Get-CimInstance Win32_ComputerSystem
+                                    $idDoc=Get-Content -LiteralPath 'C:\ProgramData\ClaudeBootstrap\identity.json' -Raw | ConvertFrom-Json
+                                    if($sys.Manufacturer -ne 'Microsoft Corporation' -or $sys.Model -ne 'Virtual Machine' -or $idDoc.vmId -ne $vmId -or $idDoc.workspaceId -ne $workspaceId){throw 'VM_SCOPE'}
+                                    $pwshExe='C:\Users\'+$user+'\AppData\Local\ClaudeEnvironmentSetup\pwsh\pwsh.exe'
+                                    if(-not [IO.File]::Exists($pwshExe)){$pwshExe=Join-Path $PSHOME 'pwsh.exe'}
+                                    $runId=[guid]::NewGuid().ToString('N')
+                                    $bundle='C:\ProgramData\ClaudeBootstrap\display-'+$runId
+                                    $task='ClaudomeDisplay-'+$runId
+                                    New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+                                    $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetAccessRuleProtection($true,$false)
+                                    foreach($sid in @('S-1-5-18','S-1-5-32-544')){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','ContainerInherit,ObjectInherit','None','Allow'))}
+                                    Set-Acl -LiteralPath $bundle -AclObject $acl
+                                    $scriptFile=Join-Path $bundle 'sync.ps1'
+                                    $resultFile=Join-Path $bundle 'result.json'
+                                    $inFile=Join-Path $bundle 'req.json'
+                                    @{width=$tw;height=$th} | ConvertTo-Json -Compress | Set-Content -LiteralPath $inFile -Encoding utf8NoBOM
+                                    @'
+$ErrorActionPreference='Stop'
+$req=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'req.json') -Raw | ConvertFrom-Json
+$cs = "using System; using System.Runtime.InteropServices; namespace Claudome { public static class GuestDisplaySync { [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct DEVMODE { [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName; public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra; public uint dmFields; public int dmPositionX, dmPositionY; public uint dmDisplayOrientation, dmDisplayFixedOutput; public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName; public ushort dmLogPixels; public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency; public uint dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight; } [DllImport(""user32.dll"", CharSet = CharSet.Unicode)] public static extern bool EnumDisplaySettingsW(string? lpszDeviceName, int iModeNum, ref DEVMODE lpDevMode); [DllImport(""user32.dll"", CharSet = CharSet.Unicode)] public static extern int ChangeDisplaySettingsExW(string? lpszDeviceName, ref DEVMODE lpDevMode, IntPtr hwnd, uint dwflags, IntPtr lParam); } }"
+if (-not ('Claudome.GuestDisplaySync' -as [type])) { Add-Type -TypeDefinition $cs }
+$dm=[Claudome.GuestDisplaySync+DEVMODE]::new()
+$dm.dmSize=[uint16][Runtime.InteropServices.Marshal]::SizeOf([type][Claudome.GuestDisplaySync+DEVMODE])
+$before=''
+if([Claudome.GuestDisplaySync]::EnumDisplaySettingsW($null,-1,[ref]$dm)){$before="$($dm.dmPelsWidth)x$($dm.dmPelsHeight)"}
+$modes=[Collections.Generic.List[object]]::new()
+$seen=[Collections.Generic.HashSet[string]]::new()
+for($i=0;$i -lt 512;$i++){
+    $iter=[Claudome.GuestDisplaySync+DEVMODE]::new();$iter.dmSize=$dm.dmSize
+    if(-not [Claudome.GuestDisplaySync]::EnumDisplaySettingsW($null,$i,[ref]$iter)){break}
+    if($iter.dmBitsPerPel -ne 32 -or $iter.dmPelsWidth -lt 800){continue}
+    $k="$($iter.dmPelsWidth)x$($iter.dmPelsHeight)"
+    if($seen.Add($k)){$modes.Add([pscustomobject]@{width=[int]$iter.dmPelsWidth;height=[int]$iter.dmPelsHeight})}
+}
+$best=$null;$bestScore=-1.0
+foreach($m in $modes){
+    foreach($z in @(1.0,0.75,0.5,0.25)){
+        $sw=[double]$m.width*$z;$sh=[double]$m.height*$z
+        if($sw -le [double]$req.width -and $sh -le [double]$req.height){
+            $fill=($sw*$sh)/([double]$req.width*[double]$req.height)
+            $wide=if($m.width/[double]$m.height -ge 1.5){0.12}else{0.0}
+            $score=$fill+$wide+($z*0.04)
+            if($score -gt $bestScore){$bestScore=$score;$best=[pscustomobject]@{width=$m.width;height=$m.height;zoom=$z}}
+        }
+    }
+}
+$applied='';$selectedZoom=if($best){[double]$best.zoom}else{0.5}
+if($best -and $before -ne "$($best.width)x$($best.height)"){
+    for($i=0;$i -lt 512;$i++){
+        $cand=[Claudome.GuestDisplaySync+DEVMODE]::new();$cand.dmSize=$dm.dmSize
+        if(-not [Claudome.GuestDisplaySync]::EnumDisplaySettingsW($null,$i,[ref]$cand)){break}
+        if($cand.dmBitsPerPel -eq 32 -and $cand.dmPelsWidth -eq $best.width -and $cand.dmPelsHeight -eq $best.height){
+            $cand.dmFields=0x180000
+            if([Claudome.GuestDisplaySync]::ChangeDisplaySettingsExW($null,[ref]$cand,[IntPtr]::Zero,2,[IntPtr]::Zero) -eq 0){
+                if([Claudome.GuestDisplaySync]::ChangeDisplaySettingsExW($null,[ref]$cand,[IntPtr]::Zero,1,[IntPtr]::Zero) -eq 0){$applied="$($best.width)x$($best.height)"}
+            }
+            break
+        }
+    }
+}
+$after=$before;$adm=[Claudome.GuestDisplaySync+DEVMODE]::new();$adm.dmSize=$dm.dmSize
+if([Claudome.GuestDisplaySync]::EnumDisplaySettingsW($null,-1,[ref]$adm)){$after="$($adm.dmPelsWidth)x$($adm.dmPelsHeight)"}
+@{before=$before;after=$after;applied=$applied;selectedZoom=$selectedZoom;modes=@($modes | ForEach-Object {"$($_.width)x$($_.height)"})} | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'result.json') -Encoding utf8NoBOM
+'@ | Set-Content -LiteralPath $scriptFile -Encoding utf8NoBOM
+                                    $registered=$false
+                                    try {
+                                        $action=New-ScheduledTaskAction -Execute $pwshExe -Argument ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File "'+$scriptFile+'"') -WorkingDirectory $bundle
+                                        $principal=New-ScheduledTaskPrincipal -UserId ($env:COMPUTERNAME+'\'+$user) -LogonType Interactive -RunLevel Highest
+                                        $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromSeconds(15)) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+                                        Register-ScheduledTask -TaskName $task -Action $action -Principal $principal -Settings $settings -Force | Out-Null;$registered=$true
+                                        Start-ScheduledTask -TaskName $task
+                                        $deadline=[datetime]::UtcNow.AddSeconds(12)
+                                        while([datetime]::UtcNow -lt $deadline){
+                                            if([IO.File]::Exists($resultFile)){return [IO.File]::ReadAllText($resultFile)}
+                                            Start-Sleep -Milliseconds 200
+                                        }
+                                        throw 'GUEST_LOGIN_REQUIRED'
+                                    } finally {
+                                        if($registered){Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue}
+                                        Remove-Item -LiteralPath $bundle -Recurse -Force -ErrorAction SilentlyContinue
+                                    }
+                                } -ArgumentList ([string]$o.UserName),([string]$vm.Id),([string]$o.WorkspaceId),$targetW,$targetH)
+                            } finally { if($session){Remove-PSSession $session} }
+                        }
                         'windows' {Install-WindowsDisk $d;$value='started'}
                         'shutdown' {
                             $vm=Target-VM $d

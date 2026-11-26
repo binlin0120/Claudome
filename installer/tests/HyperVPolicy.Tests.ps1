@@ -514,13 +514,35 @@ Check 'guest-doh-fallback-and-hyperv-display-mode-selection' {
         $script:physicalStub = 'DENIED'
         function script:Test-PhysicalProbe([switch]$Dns) { $script:physicalStub }
 
-        # Case 1: Cloudflare fails, Google JSON succeeds + DENIED => PASSED
+        # Case 1: Cloudflare fails, Google JSON with matching Question (A) + TC=false + DENIED => PASSED
         function script:Invoke-RestMethod {
             param([string]$Uri, [switch]$NoProxy, $MaximumRedirection, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds, $Headers)
             if ($Uri -like '*cloudflare-dns.com*') { throw 'cloudflare blocked' }
-            [pscustomobject]@{ Status = 3 }
+            $qName = if ($Uri -match 'name=([^&]+)') { [Uri]::UnescapeDataString($Matches[1]) } else { '' }
+            [pscustomobject]@{ Status = 3; TC = $false; Question = @([pscustomobject]@{ name = ($qName + '.'); type = 1 }) }
         }
-        Assert-Case ((Test-ObservedDns) -eq 'PASSED' -and $script:LastObservedDnsDetail.dohProvider -eq 'Google')
+        Assert-Case ((Test-ObservedDns) -eq 'PASSED' -and $script:LastObservedDnsDetail.dohProvider -eq 'Google' -and $script:LastObservedDnsDetail.queryMatched -and $script:LastObservedDnsDetail.physicalProbe -eq 'DENIED')
+
+        # Case 1b: Status=0 WITHOUT Question (bare stub), truncated TC=true, or wrong type => DOH_UNVERIFIED (never PASSED)
+        function script:Invoke-RestMethod {
+            param([string]$Uri, [switch]$NoProxy, $MaximumRedirection, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds, $Headers)
+            [pscustomobject]@{ Status = 0 }
+        }
+        Assert-Case ((Test-ObservedDns) -eq 'DOH_UNVERIFIED' -and $script:LastObservedDnsDetail.dohReason -eq 'QUESTION_MISMATCH')
+
+        function script:Invoke-RestMethod {
+            param([string]$Uri, [switch]$NoProxy, $MaximumRedirection, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds, $Headers)
+            $qName = if ($Uri -match 'name=([^&]+)') { [Uri]::UnescapeDataString($Matches[1]) } else { '' }
+            [pscustomobject]@{ Status = 0; TC = $true; Question = @([pscustomobject]@{ name = $qName; type = 1 }) }
+        }
+        Assert-Case ((Test-ObservedDns) -eq 'DOH_UNVERIFIED' -and $script:LastObservedDnsDetail.dohReason -eq 'TRUNCATED')
+
+        function script:Invoke-RestMethod {
+            param([string]$Uri, [switch]$NoProxy, $MaximumRedirection, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds, $Headers)
+            $qName = if ($Uri -match 'name=([^&]+)') { [Uri]::UnescapeDataString($Matches[1]) } else { '' }
+            [pscustomobject]@{ Status = 0; TC = $false; Question = @([pscustomobject]@{ name = $qName; type = 28 }) }
+        }
+        Assert-Case ((Test-ObservedDns) -eq 'DOH_UNVERIFIED')
 
         # Case 2: Both DoH fail, BUT real physical probe shows BYPASS => BYPASS wins over DOH_UNVERIFIED
         function script:Invoke-RestMethod {

@@ -178,7 +178,7 @@ try {
         if($trace.loc -ne $payload.country){throw 'EXIT_COUNTRY_MISMATCH'}
         if($payload.expectedExitIp -and $trace.ip -ne $payload.expectedExitIp){throw 'EXIT_IP_MISMATCH'}
         $report.networkPassed=$true
-        try{$report.dnsCode=Test-ObservedDns}catch{$report.dnsCode='UNVERIFIED'}
+        try{$report.dnsCode=Test-ObservedDns;if($script:LastObservedDnsDetail){$report.dnsEvidence=$script:LastObservedDnsDetail}}catch{$report.dnsCode='UNVERIFIED'}
         if($report.dnsCode -eq 'BYPASS'){throw 'FIREWALL_BYPASS_DETECTED'}
         if(-not $payload.manualAdsPower){
             Set-GuestStep '配置或回读 AdsPower 环境'

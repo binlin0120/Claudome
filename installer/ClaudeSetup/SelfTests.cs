@@ -1985,10 +1985,17 @@ public static class SelfTests
             Assert(readyCpPolicies == 1, "Resumed Ready disk must invoke EnsureCheckpointPolicy before start");
         });
         await Check("hyperv-zoom-stepdown-and-segmented-node-probe-diagnostics", () => Sync(() => {
-            Assert(HyperVConsoleZoom.StepDownZoomLevels(3).SequenceEqual([3, 4, 5]) &&
+            Assert(HyperVConsoleZoom.StepDownZoomLevels(6).SequenceEqual([6, 3, 4, 5]) &&
+                   HyperVConsoleZoom.StepDownZoomLevels(3).SequenceEqual([3, 4, 5]) &&
                    HyperVConsoleZoom.StepDownZoomLevels(4).SequenceEqual([4, 5]) &&
-                   HyperVConsoleZoom.MatchesMenu("25%", 5),
-                "Zoom step-down sequence must descend to 25% when larger presets overflow");
+                   HyperVConsoleZoom.MatchesMenu("100%", 6) &&
+                   HyperVConsoleZoom.MatchesMenu("25%", 5) &&
+                   HyperVConsoleZoom.ZoomLevelForScale(1.0) == 6 &&
+                   HyperVConsoleZoom.ZoomLevelForScale(0.75) == 3,
+                "Zoom levels must include 100% and descend to 25% without implicit Auto fallback");
+            var partial = NativeConsoleHost.EvaluateCoverage(new ConsolePixelSize(512, 384), new ConsolePixelSize(1000, 500));
+            var full = NativeConsoleHost.EvaluateCoverage(new ConsolePixelSize(960, 480), new ConsolePixelSize(1000, 500));
+            Assert(!partial.FullFill && full.FullFill, "Coverage check must distinguish partial margins from full fill");
             var sample = new NodeProbeResult("1.1.1.1", "KR", "Asia/Seoul", "Korea Standard Time", 120, true,
                 "物理网卡 WLAN", "采用 宿主机系统 DNS（1 个公网 IPv4）", "物理网卡 WLAN · TCP 25 ms", "api.ip.sb · 120 ms", "未检测到宿主 TUN");
             Assert(sample.ResolutionSummary.Contains("宿主机系统 DNS") && sample.HandshakeSummary.Contains("TCP 25 ms") &&

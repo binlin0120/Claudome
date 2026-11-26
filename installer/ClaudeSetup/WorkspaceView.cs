@@ -583,14 +583,35 @@ public sealed partial class SetupWindow
         var vmId = state.VmId;
         var lifetime = desktopConnectionCancellation?.Token ?? CancellationToken.None;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
-        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        deadline.CancelAfter(TimeSpan.FromSeconds(22));
         var token = deadline.Token;
         fittingHyperVDisplay = true;
         UpdateDesktopActivity();
         try
         {
-            var initialLevel = HyperVConsoleZoom.ChooseZoomMenuLevel(host.ViewportPixels.Height);
+            var contentArea = host.GetVmConnectContentViewport();
+            HyperVDisplaySyncResult? synced = null;
+            if (state.Completed.Contains("guest-ready") &&
+                BoundaryRuntime.BackendFor(state) is HyperV activeHv &&
+                activeHv.HasManagementConnection)
+            {
+                var login = AppliedLogin();
+                if (state.Options.HasUsableGuestPassword(login.VmPassword))
+                {
+                    try
+                    {
+                        synced = await activeHv.SyncGuestDisplayMode(state, login, contentArea.Width, contentArea.Height, token);
+                    }
+                    catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { throw; }
+                    catch { }
+                }
+            }
+
+            var initialLevel = synced is { SelectedZoom: > 0 }
+                ? HyperVConsoleZoom.ZoomLevelForScale(synced.SelectedZoom)
+                : HyperVConsoleZoom.ChooseZoomMenuLevel(contentArea.Height);
             var applied = false;
+            var chosenLevel = initialLevel;
             var stillOverflow = false;
             foreach (var level in HyperVConsoleZoom.StepDownZoomLevels(initialLevel))
             {
@@ -599,6 +620,7 @@ public sealed partial class SetupWindow
                     .WaitAsync(token);
                 if (!clicked) continue;
                 applied = true;
+                chosenLevel = level;
                 await Task.Delay(320, lifetime); // VMConnect can animate its own resize after selecting zoom level.
                 if (lifetime.IsCancellationRequested || section != 7 || state.VmId != vmId ||
                     host != consoleHost || !host.IsAttached || host.GuestWindow != window.Handle)
@@ -613,7 +635,22 @@ public sealed partial class SetupWindow
                 if (!applied) host.Fit(forceRedraw: true);
                 stillOverflow = host.HasOverflowScrollbars();
                 if (applied && !stillOverflow)
-                    SetDesktopConnectionStatus("已完成 Hyper-V 显示区域缩放适配。");
+                {
+                    var zoomText = HyperVConsoleZoom.ZoomLabel(chosenLevel);
+                    if (synced is not null && TryParseDisplayMode(synced.After, out var gw, out var gh))
+                    {
+                        var scale = HyperVConsoleZoom.ScaleForZoomLevel(chosenLevel);
+                        var rendered = new ConsolePixelSize((int)Math.Round(gw * scale), (int)Math.Round(gh * scale));
+                        var coverage = NativeConsoleHost.EvaluateCoverage(rendered, contentArea);
+                        SetDesktopConnectionStatus(coverage.FullFill
+                            ? $"已完成 Hyper-V 桌面铺满适配（{synced.After} @ {zoomText}）。"
+                            : $"已消除滚动条（当前 {synced.After} @ {zoomText}，受限于基本会话固定比例/档位仍有留白，可用「独立窗口查看」）。");
+                    }
+                    else
+                    {
+                        SetDesktopConnectionStatus($"已消除滚动条（当前缩放 {zoomText}；首次设置/锁屏阶段受限于固定分辨率可能仍有留白，可用「独立窗口查看」）。");
+                    }
+                }
                 else
                     SetDesktopConnectionStatus(HyperVZoomFallbackMessage(applied));
             }
@@ -628,6 +665,14 @@ public sealed partial class SetupWindow
             fittingHyperVDisplay = false;
             UpdateDesktopActivity();
         }
+    }
+
+    private static bool TryParseDisplayMode(string? text, out int width, out int height)
+    {
+        width = 0; height = 0;
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var parts = text.Trim().Split('x', 'X');
+        return parts.Length == 2 && int.TryParse(parts[0], out width) && int.TryParse(parts[1], out height) && width > 0 && height > 0;
     }
 
     private static string HyperVZoomFallbackMessage(bool menuClicked) => menuClicked

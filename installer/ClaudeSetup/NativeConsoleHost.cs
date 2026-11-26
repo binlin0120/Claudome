@@ -345,6 +345,44 @@ public sealed class NativeConsoleHost : HwndHost
         return found;
     }
 
+    internal ConsolePixelSize GetVmConnectContentViewport()
+    {
+        var outer = ViewportPixels;
+        if (!IsAttached || outer.Width < 1 || outer.Height < 1 || !GetWindowRect(child, out var childBounds))
+            return new(Math.Max(1, outer.Width - 4), Math.Max(1, outer.Height - 96));
+
+        var outerW = Math.Max(1, childBounds.Right - childBounds.Left);
+        var outerH = Math.Max(1, childBounds.Bottom - childBounds.Top);
+        ConsolePixelSize? bestCanvas = null;
+        var sb = new System.Text.StringBuilder(64);
+        EnumChildWindows(child, (window, _) =>
+        {
+            if (!IsWindowVisible(window) || GetWindowThreadProcessId(window, out var pid) == 0 || pid != childProcess) return true;
+            if (!GetWindowRect(window, out var r)) return true;
+            var w = r.Right - r.Left;
+            var h = r.Bottom - r.Top;
+            if (w < outerW * 0.5 || h < outerH * 0.4 || (w >= outerW - 2 && h >= outerH - 2)) return true;
+            sb.Clear();
+            var cls = GetClassName(window, sb, sb.Capacity) > 0 ? sb.ToString() : "";
+            if (cls.Contains("ScrollBar", StringComparison.OrdinalIgnoreCase) || cls.Contains("ToolBar", StringComparison.OrdinalIgnoreCase)) return true;
+            if (bestCanvas is null || w * h > bestCanvas.Value.Width * bestCanvas.Value.Height)
+                bestCanvas = new(w, h);
+            return true;
+        }, IntPtr.Zero);
+
+        return bestCanvas ?? new(Math.Max(1, outer.Width - 4), Math.Max(1, outer.Height - 96));
+    }
+
+    internal static (bool FullFill, double WidthRatio, double HeightRatio) EvaluateCoverage(ConsolePixelSize rendered, ConsolePixelSize contentArea)
+    {
+        if (contentArea.Width <= 0 || contentArea.Height <= 0 || rendered.Width <= 0 || rendered.Height <= 0)
+            return (false, 0, 0);
+        var wr = rendered.Width / (double)contentArea.Width;
+        var hr = rendered.Height / (double)contentArea.Height;
+        var fits = rendered.Width <= contentArea.Width + 2 && rendered.Height <= contentArea.Height + 2;
+        return (fits && wr >= 0.88 && hr >= 0.88, wr, hr);
+    }
+
     internal static ConsolePixelSize? FindScrollingContent(IReadOnlyList<Rect> children, double minimumWidth, double minimumHeight)
     {
         foreach (var view in children)

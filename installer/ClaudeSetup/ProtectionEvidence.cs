@@ -103,15 +103,26 @@ public sealed partial class Deployment
             "STATUS_UNKNOWN" => "未能读取来宾审核设置",
             _ => ""
         };
+        var dnsDetail = "";
+        if (report.TryGetProperty("dnsEvidence", out var dnsEv) && dnsEv.ValueKind == JsonValueKind.Object)
+        {
+            var dohProvider = dnsEv.TryGetProperty("dohProvider", out var dp) && dp.ValueKind == JsonValueKind.String ? dp.GetString() ?? "" : "";
+            var dohReason = dnsEv.TryGetProperty("dohReason", out var dr) && dr.ValueKind == JsonValueKind.String ? dr.GetString() ?? "" : "";
+            var physical = dnsEv.TryGetProperty("physicalProbe", out var pp) && pp.ValueKind == JsonValueKind.String ? pp.GetString() ?? "" : "";
+            var dohText = !string.IsNullOrEmpty(dohProvider) ? $"DoH({dohProvider})={dohReason}" : $"DoH={dohReason}";
+            dnsDetail = $"{dohText} · 物理探针={physical}";
+        }
+        p.DnsEvidenceDetail = dnsDetail;
+        var dnsSuffix = dnsDetail.Length > 0 ? $"（{dnsDetail}）" : "";
         p.Dns = Code("dnsCode") switch
         {
-            "PASSED" => new(CheckStatus.Passed, now, "DoH 查询成功，物理上行直连 DNS 被拒绝"),
-            "BYPASS" => new(CheckStatus.Failed, now, "发现可从上行尝试绕过受控通道的配置或流量"),
-            "DOH_UNVERIFIED" => new(CheckStatus.Unverified, now, "加密 DNS 测试未返回有效响应"),
-            "BLOCK_AUDIT_DISABLED" => new(CheckStatus.Unverified, now, "加密 DNS 已响应；来宾未开启阻断审核，可点击「启用来宾阻断审核并重测」"),
-            "NO_DENIAL_EVIDENCE" => new(CheckStatus.Unverified, now, "加密 DNS 已响应，未取得直连 DNS 的阻断证据"),
-            "PHYSICAL_PROBE_UNVERIFIED" => new(CheckStatus.Unverified, now, "加密 DNS 已响应，无法完成物理上行探测"),
-            _ => new(CheckStatus.Unverified, now, "缺少 DNS 实测或 Windows 拒绝记录")
+            "PASSED" => new(CheckStatus.Passed, now, "DoH 查询成功，物理上行直连 DNS 被拒绝" + dnsSuffix),
+            "BYPASS" => new(CheckStatus.Failed, now, "发现可从上行尝试绕过受控通道的配置或流量" + dnsSuffix),
+            "DOH_UNVERIFIED" => new(CheckStatus.Unverified, now, "加密 DNS 测试未返回有效响应" + dnsSuffix),
+            "BLOCK_AUDIT_DISABLED" => new(CheckStatus.Unverified, now, "加密 DNS 已响应；来宾未开启阻断审核，可点击「启用来宾阻断审核并重测」" + dnsSuffix),
+            "NO_DENIAL_EVIDENCE" => new(CheckStatus.Unverified, now, "加密 DNS 已响应，未取得直连 DNS 的阻断证据" + dnsSuffix),
+            "PHYSICAL_PROBE_UNVERIFIED" => new(CheckStatus.Unverified, now, "加密 DNS 已响应，无法完成物理上行探测" + dnsSuffix),
+            _ => new(CheckStatus.Unverified, now, "缺少 DNS 实测或 Windows 拒绝记录" + dnsSuffix)
         };
         if (Flag("outageTested"))
         {
@@ -181,6 +192,7 @@ public sealed partial class Deployment
             guestExit = SafeCheck(state.Protection.Exit),
             browserExit = SafeCheck(state.Protection.Browser),
             dns = SafeCheck(state.Protection.Dns),
+            dnsDetail = state.Protection.DnsEvidenceDetail,
             blockAudit = state.Protection.BlockAuditNote,
             outage = SafeCheck(state.Protection.Outage)
         });

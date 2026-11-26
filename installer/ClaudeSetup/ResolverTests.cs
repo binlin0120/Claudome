@@ -103,5 +103,66 @@ public static class ResolverTests
                 report.HostNetwork.HostTunnelDetected,
                 "Reachable system DNS skipped or TUN context missing");
         });
+        await check("resolver-non-object-missing-status-and-truncated-doh-fallback-cleanly", async () => {
+            var payloads = new[] { "[]", "\"ok\"", "{\"Answer\":[{\"type\":1,\"data\":\"1.1.1.1\"}]}", "{\"Status\":0,\"TC\":true,\"Answer\":[{\"type\":1,\"data\":\"1.1.1.1\"}]}" };
+            foreach (var bad in payloads)
+            {
+                var handler = new Handler((request, _) =>
+                    Task.FromResult(request.RequestUri!.Host == "cloudflare-dns.com"
+                        ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(bad) }
+                        : Good()));
+                using var client = new HttpClient(handler);
+                var addresses = await NodeEndpointResolver.Resolve("shape-fixture.example", CancellationToken.None, client);
+                Assert(handler.Calls == 2 && addresses.SequenceEqual(["1.1.1.1", "8.8.8.8"]), $"Bad DoH shape '{bad}' aborted backup provider");
+            }
+            var hvCalls = new List<string>();
+            var hvHandler = new Handler((request, _) => {
+                hvCalls.Add(request.RequestUri!.Host);
+                var body = request.RequestUri.Host == "dns.alidns.com" ? "[]" : "{\"Status\":0,\"Answer\":[{\"type\":1,\"data\":\"9.9.9.9\"}]}";
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
+            });
+            using var hvClient = new HttpClient(hvHandler);
+            var hvPlan = await NodeEndpointResolver.ResolveCandidateGroupsAsync("shape-hv.example", 443, EndpointResolutionStrategy.HyperVStandalone,
+                CancellationToken.None, hvClient,
+                systemDnsLookup: (_, _) => Task.FromResult(Array.Empty<IPAddress>()),
+                tcpProbe: (a, _, _) => Task.FromResult(new TcpReachabilityResult(true, a[0], 18, "物理网卡 WLAN")),
+                stopOnFirstTcpReachable: true);
+            Assert(hvCalls.Contains("dns.alidns.com") && hvCalls.Contains("doh.pub") && hvPlan.Groups[0].Addresses.SequenceEqual(["9.9.9.9"]),
+                "HyperVStandalone DoH array response [] aborted backup chain");
+        });
+        await check("hyperv-tcp-ok-but-handshake-failed-advances-to-candidate-b-and-apply-pins-verified-endpoints", async () => {
+            var plan = new EndpointCandidatePlan(
+                [
+                    new("宿主机系统 DNS", ["1.1.1.1"], new TcpReachabilityResult(true, "1.1.1.1", 15, "物理网卡 WLAN")),
+                    new("直连 DoH (AliDNS)", ["8.8.8.8"], new TcpReachabilityResult(true, "8.8.8.8", 24, "物理网卡 WLAN"))
+                ],
+                [],
+                new HostNetworkContext(false, false, [], "未检测到宿主 TUN 或 HTTP 系统代理"));
+            var tried = new List<string>();
+            var probeResult = await NodeExitProbe.ExecuteAcrossCandidatePlanAsync(plan, report => {
+                tried.Add(report.Addresses[0]);
+                if (report.Addresses[0] == "1.1.1.1")
+                    throw new NodeProbeException("TCP 已通，但代理协议握手失败（PROXY_TLS_HANDSHAKE）");
+                return Task.FromResult(new NodeProbeResult("203.0.113.10", "KR", "Asia/Seoul", "Korea Standard Time", 90, true,
+                    "物理网卡 WLAN", report.Summary, "TCP 24ms · 握手成功", "api.ip.sb", report.HostNetwork.Summary,
+                    report.Addresses, report.Addresses));
+            }, CancellationToken.None);
+            Assert(tried.SequenceEqual(["1.1.1.1", "8.8.8.8"]) &&
+                probeResult.VerifiedFirstHopAddresses!.SequenceEqual(["8.8.8.8"]) &&
+                probeResult.ResolutionSummary.Contains("协议/出口失败"),
+                "Candidate A TCP-ok handshake-fail did not advance to Candidate B");
+
+            // Fixture B: After probe succeeds on 8.8.8.8, DNS changes to 9.9.9.9 -> Apply with pinned endpoints keeps verified 8.8.8.8
+            var proxy = new ProxyNode("N", "trojan", "node.example", 443, "{}");
+            var resolverCalls = 0;
+            var pinned = new Deployment.PinnedRouteEndpoints(probeResult.VerifiedFirstHopAddresses!, probeResult.VerifiedExitAddresses!, probeResult.ResolutionSummary);
+            var bound = await Deployment.ResolveOrBindEndpointsAsync(proxy, proxy, false, EndpointResolutionStrategy.HyperVStandalone, pinned, CancellationToken.None,
+                (_, _, _, _) => {
+                    resolverCalls++;
+                    return Task.FromResult(new EndpointResolutionReport(["9.9.9.9"], "DNS变更", "DNS变更", [], plan.HostNetwork, null));
+                });
+            Assert(resolverCalls == 0 && bound.FirstHopAddresses.SequenceEqual(["8.8.8.8"]),
+                "Apply re-resolved DNS instead of pinning probe-verified endpoints");
+        });
     }
 }

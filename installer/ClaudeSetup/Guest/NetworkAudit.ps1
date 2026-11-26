@@ -390,28 +390,61 @@ function Test-ObservedDns {
     $adapter=Get-TaskUplink
     $other=@(Get-NetAdapter | Where-Object {$_.Status -eq 'Up' -and $_.ifIndex -ne $adapter.ifIndex -and $_.Name -ne 'ClaudeTun'})
     $v6=@(Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 -DestinationPrefix '::/0' -ErrorAction SilentlyContinue)
-    if($other.Count -or $v6.Count){return 'BYPASS'}
+    if($other.Count -or $v6.Count){
+        $script:LastObservedDnsDetail=@{dohOk=$false;dohProvider='';dohReason='UPLINK_BYPASS';queryMatched=$false;physicalProbe='BYPASS';blockAudit=''}
+        return 'BYPASS'
+    }
     $nonce='claudome-'+[guid]::NewGuid().ToString('N')+'.example.com'
     $dohProvider=''
+    $dohReason='NO_RESPONSE'
     foreach($provider in @(
         @{Name='Cloudflare';Url=('https://cloudflare-dns.com/dns-query?type=A&name='+$nonce)},
         @{Name='Google';Url=('https://dns.google/resolve?type=A&name='+$nonce)}
     )) {
         try {
             $result=Invoke-RestMethod -Uri $provider.Url -NoProxy -MaximumRedirection 0 -ConnectionTimeoutSeconds 6 -OperationTimeoutSeconds 8 -Headers @{Accept='application/dns-json';'Cache-Control'='no-cache'}
-            if($null -ne $result.Status -and $result.Status -in @(0,3)){$dohProvider=$provider.Name;break}
-        }catch{}
+            if($null -eq $result -or $result -is [Array] -or $result -is [string] -or $result -is [ValueType]){$dohReason='INVALID_SHAPE';continue}
+            $getField={param($obj,[string]$key) if($obj -is [Collections.IDictionary]){if($obj.Contains($key)){return $obj[$key]};return $null};$p=$obj.PSObject.Properties[$key];if($null -ne $p){return $p.Value};return $null}
+            $statusVal=& $getField $result 'Status'
+            if($null -eq $statusVal -or $statusVal -notin @(0,3)){$dohReason='BAD_STATUS';continue}
+            $tcVal=& $getField $result 'TC'
+            if($tcVal -eq $true){$dohReason='TRUNCATED';continue}
+            $qVal=& $getField $result 'Question'
+            $questions=if($null -ne $qVal){@($qVal)}else{@()}
+            $matched=$false
+            foreach($q in $questions) {
+                if($null -eq $q -or $q -is [string] -or $q -is [ValueType]){continue}
+                $qNameRaw=& $getField $q 'name';$qTypeRaw=& $getField $q 'type'
+                if($null -eq $qNameRaw -or $null -eq $qTypeRaw){continue}
+                $qName=([string]$qNameRaw).TrimEnd('.')
+                $qType=0
+                try{$qType=[int]$qTypeRaw}catch{continue}
+                if($qName.Equals($nonce,[StringComparison]::OrdinalIgnoreCase) -and $qType -eq 1){$matched=$true;break}
+            }
+            if(-not $matched){$dohReason='QUESTION_MISMATCH';continue}
+            $dohProvider=$provider.Name
+            $dohReason='VERIFIED'
+            break
+        }catch{$dohReason='REQUEST_FAILED'}
     }
     $probeStatus='PROBE_ERROR'
     try {
         $probeStatus=Test-PhysicalProbe -Dns
     }catch{$probeStatus='PROBE_ERROR'}
-    $script:LastObservedDnsDetail=@{dohOk=[bool]$dohProvider;dohProvider=$dohProvider;physical=$probeStatus}
+    $auditStatus=if($probeStatus -in @('BYPASS','DENIED','PROBE_ERROR')){''}else{Get-GuestBlockAuditStatus}
+    $script:LastObservedDnsDetail=@{
+        dohOk=[bool]$dohProvider
+        dohProvider=$dohProvider
+        dohReason=$dohReason
+        queryMatched=[bool]$dohProvider
+        physicalProbe=$probeStatus
+        blockAudit=$auditStatus
+    }
     if($probeStatus -eq 'BYPASS'){return 'BYPASS'}
     if(-not $dohProvider){return 'DOH_UNVERIFIED'}
     if($probeStatus -eq 'DENIED'){return 'PASSED'}
     if($probeStatus -eq 'PROBE_ERROR'){return 'PHYSICAL_PROBE_UNVERIFIED'}
-    if((Get-GuestBlockAuditStatus) -eq 'DISABLED'){return 'BLOCK_AUDIT_DISABLED'}
+    if($auditStatus -eq 'DISABLED'){return 'BLOCK_AUDIT_DISABLED'}
     return 'NO_DENIAL_EVIDENCE'
 }
 function Measure-GuestNetwork {

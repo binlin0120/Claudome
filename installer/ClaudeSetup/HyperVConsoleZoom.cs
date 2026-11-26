@@ -14,7 +14,8 @@ internal static partial class HyperVConsoleZoom
         ["Auto", "Automatic", "自动", "自動"],
         ["75%"],
         ["50%"],
-        ["25%"]
+        ["25%"],
+        ["100%"]
     ];
 
     internal static bool MatchesMenu(string name, int level)
@@ -30,15 +31,40 @@ internal static partial class HyperVConsoleZoom
     internal static int ChooseZoomMenuLevel(int viewportHeight) =>
         viewportHeight < 560 ? 4 : viewportHeight < 790 ? 3 : 2;
 
+    internal static int ZoomLevelForScale(double scale) =>
+        scale >= 0.99 ? 6 : scale >= 0.74 ? 3 : scale >= 0.49 ? 4 : 5;
+
+    internal static double ScaleForZoomLevel(int level) => level switch
+    {
+        6 => 1.0,
+        3 => 0.75,
+        4 => 0.5,
+        5 => 0.25,
+        _ => 1.0
+    };
+
+    internal static string ZoomLabel(int level) => level switch
+    {
+        6 => "100%",
+        3 => "75%",
+        4 => "50%",
+        5 => "25%",
+        2 => "自动",
+        _ => "未知"
+    };
+
     internal static int[] StepDownZoomLevels(int initialLevel)
     {
-        var sequence = new List<int> { initialLevel };
-        foreach (var candidate in new[] { 3, 4, 5 })
+        var order = initialLevel switch
         {
-            if (candidate >= initialLevel && !sequence.Contains(candidate))
-                sequence.Add(candidate);
-        }
-        return [.. sequence];
+            6 => new[] { 6, 3, 4, 5 },
+            2 => new[] { 2, 3, 4, 5 },
+            3 => new[] { 3, 4, 5 },
+            4 => new[] { 4, 5 },
+            5 => new[] { 5 },
+            _ => new[] { initialLevel, 4, 5 }
+        };
+        return order.Distinct().ToArray();
     }
 
     internal static bool TrySelectAuto(ConsoleWindow window, CancellationToken token) =>
@@ -71,8 +97,8 @@ internal static partial class HyperVConsoleZoom
                 expanded.Push(section);
             }
 
-            var target = FindMenuItem(menu, targetLevel, window.ProcessId, token)
-                ?? (targetLevel != 2 ? FindMenuItem(menu, 2, window.ProcessId, token) : null);
+            // Never silently fall back to Auto if the requested discrete zoom item is missing.
+            var target = FindMenuItem(menu, targetLevel, window.ProcessId, token);
             if (target is null || !target.TryGetCurrentPattern(InvokePattern.Pattern, out var invoke)) return false;
             token.ThrowIfCancellationRequested();
             if (!ConsoleWindowLocator.IsAlive(window)) return false;

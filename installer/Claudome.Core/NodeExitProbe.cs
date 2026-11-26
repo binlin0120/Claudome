@@ -22,7 +22,9 @@ public sealed record NodeProbeResult(
     string ResolutionSummary = "",
     string HandshakeSummary = "",
     string TargetSummary = "",
-    string HostNetworkSummary = "");
+    string HostNetworkSummary = "",
+    string[]? VerifiedFirstHopAddresses = null,
+    string[]? VerifiedExitAddresses = null);
 
 public static class RegionCatalog
 {
@@ -145,11 +147,44 @@ public static class NodeExitProbe
         return new(ip, country, ianaZone, windowsZone, Math.Max(1, latencyMs), RegionCatalog.IsSupported(country));
     }
 
+    internal static async Task<T> ExecuteAcrossCandidatePlanAsync<T>(
+        EndpointCandidatePlan plan,
+        Func<EndpointResolutionReport, Task<T>> executeCandidate,
+        CancellationToken token)
+    {
+        var groupFailures = new List<string>();
+        Exception? lastError = null;
+        for (var i = 0; i < plan.Groups.Length; i++)
+        {
+            token.ThrowIfCancellationRequested();
+            var group = plan.Groups[i];
+            var priorNotes = groupFailures.Count > 0 ? string.Join("；", groupFailures) + " → " : "";
+            var summary = $"{priorNotes}候选组 {i + 1}/{plan.Groups.Length}（{group.Source} · {group.Addresses.Length} 个公网 IPv4）";
+            var report = new EndpointResolutionReport(group.Addresses, group.Source, summary, plan.Attempts, plan.HostNetwork, group.Reachability);
+            try
+            {
+                return await executeCandidate(report);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error) when (error is NodeProbeException or SetupException)
+            {
+                lastError = error;
+                var tcpNote = group.Reachability?.Reachable == true
+                    ? $"TCP 已通({group.Reachability.LatencyMs}ms)"
+                    : "TCP 未通";
+                groupFailures.Add($"{group.Source}({tcpNote}，协议/出口失败)");
+            }
+        }
+        if (lastError is NodeProbeException npe && groupFailures.Count > 1)
+            throw new NodeProbeException($"已依次核验 {groupFailures.Count} 组候选地址均未通过（{string.Join("；", groupFailures)}）。\n{npe.Message}");
+        throw lastError ?? new NodeProbeException("未取得可核验的候选节点地址。");
+    }
+
     public static Task<NodeProbeResult> ProbeAsync(SetupOptions options, ProxyNode selectedNode, ProxyNode? upstreamNode,
         CancellationToken token, IProgress<DownloadProgress>? progress = null,
         EndpointResolutionStrategy strategy = EndpointResolutionStrategy.Default) =>
         ProbeThroughCore(options, selectedNode, upstreamNode, strategy, token,
-            async (client, runtime, report) =>
+            async (client, runtime, report, exitAddresses) =>
             {
                 var first = upstreamNode ?? selectedNode;
                 var reach = report.FirstHopReachability;
@@ -170,13 +205,15 @@ public static class NodeExitProbe
                     OutboundInterfaceSummary = ifaceLabel,
                     ResolutionSummary = report.Summary,
                     HandshakeSummary = handshakeText,
-                    HostNetworkSummary = report.HostNetwork.Summary
+                    HostNetworkSummary = report.HostNetwork.Summary,
+                    VerifiedFirstHopAddresses = [.. report.Addresses],
+                    VerifiedExitAddresses = [.. exitAddresses]
                 };
             }, progress);
 
     internal static Task<string> MeasureAsync(SetupOptions options, ProxyNode selectedNode, ProxyNode? upstreamNode,
         CancellationToken token, EndpointResolutionStrategy strategy = EndpointResolutionStrategy.Default) =>
-        ProbeThroughCore(options, selectedNode, upstreamNode, strategy, token, async (client, runtime, report) =>
+        ProbeThroughCore(options, selectedNode, upstreamNode, strategy, token, async (client, runtime, report, _) =>
         {
             var first = upstreamNode ?? selectedNode;
             var tcp = report.FirstHopReachability?.Reachable == true
@@ -274,7 +311,7 @@ public static class NodeExitProbe
         ProxyNode? upstreamNode,
         EndpointResolutionStrategy strategy,
         CancellationToken token,
-        Func<HttpClient, BootstrapCore, EndpointResolutionReport, Task<T>> operation,
+        Func<HttpClient, BootstrapCore, EndpointResolutionReport, string[], Task<T>> operation,
         IProgress<DownloadProgress>? progress = null)
     {
         Paths.ValidateRoot(options.Root);
@@ -291,27 +328,33 @@ public static class NodeExitProbe
             HostPlatform.Environment.RestrictPrivateDirectory(probeOptions.Private);
 
             var firstHop = upstreamNode ?? selectedNode;
-            var firstReport = await NodeEndpointResolver.ResolveDetailedAsync(firstHop.Server, firstHop.Port, strategy, token);
+            var candidatePlan = await NodeEndpointResolver.ResolveCandidateGroupsAsync(
+                firstHop.Server, firstHop.Port, strategy, token,
+                stopOnFirstTcpReachable: strategy == EndpointResolutionStrategy.Default);
             // In two-hop chain mode, host resolves exit hop candidates without connecting directly to the second hop.
-            var exitAddresses = upstreamNode is null
-                ? firstReport.Addresses
+            var secondHopAddresses = upstreamNode is null
+                ? null
                 : (await NodeEndpointResolver.ResolveDetailedAsync(selectedNode.Server, 0, strategy, token)).Addresses;
-            var coreConfig = NetworkImport.CoreConfig(selectedNode, firstReport.Addresses, null, upstreamNode, exitAddresses);
 
-            await using var runtime = await BootstrapCore.Start(probeOptions, coreConfig, token, progress);
-            using var handler = new SocketsHttpHandler
+            return await ExecuteAcrossCandidatePlanAsync(candidatePlan, async report =>
             {
-                Proxy = new WebProxy($"socks5://127.0.0.1:{runtime.Binding.port}", false, [], new NetworkCredential(runtime.Binding.username, runtime.Binding.password)),
-                UseProxy = true,
-                AllowAutoRedirect = false,
-                ConnectTimeout = TimeSpan.FromSeconds(8),
-                PooledConnectionLifetime = TimeSpan.Zero
-            };
-            using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("Claudome/0.4");
-            client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+                var exitAddresses = secondHopAddresses ?? report.Addresses;
+                var coreConfig = NetworkImport.CoreConfig(selectedNode, report.Addresses, null, upstreamNode, exitAddresses);
+                await using var runtime = await BootstrapCore.Start(probeOptions, coreConfig, token, progress);
+                using var handler = new SocketsHttpHandler
+                {
+                    Proxy = new WebProxy($"socks5://127.0.0.1:{runtime.Binding.port}", false, [], new NetworkCredential(runtime.Binding.username, runtime.Binding.password)),
+                    UseProxy = true,
+                    AllowAutoRedirect = false,
+                    ConnectTimeout = TimeSpan.FromSeconds(8),
+                    PooledConnectionLifetime = TimeSpan.Zero
+                };
+                using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("Claudome/0.4");
+                client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
 
-            return await operation(client, runtime, firstReport);
+                return await operation(client, runtime, report, exitAddresses);
+            }, token);
         }
         finally
         {

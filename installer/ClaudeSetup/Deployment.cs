@@ -254,8 +254,35 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             await downloader.Get(resource, o.Cache, downloads, token);
         }
     }
+    public sealed record PinnedRouteEndpoints(string[] FirstHopAddresses, string[] ExitAddresses, string SourceSummary);
+
+    internal static async Task<(string[] FirstHopAddresses, string[] ExitAddresses, string Summary)> ResolveOrBindEndpointsAsync(
+        ProxyNode firstHop,
+        ProxyNode finalNode,
+        bool hasUpstream,
+        EndpointResolutionStrategy strategy,
+        PinnedRouteEndpoints? pinnedEndpoints,
+        CancellationToken token,
+        Func<string, int, EndpointResolutionStrategy, CancellationToken, Task<EndpointResolutionReport>>? resolver = null)
+    {
+        if (pinnedEndpoints is not null)
+        {
+            var firstPinned = IsolationPolicy.ValidateEndpoints(pinnedEndpoints.FirstHopAddresses).Order(StringComparer.Ordinal).ToArray();
+            var exitPinned = hasUpstream
+                ? IsolationPolicy.ValidateEndpoints(pinnedEndpoints.ExitAddresses).Order(StringComparer.Ordinal).ToArray()
+                : firstPinned;
+            return (firstPinned, exitPinned, $"沿用刚核验通过的端点（{pinnedEndpoints.SourceSummary}）");
+        }
+        var resolve = resolver ?? ((s, p, st, ct) => NodeEndpointResolver.ResolveDetailedAsync(s, p, st, ct));
+        var firstResolution = await resolve(firstHop.Server, firstHop.Port, strategy, token);
+        var exitAddresses = hasUpstream
+            ? (await resolve(finalNode.Server, 0, strategy, token)).Addresses
+            : firstResolution.Addresses;
+        return (firstResolution.Addresses, exitAddresses, $"{firstResolution.Summary}；{firstResolution.HostNetwork.Summary}");
+    }
+
     private void Stage(SessionState state, string title) { state.Stage = title; state.Status = "进行中"; state.Save(); messages.Report(title); installation?.Report(new(title)); }
-    public async Task Run(SessionState state, Secrets secrets, CancellationToken token, bool preserveUnloadedSecrets = false, bool checkSavedNetwork = false, bool reconfigureGuestNetwork = false)
+    public async Task Run(SessionState state, Secrets secrets, CancellationToken token, bool preserveUnloadedSecrets = false, bool checkSavedNetwork = false, bool reconfigureGuestNetwork = false, PinnedRouteEndpoints? pinnedEndpoints = null, int preferredDesktopWidth = 0, int preferredDesktopHeight = 0)
     {
         Machine.RequireHyperVStandaloneHostEligible();
         var o = state.Options;
@@ -334,10 +361,10 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 messages.Report("恢复检查：解析所选节点地址，准备专用网络。");
                 port = firstHop.Port;
                 var resolutionStrategy = ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default;
-                var firstResolution = await NodeEndpointResolver.ResolveDetailedAsync(firstHop.Server, port, resolutionStrategy, token);
-                addresses = firstResolution.Addresses;
-                messages.Report($"节点解析：{firstResolution.Summary}；{firstResolution.HostNetwork.Summary}。");
-                var exitAddresses = upstream is null ? addresses : (await NodeEndpointResolver.ResolveDetailedAsync(node.Server, 0, resolutionStrategy, token)).Addresses;
+                var (resolvedFirst, exitAddresses, resolutionSummary) = await ResolveOrBindEndpointsAsync(
+                    firstHop, node, upstream is not null, resolutionStrategy, pinnedEndpoints, token);
+                addresses = resolvedFirst;
+                messages.Report($"节点解析：{resolutionSummary}。");
                 config = NetworkImport.CoreConfig(node, addresses, o.PlatformId == "virtualbox" ? null : "ClaudomeBridge", upstream, exitAddresses);
                 var configHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(config))).ToLowerInvariant();
                 var reuseGateway=previousBackend is not null && state.CoreConfigSha256==configHash;
@@ -598,7 +625,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             }
             var runId=Guid.NewGuid().ToString("N");
             var guestPayload = guestRoot + $@"\payload-{runId}.json";
-            var payload = JsonSerializer.Serialize(new { runId, platformId = o.PlatformId, workspaceId = o.WorkspaceId, sharedClipboardEnabled = o.SharedClipboardEnabled, manualAdsPower = o.ManualAdsPower, adsPowerApiKey = o.ManualAdsPower ? "" : secrets.AdsPowerApiKey, ianaTimeZone, vmId = state.VmId, country = o.Country, timeZoneId = o.TimeZoneId, networkEnabled = o.NetworkSource != "稍后配置", externalGateway = true, transportKind = o.PlatformId == "virtualbox" ? "ethernet" : "bus", coreConfig = config, endpointAddresses = addresses, endpointPort = port, expectedExitIp = secrets.ExpectedExitIp, testOutage = o.TestOutage && !state.OutagePassed, resumeNetwork, resumeBrowser, browserOnly = continueBrowser, resumeReopenPassed=state.BrowserReopenPassed, coreConfigSha256=state.CoreConfigSha256, resources = resources.Select(r => new { id = r.Id, fileName = r.FileName, sha256 = r.Sha256 }) });
+            var payload = JsonSerializer.Serialize(new { runId, platformId = o.PlatformId, workspaceId = o.WorkspaceId, sharedClipboardEnabled = o.SharedClipboardEnabled, preferredDesktopWidth, preferredDesktopHeight, manualAdsPower = o.ManualAdsPower, adsPowerApiKey = o.ManualAdsPower ? "" : secrets.AdsPowerApiKey, ianaTimeZone, vmId = state.VmId, country = o.Country, timeZoneId = o.TimeZoneId, networkEnabled = o.NetworkSource != "稍后配置", externalGateway = true, transportKind = o.PlatformId == "virtualbox" ? "ethernet" : "bus", coreConfig = config, endpointAddresses = addresses, endpointPort = port, expectedExitIp = secrets.ExpectedExitIp, testOutage = o.TestOutage && !state.OutagePassed, resumeNetwork, resumeBrowser, browserOnly = continueBrowser, resumeReopenPassed=state.BrowserReopenPassed, coreConfigSha256=state.CoreConfigSha256, resources = resources.Select(r => new { id = r.Id, fileName = r.FileName, sha256 = r.Sha256 }) });
             using var input = new PrivateFile(o.Private, payload, ".json");
             if (refreshGuestScripts)
             {

@@ -525,6 +525,12 @@ public sealed partial class SetupWindow
         var result = await NodeExitProbe.ProbeAsync(options, selected, upstream, token, strategy: probeStrategy);
         if (result.CountryCode != options.Country || (candidate.ExpectedExitIp.Length > 0 && result.ExitIp != candidate.ExpectedExitIp))
             throw new SetupException("候选线路的实测出口与预期不符，未切换当前线路。");
+        var pinnedEndpoints = result.VerifiedFirstHopAddresses is { Length: > 0 }
+            ? new Deployment.PinnedRouteEndpoints(
+                result.VerifiedFirstHopAddresses,
+                result.VerifiedExitAddresses is { Length: > 0 } ? result.VerifiedExitAddresses : result.VerifiedFirstHopAddresses,
+                string.IsNullOrWhiteSpace(result.ResolutionSummary) ? "候选测速已核验" : result.ResolutionSummary)
+            : null;
         candidate.BackupRoutes = [.. (pendingBackupRoutes ??
             (restoreDraft ? candidate.BackupRoutes : previous.BackupRoutes))];
         candidate.BackupRoutes.RemoveAll(r => r.NodeJson == candidate.SelectedNodeJson && r.UpstreamJson == candidate.UpstreamNodeJson);
@@ -542,7 +548,9 @@ public sealed partial class SetupWindow
         string? writtenRevision = null;
         try
         {
-            await Engine().Run(staged, candidate, token);
+            await Engine().Run(staged, candidate, token, pinnedEndpoints: pinnedEndpoints,
+                preferredDesktopWidth: staged.Options.PlatformId == "hyperv" && consoleHost?.IsAttached == true ? consoleHost.GetVmConnectContentViewport().Width : 0,
+                preferredDesktopHeight: staged.Options.PlatformId == "hyperv" && consoleHost?.IsAttached == true ? consoleHost.GetVmConnectContentViewport().Height : 0);
             token.ThrowIfCancellationRequested();
             if (!staged.NetworkPassed) throw new SetupException("来宾未通过新线路出口核验。");
             if (staged.Protection.Boundary.Status != CheckStatus.Passed || staged.Protection.Exit.Status != CheckStatus.Passed ||

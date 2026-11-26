@@ -23,6 +23,8 @@ internal enum HyperVWindowsInstallState
     NeedsRecovery
 }
 
+public sealed record HyperVDisplaySyncResult(string Before, string After, string Applied, double SelectedZoom, string[] Modes);
+
 internal sealed record HyperVWindowsInstallDiagnosis(
     HyperVWindowsInstallState State,
     string Reason,
@@ -66,6 +68,7 @@ public sealed class HyperV : IVmBackend
     {
         "ready" => TimeSpan.FromSeconds(30),
         "repair-guest-session" => TimeSpan.FromSeconds(90),
+        "sync-display" => TimeSpan.FromSeconds(20),
         _ when IsCancellableReadOperation(operation) => TimeSpan.FromSeconds(30),
         _ => null
     };
@@ -505,6 +508,11 @@ public sealed class HyperV : IVmBackend
     {
         var arguments=args.ToArray(); var interactive=arguments.Any(a=>new[]{"Configure.ps1","BridgeInstall.ps1","Rollback.ps1","Validate.ps1"}.Contains(Path.GetFileName(a)));
         return Call(s.Options,"guest",new{vmId=s.VmId,password=secrets.VmPassword,executable,arguments,interactiveScript=interactive?Catalog.EmbeddedText("InteractiveRun.ps1"):null,seconds=Math.Clamp(seconds,30,1800)},token);
+    }
+    public async Task<HyperVDisplaySyncResult?> SyncGuestDisplayMode(SessionState s, Secrets secrets, int targetWidth, int targetHeight, CancellationToken token)
+    {
+        var raw = await Call(s.Options, "sync-display", new { vmId = s.VmId, password = secrets.VmPassword, width = targetWidth, height = targetHeight }, token);
+        return JsonSerializer.Deserialize<HyperVDisplaySyncResult>(raw, JsonFile.Format);
     }
     public async Task<bool> GuestFileExists(SessionState s, Secrets secrets, string file, CancellationToken token)
     {

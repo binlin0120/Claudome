@@ -756,7 +756,9 @@ public sealed partial class SetupWindow : Window
         }
         await (runEngineHookForTests is not null
             ? runEngineHookForTests(state, secrets, token, !secretsLoaded, checkSavedNetwork, reconfigureGuestNetwork)
-            : Engine().Run(state, secrets, token, preserveUnloadedSecrets: !secretsLoaded, checkSavedNetwork: checkSavedNetwork, reconfigureGuestNetwork: reconfigureGuestNetwork));
+            : Engine().Run(state, secrets, token, preserveUnloadedSecrets: !secretsLoaded, checkSavedNetwork: checkSavedNetwork, reconfigureGuestNetwork: reconfigureGuestNetwork,
+                preferredDesktopWidth: state.Options.PlatformId == "hyperv" ? (consoleHost?.IsAttached == true ? consoleHost.GetVmConnectContentViewport().Width : Math.Max(640, (int)ActualWidth - 80)) : 0,
+                preferredDesktopHeight: state.Options.PlatformId == "hyperv" ? (consoleHost?.IsAttached == true ? consoleHost.GetVmConnectContentViewport().Height : Math.Max(360, (int)ActualHeight - 280)) : 0));
         secretsLoaded = true;
         RememberAppliedSecrets(secrets);
         var adsPending = state.PendingActions.FirstOrDefault(action => action.Id is "adspower" or "browser-active" or CustomerGuide.ManualAdsPowerId);

@@ -36,6 +36,16 @@ public sealed record EndpointResolutionAttempt(
     int? TcpLatencyMs = null,
     string OutboundInterfaceLabel = "");
 
+public sealed record EndpointCandidateGroup(
+    string Source,
+    string[] Addresses,
+    TcpReachabilityResult? Reachability);
+
+public sealed record EndpointCandidatePlan(
+    EndpointCandidateGroup[] Groups,
+    EndpointResolutionAttempt[] Attempts,
+    HostNetworkContext HostNetwork);
+
 public sealed record EndpointResolutionReport(
     string[] Addresses,
     string SelectedSource,
@@ -113,7 +123,7 @@ public static class NodeEndpointResolver
     public static Task<string[]> Resolve(string server, CancellationToken token, HttpClient? suppliedClient = null, TimeSpan? providerTimeout = null) =>
         ResolveCoreAsync(server, DefaultProviders, token, suppliedClient, providerTimeout);
 
-    public static async Task<EndpointResolutionReport> ResolveDetailedAsync(
+    public static async Task<EndpointCandidatePlan> ResolveCandidateGroupsAsync(
         string server,
         int port,
         EndpointResolutionStrategy strategy,
@@ -122,7 +132,8 @@ public static class NodeEndpointResolver
         TimeSpan? providerTimeout = null,
         Func<string, CancellationToken, Task<IPAddress[]>>? systemDnsLookup = null,
         Func<string[], int, CancellationToken, Task<TcpReachabilityResult>>? tcpProbe = null,
-        HostNetworkContext? hostNetworkOverride = null)
+        HostNetworkContext? hostNetworkOverride = null,
+        bool stopOnFirstTcpReachable = false)
     {
         token.ThrowIfCancellationRequested();
         var hostNet = hostNetworkOverride ?? InspectHostNetworkContext();
@@ -134,7 +145,7 @@ public static class NodeEndpointResolver
             TcpReachabilityResult? literalReach = port is >= 1 and <= 65535 ? await probe(literalAddrs, port, token) : null;
             var attempt = new EndpointResolutionAttempt("IPv4 字面量", "公网地址有效", literalAddrs,
                 literalReach?.Reachable == true, literalReach?.ConnectedIp, literalReach?.LatencyMs, literalReach?.OutboundInterfaceLabel ?? "");
-            return new(literalAddrs, "IPv4 字面量", "IPv4 字面量（无需 DNS 解析）", [attempt], hostNet, literalReach);
+            return new([new("IPv4 字面量", literalAddrs, literalReach)], [attempt], hostNet);
         }
 
         var queryName = ValidateHostname(server);
@@ -144,7 +155,7 @@ public static class NodeEndpointResolver
             TcpReachabilityResult? reach = port is >= 1 and <= 65535 ? await probe(addrs, port, token) : null;
             var attempt = new EndpointResolutionAttempt("默认 DoH", $"已解析 {addrs.Length} 个公网 IPv4", addrs,
                 reach?.Reachable == true, reach?.ConnectedIp, reach?.LatencyMs, reach?.OutboundInterfaceLabel ?? "");
-            return new(addrs, "默认 DoH", $"默认 DoH · {addrs.Length} 个公网 IPv4", [attempt], hostNet, reach);
+            return new([new("默认 DoH", addrs, reach)], [attempt], hostNet);
         }
 
         using var directHandler = suppliedDirectClient is null
@@ -156,12 +167,18 @@ public static class NodeEndpointResolver
 
         var attempts = new List<EndpointResolutionAttempt>();
         var failures = new List<string>();
-        string[]? fallbackValidAddresses = null;
-        string fallbackSource = "";
-        TcpReachabilityResult? fallbackReach = null;
+        var reachableGroups = new List<EndpointCandidateGroup>();
+        var fallbackGroups = new List<EndpointCandidateGroup>();
+        var seenAddressSets = new HashSet<string>(StringComparer.Ordinal);
 
-        async Task<EndpointResolutionReport?> EvaluateGroupAsync(string sourceName, string[] candidateAddresses)
+        async Task<bool> EvaluateGroupAsync(string sourceName, string[] candidateAddresses)
         {
+            var key = string.Join(",", candidateAddresses);
+            if (!seenAddressSets.Add(key))
+            {
+                attempts.Add(new(sourceName, $"返回重复候选集（{candidateAddresses.Length} 个公网 IPv4）", candidateAddresses));
+                return false;
+            }
             var reach = port is >= 1 and <= 65535 ? await probe(candidateAddresses, port, token) : null;
             var outcome = reach is null
                 ? $"已解析 {candidateAddresses.Length} 个公网 IPv4"
@@ -170,18 +187,14 @@ public static class NodeEndpointResolver
                     : $"已解析 {candidateAddresses.Length} 个公网 IPv4 · TCP 不可达 ({reach.OutboundInterfaceLabel})";
             attempts.Add(new EndpointResolutionAttempt(sourceName, outcome, candidateAddresses,
                 reach?.Reachable == true, reach?.ConnectedIp, reach?.LatencyMs, reach?.OutboundInterfaceLabel ?? ""));
-            if (fallbackValidAddresses is null)
-            {
-                fallbackValidAddresses = candidateAddresses;
-                fallbackSource = sourceName;
-                fallbackReach = reach;
-            }
+            var group = new EndpointCandidateGroup(sourceName, candidateAddresses, reach);
             if (reach is null || reach.Reachable)
             {
-                var summary = BuildAttemptSummary(sourceName, candidateAddresses.Length, attempts);
-                return new(candidateAddresses, sourceName, summary, [.. attempts], hostNet, reach);
+                reachableGroups.Add(group);
+                return stopOnFirstTcpReachable || port <= 0;
             }
-            return null;
+            fallbackGroups.Add(group);
+            return false;
         }
 
         // 1. Try Host System DNS first (must pass strict IsolationPolicy validation across the whole answer set).
@@ -201,8 +214,9 @@ public static class NodeEndpointResolver
                 try
                 {
                     var validated = IsolationPolicy.ValidateEndpoints(ipv4Strings).Order(StringComparer.Ordinal).ToArray();
-                    if (await EvaluateGroupAsync("宿主机系统 DNS", validated) is { } hit) return hit;
-                    failures.Add("SystemDNS:TCP_UNREACHABLE");
+                    if (await EvaluateGroupAsync("宿主机系统 DNS", validated))
+                        return new([.. reachableGroups], [.. attempts], hostNet);
+                    if (reachableGroups.Count == 0) failures.Add("SystemDNS:TCP_UNREACHABLE");
                 }
                 catch (SetupException)
                 {
@@ -223,10 +237,11 @@ public static class NodeEndpointResolver
             failures.Add("SystemDNS:LOOKUP_FAILED");
         }
 
-        // 2. Fallback to independent DoH sources (UseProxy = false, AllowAutoRedirect = false).
+        // 2. Query independent DoH sources (UseProxy = false, AllowAutoRedirect = false).
         foreach (var provider in HyperVStandaloneProviders)
         {
             token.ThrowIfCancellationRequested();
+            if (reachableGroups.Count >= 3) break;
             var (addresses, errorCode) = await QueryDoHProviderAsync(client, queryName, provider, providerTimeout ?? TimeSpan.FromSeconds(6), token);
             if (errorCode is not null)
             {
@@ -234,17 +249,35 @@ public static class NodeEndpointResolver
                 failures.Add($"{provider.Name}:{errorCode}");
                 continue;
             }
-            if (await EvaluateGroupAsync($"直连 DoH ({provider.Name})", addresses!) is { } hit) return hit;
-            failures.Add($"{provider.Name}:TCP_UNREACHABLE");
+            if (await EvaluateGroupAsync($"直连 DoH ({provider.Name})", addresses!))
+                return new([.. reachableGroups], [.. attempts], hostNet);
         }
 
-        if (fallbackValidAddresses is not null)
-        {
-            var summary = BuildAttemptSummary(fallbackSource, fallbackValidAddresses.Length, attempts) + "（所有候选组 TCP 均未连通，保留首个合法候选集供代理内核继续诊断）";
-            return new(fallbackValidAddresses, fallbackSource, summary, [.. attempts], hostNet, fallbackReach);
-        }
+        var orderedGroups = reachableGroups.Concat(fallbackGroups).Take(3).ToArray();
+        if (orderedGroups.Length > 0)
+            return new(orderedGroups, [.. attempts], hostNet);
 
         throw new SetupException("节点地址查询未完成（" + string.Join("；", failures) + "）。已保留所选节点和原任务；请检查主机当前网络或代理连接后继续。");
+    }
+
+    public static async Task<EndpointResolutionReport> ResolveDetailedAsync(
+        string server,
+        int port,
+        EndpointResolutionStrategy strategy,
+        CancellationToken token,
+        HttpClient? suppliedDirectClient = null,
+        TimeSpan? providerTimeout = null,
+        Func<string, CancellationToken, Task<IPAddress[]>>? systemDnsLookup = null,
+        Func<string[], int, CancellationToken, Task<TcpReachabilityResult>>? tcpProbe = null,
+        HostNetworkContext? hostNetworkOverride = null)
+    {
+        var plan = await ResolveCandidateGroupsAsync(server, port, strategy, token, suppliedDirectClient,
+            providerTimeout, systemDnsLookup, tcpProbe, hostNetworkOverride, stopOnFirstTcpReachable: true);
+        var chosen = plan.Groups[0];
+        var summary = BuildAttemptSummary(chosen.Source, chosen.Addresses.Length, plan.Attempts);
+        if (chosen.Reachability is { Reachable: false })
+            summary += "（所有候选组 TCP 均未连通，保留首个合法候选集供代理内核继续诊断）";
+        return new(chosen.Addresses, chosen.Source, summary, plan.Attempts, plan.HostNetwork, chosen.Reachability);
     }
 
     private static string BuildAttemptSummary(string selectedSource, int count, IReadOnlyList<EndpointResolutionAttempt> attempts)
@@ -260,6 +293,9 @@ public static class NodeEndpointResolver
         "REJECTED_NON_PUBLIC" => "含私网/保留地址（整组已拒绝）",
         "TIMEOUT" => "请求超时",
         "NO_IPV4_ANSWER" => "无 IPv4 记录",
+        "INVALID_JSON_SHAPE" => "响应不是有效 JSON 对象",
+        "MISSING_DNS_STATUS" => "响应缺少 DNS 状态字段",
+        "DNS_TRUNCATED" => "DNS 响应被截断",
         _ => code
     };
 
@@ -305,8 +341,14 @@ public static class NodeEndpointResolver
             }
             using var json = JsonDocument.Parse(body.ToArray());
             var root = json.RootElement;
-            if (root.TryGetProperty("Status", out var dnsStatus) && dnsStatus.ValueKind == JsonValueKind.Number && dnsStatus.TryGetInt32(out var status) && status != 0)
+            if (root.ValueKind != JsonValueKind.Object)
+                return (null, "INVALID_JSON_SHAPE");
+            if (!root.TryGetProperty("Status", out var dnsStatus) || dnsStatus.ValueKind != JsonValueKind.Number || !dnsStatus.TryGetInt32(out var status))
+                return (null, "MISSING_DNS_STATUS");
+            if (status != 0)
                 return (null, "DNS_STATUS_" + status);
+            if (root.TryGetProperty("TC", out var tc) && tc.ValueKind == JsonValueKind.True)
+                return (null, "DNS_TRUNCATED");
             if (!root.TryGetProperty("Answer", out var answers) || answers.ValueKind != JsonValueKind.Array)
                 return (null, "NO_IPV4_ANSWER");
             var addresses = new List<string>();

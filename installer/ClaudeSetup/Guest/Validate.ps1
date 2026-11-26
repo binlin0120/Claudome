@@ -78,7 +78,7 @@ try {
     }
     if($payload.measure){$report.measurement=Measure-GuestNetwork;$report.code='CHECKED';return}
     if($payload.enableBlockAudit -eq $true){$report.blockAuditCode=Enable-GuestBlockAudit}
-    try{$report.dnsCode=Test-ObservedDns}catch{$report.dnsCode='UNVERIFIED'}
+    try{$report.dnsCode=Test-ObservedDns;if($script:LastObservedDnsDetail){$report.dnsEvidence=$script:LastObservedDnsDetail}}catch{$report.dnsCode='UNVERIFIED'}
     if($payload.manualAdsPower -or $payload.guestOnly){
         if($payload.testOutage){Invoke-ReportedOutage ''}
         $report.code='CHECKED';return
