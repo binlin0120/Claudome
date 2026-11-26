@@ -562,8 +562,8 @@ public sealed partial class SetupWindow
         var heroPrimary = Action(overviewHost.PrimaryActionText,
             async (_, _) =>
             {
-                if (state.SetupFinished) await EnterOriginalWorkspace();
-                else if (ineligibility is not null) Go(0);
+                if (overviewHost.OpenHostCheck) Go(0);
+                else if (state.SetupFinished) await EnterOriginalWorkspace();
                 else Go(page);
             }, true);
         heroPrimary.Background = new SolidColorBrush(Appearance.Color("#FDF3E6"));
@@ -667,16 +667,11 @@ public sealed partial class SetupWindow
         main.Children.Add(overviewGrid);
         main.Children.Add(BuildUpdateCard());
     }
-    internal sealed record OverviewHostView(string PillText, string PillBgHex, string PillFgHex, string VirtualizationValue, string TrackStatusText, string PrimaryActionText);
+    internal sealed record OverviewHostView(string PillText, string PillBgHex, string PillFgHex, string VirtualizationValue, string TrackStatusText, string PrimaryActionText, bool OpenHostCheck = false);
 
     internal static OverviewHostView BuildOverviewHostView(HostInfo host, Machine.HyperVHostPreflight? preflight, string? ineligibilityReason, bool hasVm, bool setupFinished, string stageText, bool isHyperVStandalone)
     {
-        var primary = setupFinished ? "进入专属空间"
-            : hasVm ? "继续构建空间  →"
-            : isHyperVStandalone && ineligibilityReason is not null ? "查看本机条件与解决方案  →"
-            : isHyperVStandalone && preflight is { RebootPending: true } ? "查看重启说明  →"
-            : isHyperVStandalone && preflight is { AllReady: false } ? "先开启 Hyper-V 功能  →"
-            : "开启专属空间  →";
+        var primary = setupFinished ? "进入专属空间" : hasVm ? "继续构建空间  →" : "开启专属空间  →";
 
         if (!isHyperVStandalone)
         {
@@ -689,20 +684,18 @@ public sealed partial class SetupWindow
             var virt = preflight is { EditionEligible: true }
                 ? preflight.VirtualizationSummary
                 : $"不支持（Windows {host.EditionName}）";
-            var track = hasVm
-                ? stageText
-                : ineligibilityReason + " 请先查看「安装向导 → 1 电脑检查」。";
-            return new("受限", "#FCEAE8", "#A32D26", virt, track, primary);
+            var track = ineligibilityReason + " 请先查看「安装向导 → 1 电脑检查」。";
+            return new("受限", "#FCEAE8", "#A32D26", virt, track, "查看本机条件与解决方案  →", OpenHostCheck: true);
         }
         if (preflight is { RebootPending: true })
         {
             return new("待重启", "#FDF2DB", "#8A550C", "Hyper-V 待重启生效",
-                hasVm ? stageText : "检测到系统或 Hyper-V 启用等待重启，请先保存工作并重启电脑后再构建。", primary);
+                "检测到系统或 Hyper-V 启用等待重启，请先保存工作并重启电脑后再构建。", "查看重启说明  →", OpenHostCheck: true);
         }
         if (preflight is { AllReady: false })
         {
             return new("待启用", "#FDF2DB", "#8A550C", preflight.VmmsSummary,
-                hasVm ? stageText : "需先在「安装向导 → 1 电脑检查」启用 Hyper-V 功能并启动 vmms 服务。", primary);
+                "需先在「安装向导 → 1 电脑检查」启用 Hyper-V 功能并启动 vmms 服务。", "先开启 Hyper-V 功能  →", OpenHostCheck: true);
         }
         return new("已就绪", "#E6F5EE", "#176B4E", "Hyper-V 硬件隔离 · 已就绪",
             hasVm ? stageText : "本机硬件与 Hyper-V 条件已就绪，备好系统镜像即可开启构建。", primary);

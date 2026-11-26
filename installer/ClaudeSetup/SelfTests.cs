@@ -1654,22 +1654,28 @@ public static class SelfTests
 
             var readyPreflight = new Machine.HyperVHostPreflight(true, "系统符合", true, "硬件虚拟化：已就绪", "running", "Hyper-V vmms 服务：运行中", false, true, false, "");
             var readyView = SetupWindow.BuildOverviewHostView(proHost, readyPreflight, null, false, false, "", true);
-            Assert(readyView.PillText == "已就绪" && readyView.VirtualizationValue.Contains("已就绪") && readyView.TrackStatusText.Contains("开启构建"), "Ready Hyper-V state mismatch");
+            Assert(readyView.PillText == "已就绪" && readyView.VirtualizationValue.Contains("已就绪") && readyView.TrackStatusText.Contains("开启构建") &&
+                !readyView.OpenHostCheck && missingView.OpenHostCheck, "Ready and missing Hyper-V states must route to different actions");
+            var existingVm = SetupWindow.BuildOverviewHostView(proHost, missingPreflight, null, true, true, "旧任务", true);
+            Assert(existingVm.OpenHostCheck && existingVm.PrimaryActionText.Contains("开启 Hyper-V"),
+                "An old task bypassed the missing Hyper-V preflight action");
         }));
         await Check("hyperv-clipboard-readback-requires-host-hvsocket-and-guest-ready", () => Sync(() =>
         {
             var fullOk = HyperV.ParseClipboardHostStatus("""{"hostEnhanced":true,"hvSocket":true}""");
             var hostOnly = HyperV.ParseClipboardHostStatus("""{"hostEnhanced":true,"hvSocket":false}""");
             var malformed = HyperV.ParseClipboardHostStatus("enabled");
-            Assert(fullOk.HostEnhanced && fullOk.HvSocket && hostOnly.HostEnhanced && !hostOnly.HvSocket && !malformed.HvSocket,
-                "Hyper-V clipboard host JSON parser failed");
-            Assert(SetupWindow.IsHyperVClipboardVerified(true, fullOk.HostEnhanced, fullOk.HvSocket, true, true),
-                "Verified Hyper-V clipboard unexpectedly rejected");
-            Assert(!SetupWindow.IsHyperVClipboardVerified(false, fullOk.HostEnhanced, fullOk.HvSocket, true, true) &&
-                   !SetupWindow.IsHyperVClipboardVerified(true, hostOnly.HostEnhanced, hostOnly.HvSocket, true, true) &&
-                   !SetupWindow.IsHyperVClipboardVerified(true, fullOk.HostEnhanced, fullOk.HvSocket, false, true) &&
-                   !SetupWindow.IsHyperVClipboardVerified(true, fullOk.HostEnhanced, fullOk.HvSocket, true, false),
-                "Unverified Hyper-V clipboard falsely reported ready");
+            var disabled = HyperV.ParseClipboardHostStatus("""{"hostEnhanced":false,"hvSocket":true}""");
+            var missingKey = HyperV.ParseClipboardHostStatus("""{"hvSocket":true}""");
+            Assert(fullOk.Valid && fullOk.HostEnhanced && fullOk.HvSocket && hostOnly.Valid && hostOnly.HostEnhanced &&
+                !hostOnly.HvSocket && disabled.Valid && !disabled.HostEnhanced && !malformed.Valid && !missingKey.Valid &&
+                !HyperV.ParseClipboardHostStatus("[]").Valid, "Hyper-V clipboard host JSON parser failed");
+            Assert(SetupWindow.AreHyperVClipboardSettingsVerified(true, fullOk.HostEnhanced, fullOk.HvSocket, true),
+                "Verified Hyper-V clipboard configuration unexpectedly rejected");
+            Assert(!SetupWindow.AreHyperVClipboardSettingsVerified(false, fullOk.HostEnhanced, fullOk.HvSocket, true) &&
+                   !SetupWindow.AreHyperVClipboardSettingsVerified(true, hostOnly.HostEnhanced, hostOnly.HvSocket, true) &&
+                   !SetupWindow.AreHyperVClipboardSettingsVerified(true, fullOk.HostEnhanced, fullOk.HvSocket, false),
+                "Unverified Hyper-V clipboard configuration falsely reported verified");
         }));
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);

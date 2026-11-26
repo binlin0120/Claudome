@@ -15,7 +15,7 @@ function Get-VMHost {[pscustomobject]@{EnableEnhancedSessionMode=$script:policyE
 function Set-VMHost([bool]$EnableEnhancedSessionMode){$script:policyEnabled=$EnableEnhancedSessionMode;$script:changes++}
 function Test-Path([string]$LiteralPath){$script:store.ContainsKey($LiteralPath)}
 function New-Item([string]$Path,[switch]$Force){$part=$Path;while($part.Contains('\')){if(-not $script:store.ContainsKey($part)){$script:store[$part]=@{}};$part=$part.Substring(0,$part.LastIndexOf('\'))}}
-function New-ItemProperty([string]$LiteralPath,[string]$Name,$Value,[string]$PropertyType){$script:store[$LiteralPath][$Name]=$Value}
+function New-ItemProperty([Alias('Path')][string]$LiteralPath,[string]$Name,$Value,[string]$PropertyType,[switch]$Force){$script:store[$LiteralPath][$Name]=$Value}
 function Get-ItemPropertyValue([string]$LiteralPath,[string]$Name){if(-not $script:store.ContainsKey($LiteralPath) -or -not $script:store[$LiteralPath].ContainsKey($Name)){throw 'FAKE_VALUE_MISSING'};$script:store[$LiteralPath][$Name]}
 function Remove-Item([string]$LiteralPath){$script:store.Remove($LiteralPath)}
 function Remove-ItemProperty([string]$LiteralPath,[string]$Name){$script:store[$LiteralPath].Remove($Name)}
@@ -225,6 +225,64 @@ Check 'hyperv-ensure-rejects-same-name-foreign-vm' {
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
+Check 'clipboard-worker-returns-host-readback-from-inside-lock' {
+    $clause = @($ast.FindAll({param($node) $node -is [Management.Automation.Language.SwitchStatementAst]}, $true) |
+        ForEach-Object {$_.Clauses} | Where-Object {$_.Item1.Value -ceq 'set-clipboard'})
+    Assert-Case ($clause.Count -eq 1)
+    $run = [scriptblock]::Create("switch ('set-clipboard') {'set-clipboard' " + $clause[0].Item2.Extent.Text + '};$value')
+    $savedO = $script:o
+    $script:o = [pscustomobject]@{WorkspaceId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';HyperVBasicConsoleConfirmed=$false;SharedClipboardEnabled=$true}
+    $script:policyEnabled = $false
+    $script:transportType = 'VMBus'
+    $script:shutdownTarget = $first
+    function Get-VM([guid]$Id) { Assert-Case ($Id -eq $first.Id); [pscustomobject]@{EnhancedSessionTransportType=$script:transportType} }
+    function Set-VM($VM, [string]$EnhancedSessionTransportType) {
+        Assert-Case ($VM.Id -eq $first.Id -and $EnhancedSessionTransportType -eq 'HvSocket')
+        $script:transportType = $EnhancedSessionTransportType
+    }
+    try {
+        $d = @{vmId=$first.Id;enabled=$true}
+        $enabled = & $run | ConvertFrom-Json
+        Assert-Case ($enabled.hostEnhanced -eq $true -and $enabled.hvSocket -eq $true)
+        $d.enabled = $false
+        $disabled = & $run | ConvertFrom-Json
+        Assert-Case ($disabled.hostEnhanced -eq $false -and $disabled.hvSocket -eq $true)
+    } finally {
+        $script:o = $savedO
+    }
+}
+Check 'clipboard-guest-script-stops-sync-and-verifies-policy-with-read-only-refresh' {
+    $guestScript = [scriptblock]::Create([IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVClipboardPolicy.ps1')))
+    $script:clipboardFixtureWrites = 0
+    $script:clipboardFixtureRunning = $true
+    $script:clipboardFixturePolicy = @{}
+    function Test-Path([string]$LiteralPath) { $true }
+    function New-ItemProperty([string]$LiteralPath,[string]$Name,[string]$PropertyType,$Value,[switch]$Force) {
+        Assert-Case ($LiteralPath -like 'HKLM:\*\Terminal Services' -and $PropertyType -eq 'DWord')
+        $script:clipboardFixturePolicy[$Name] = $Value
+        $script:clipboardFixtureWrites++
+    }
+    function Get-ItemProperty([string]$LiteralPath) { [pscustomobject]$script:clipboardFixturePolicy }
+    function Get-Process([string]$Name,$ErrorAction) {
+        Assert-Case ($Name -eq 'rdpclip')
+        if ($script:clipboardFixtureRunning) { [pscustomobject]@{Name=$Name} }
+    }
+    function Stop-Process($InputObject,[switch]$Force) {
+        Assert-Case ($InputObject.Name -eq 'rdpclip' -and $Force)
+        $script:clipboardFixtureRunning = $false
+    }
+
+    Assert-Case ((& $guestScript -Mode Disable) -ceq 'CLIP_POLICY_OK')
+    Assert-Case ($script:clipboardFixturePolicy.fDisableClip -eq 1 -and -not $script:clipboardFixtureRunning)
+    Assert-Case ((& $guestScript -Mode ReadEnabled) -ceq 'CLIP_POLICY_MISMATCH')
+    Assert-Case ($script:clipboardFixtureWrites -eq 8)
+    Assert-Case ((& $guestScript -Mode Enable) -ceq 'CLIP_POLICY_OK')
+    Assert-Case ((& $guestScript -Mode ReadEnabled) -ceq 'CLIP_POLICY_OK')
+    $script:clipboardFixturePolicy['fDisableCdm'] = 0
+    Assert-Case ((& $guestScript -Mode ReadEnabled) -ceq 'CLIP_POLICY_MISMATCH')
+    Assert-Case ($script:clipboardFixtureWrites -eq 16)
+}
+
 # Call the real .NET file API directly; the mock registry provider remains scoped
 # to this test process, not the user's PowerShell session or machine.
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null

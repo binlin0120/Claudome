@@ -30,6 +30,7 @@ public sealed class HyperV : IVmBackend
     private Process? worker;
     private PrivateFile? workerFile;
     private readonly SemaphoreSlim serial = new(1, 1);
+    internal bool HasManagementConnection => pipe?.IsConnected == true && writer is not null;
     private async Task Connect(SetupOptions o, CancellationToken token)
     {
         if (pipe is not null) return;
@@ -193,7 +194,7 @@ public sealed class HyperV : IVmBackend
     }
     public Task VerifyOffline(SessionState s, CancellationToken token) => Call(s.Options,"boundary-offline",Context(s),token);
     public Task<string> RestoreConsole(SessionState s,CancellationToken token)=>Call(s.Options,"console-restore",Context(s),token);
-    internal sealed record HyperVClipboardHostStatus(bool HostEnhanced, bool HvSocket);
+    internal sealed record HyperVClipboardHostStatus(bool HostEnhanced, bool HvSocket, bool Valid = false);
 
     internal static HyperVClipboardHostStatus ParseClipboardHostStatus(string raw)
     {
@@ -202,9 +203,12 @@ public sealed class HyperV : IVmBackend
         {
             using var doc = JsonDocument.Parse(raw);
             var root = doc.RootElement;
-            var hostEnhanced = root.TryGetProperty("hostEnhanced", out var h) && h.ValueKind == JsonValueKind.True;
-            var hvSocket = root.TryGetProperty("hvSocket", out var s) && s.ValueKind == JsonValueKind.True;
-            return new(hostEnhanced, hvSocket);
+            if (root.ValueKind != JsonValueKind.Object) return new(false, false);
+            if (!root.TryGetProperty("hostEnhanced", out var hostEnhanced) ||
+                !root.TryGetProperty("hvSocket", out var hvSocket) ||
+                hostEnhanced.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
+                hvSocket.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return new(false, false);
+            return new(hostEnhanced.GetBoolean(), hvSocket.GetBoolean(), Valid: true);
         }
         catch (JsonException)
         {
@@ -216,7 +220,9 @@ public sealed class HyperV : IVmBackend
         ParseClipboardHostStatus(await Call(s.Options, "set-clipboard", new { vmId = s.VmId, enabled }, token));
 
     internal async Task<HyperVClipboardHostStatus> ReadClipboardHostStatus(SessionState s, CancellationToken token) =>
-        ParseClipboardHostStatus(await Call(s.Options, "clipboard-status", new { vmId = s.VmId }, token));
+        HasManagementConnection
+            ? ParseClipboardHostStatus(await Call(s.Options, "clipboard-status", new { vmId = s.VmId }, token))
+            : new(false, false);
     public async Task InstallWindows(SessionState s, Secrets secrets, CancellationToken token)
     {
         Machine.CheckRun(s.Options, true);

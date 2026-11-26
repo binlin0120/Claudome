@@ -273,7 +273,7 @@ public sealed partial class SetupWindow
                         {
                             // VMConnect can resize its own outer HWND after a mode or DPI change.
                             if (!fittingHyperVDisplay) consoleHost.Fit();
-                            await RefreshDefaultNativeClipboard();
+                            await RefreshHyperVClipboardSettings();
                         }
                     }
                     else if (autoConnectDesktop && !desktopConnectionPolicy.Suspended && !connectingConsole)
@@ -346,6 +346,7 @@ public sealed partial class SetupWindow
         consoleHost?.Detach(showOriginal: switched);
         SetWaitingForGuestFrame(false);
         nativeClipboardReady = false;
+        hyperVClipboardSettingsVerified = false;
         nextNativeClipboardCheck = DateTime.MinValue;
         UpdateNativeClipboardControl();
         if (consoleFrame is not null) consoleFrame.Background = Surface;
@@ -486,6 +487,7 @@ public sealed partial class SetupWindow
             if (!waitingForGuestFrame) SetDesktopConnectionStatus(DesktopConnectedStatus());
             UpdateDesktopActivity();
             if (backend is VirtualBox) await RefreshDefaultNativeClipboard();
+            else if (backend is HyperV hyperV) await RefreshHyperVClipboardSettings(hyperV);
         }catch(OperationCanceledException){}
         catch(Exception ex){SetDesktopConnectionStatus(Redaction.SafeError(ex));if(consoleHost?.IsAttached!=true&&consoleHost is not null){consoleHost.Visibility=Visibility.Collapsed;if(consoleFrame is not null)consoleFrame.Background=Surface;}}
         finally{connectingConsole=false;UpdateDesktopActivity();}

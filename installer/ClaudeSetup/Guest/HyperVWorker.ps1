@@ -642,24 +642,21 @@ try {
                             if($null -eq $o.PSObject.Properties['SharedClipboardEnabled']){Add-Member -InputObject $o -MemberType NoteProperty -Name SharedClipboardEnabled -Value $want -Force}
                             else{$o.SharedClipboardEnabled=$want}
                             $o.HyperVBasicConsoleConfirmed=(-not $want)
-                            $hvSocket=$false
-                            $hostEnhanced=$false
-                            Invoke-ConsolePolicyLock {
+                            $value=Invoke-ConsolePolicyLock {
                                 $root='HKLM:\SOFTWARE\Claudome\HyperVConsolePolicy';$current=[bool](Get-VMHost).EnableEnhancedSessionMode
                                 if(-not(Test-Path -LiteralPath $root)){New-Item -Path $root -Force | Out-Null;New-ItemProperty -Path $root -Name OriginalEnabled -PropertyType DWord -Value ([int]$current) | Out-Null}
                                 $owner=Console-Owner $vm
                                 if(Test-Path -LiteralPath $owner){if((Get-ItemPropertyValue -LiteralPath $owner -Name WorkspaceId) -ne $o.WorkspaceId){throw 'VM_SCOPE'}}
                                 else{New-Item -Path $owner -Force | Out-Null;New-ItemProperty -Path $owner -Name WorkspaceId -Value ([string]$o.WorkspaceId) -PropertyType String | Out-Null}
+                                if($want){Set-VM -VM $vm -EnhancedSessionTransportType HvSocket}
+                                $vmRead=Get-VM -Id $vm.Id
+                                $hvSocket=([string]$vmRead.EnhancedSessionTransportType -eq 'HvSocket')
+                                if($want -and -not $hvSocket){throw 'HYPERV_CONSOLE_POLICY'}
                                 if($current -ne $want){Set-VMHost -EnableEnhancedSessionMode $want}
                                 $hostEnhanced=[bool](Get-VMHost).EnableEnhancedSessionMode
                                 if($hostEnhanced -ne $want){throw 'HYPERV_CONSOLE_POLICY'}
-                                if($want -and (Get-Command Set-VM -ErrorAction SilentlyContinue)){
-                                    Set-VM -VM $vm -EnhancedSessionTransportType HvSocket
-                                }
-                                $vmRead=Get-VM -Id $vm.Id
-                                $hvSocket=([string]$vmRead.EnhancedSessionTransportType -eq 'HvSocket')
+                                @{hostEnhanced=$hostEnhanced;hvSocket=$hvSocket} | ConvertTo-Json -Compress
                             }
-                            $value=@{'hostEnhanced'=$hostEnhanced;'hvSocket'=$hvSocket} | ConvertTo-Json -Compress
                         }
                         'clipboard-status' {
                             $vm=Target-VM $d
