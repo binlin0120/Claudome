@@ -157,12 +157,90 @@ public static class ResolverTests
             var resolverCalls = 0;
             var pinned = new Deployment.PinnedRouteEndpoints(probeResult.VerifiedFirstHopAddresses!, probeResult.VerifiedExitAddresses!, probeResult.ResolutionSummary);
             var bound = await Deployment.ResolveOrBindEndpointsAsync(proxy, proxy, false, EndpointResolutionStrategy.HyperVStandalone, pinned, CancellationToken.None,
-                (_, _, _, _) => {
+                resolver: (_, _, _, _) => {
                     resolverCalls++;
                     return Task.FromResult(new EndpointResolutionReport(["9.9.9.9"], "DNS变更", "DNS变更", [], plan.HostNetwork, null));
                 });
             Assert(resolverCalls == 0 && bound.FirstHopAddresses.SequenceEqual(["8.8.8.8"]),
                 "Apply re-resolved DNS instead of pinning probe-verified endpoints");
+        });
+        await check("hyperv-deploy-resume-daily-entry-advances-candidate-group-and-distinguishes-connected-endpoint", async () => {
+            var opts = new SetupOptions { PlatformId = "hyperv", Root = System.IO.Path.GetTempPath() };
+            var finalProxy = new ProxyNode("Exit", "trojan", "exit.example", 443, "{}");
+            var upstreamProxy = new ProxyNode("Up", "trojan", "up.example", 443, "{}");
+            var plan = new EndpointCandidatePlan(
+                [
+                    new("宿主机系统 DNS", ["1.1.1.1", "1.0.0.1"], new TcpReachabilityResult(true, "1.1.1.1", 12, "物理网卡 WLAN")),
+                    new("直连 DoH (AliDNS)", ["8.8.8.8", "8.8.4.4"], new TcpReachabilityResult(true, "8.8.8.8", 21, "物理网卡 WLAN"))
+                ],
+                [],
+                new HostNetworkContext(true, true, ["Meta Tunnel (TUN)"], "检测到宿主 TUN（Meta Tunnel (TUN)）与 HTTP 系统代理"));
+            var tried = new List<string>();
+            var bound = await Deployment.ResolveOrBindEndpointsAsync(
+                finalProxy, finalProxy, hasUpstream: false,
+                EndpointResolutionStrategy.HyperVStandalone, pinnedEndpoints: null, CancellationToken.None,
+                options: opts, upstreamNode: null,
+                candidateVerifier: (_, _, _, _, ct) => NodeExitProbe.ExecuteAcrossCandidatePlanAsync(plan, report => {
+                    tried.Add(string.Join(",", report.Addresses));
+                    if (report.Addresses.Contains("1.1.1.1"))
+                        throw new NodeProbeException("TCP 已通，但协议握手失败（PROXY_TLS_HANDSHAKE）");
+                    return Task.FromResult(new NodeProbeResult("203.0.113.10", "KR", "Asia/Seoul", "Korea Standard Time", 88, true,
+                        "物理网卡 WLAN", report.Summary, "TCP 21 ms · 协议握手成功", "api.ip.sb · 88 ms", report.HostNetwork.Summary,
+                        report.Addresses, report.Addresses, "8.8.8.8:443"));
+                }, ct));
+            Assert(tried.Count == 2 &&
+                bound.FirstHopAddresses.SequenceEqual(["8.8.4.4", "8.8.8.8"]) &&
+                bound.ExitAddresses.SequenceEqual(["8.8.4.4", "8.8.8.8"]) &&
+                bound.Summary.Contains("候选组 2 个") &&
+                bound.Summary.Contains("实连端点 8.8.8.8:443") &&
+                bound.Summary.Contains("203.0.113.10/KR") &&
+                bound.Summary.Contains("协议/出口失败"),
+                "HyperV deploy/resume/daily entry failed to advance candidate group or report connected endpoint distinctly");
+
+            // Double-hop preserves separate validated public first-hop and exit candidate groups
+            var doubleHop = await Deployment.ResolveOrBindEndpointsAsync(
+                upstreamProxy, finalProxy, hasUpstream: true,
+                EndpointResolutionStrategy.HyperVStandalone, pinnedEndpoints: null, CancellationToken.None,
+                options: opts, upstreamNode: upstreamProxy,
+                candidateVerifier: (_, _, _, _, _) => Task.FromResult(new NodeProbeResult("203.0.113.20", "JP", "Asia/Tokyo", "Tokyo Standard Time", 95, true,
+                    "物理网卡 WLAN", "采用 直连 DoH (AliDNS)", "TCP 20 ms · 握手成功", "api.ip.sb · 95 ms", plan.HostNetwork.Summary,
+                    ["8.8.8.8"], ["9.9.9.9"], "8.8.8.8:443")));
+            Assert(doubleHop.FirstHopAddresses.SequenceEqual(["8.8.8.8"]) &&
+                doubleHop.ExitAddresses.SequenceEqual(["9.9.9.9"]) &&
+                doubleHop.Summary.Contains("实连端点 8.8.8.8:443"),
+                "HyperV double-hop failed to preserve distinct first-hop and exit endpoint groups");
+
+            // Private/non-public endpoint returned by candidate verifier must still be rejected by IsolationPolicy
+            var rejectedPrivate = false;
+            try
+            {
+                await Deployment.ResolveOrBindEndpointsAsync(
+                    finalProxy, finalProxy, hasUpstream: false,
+                    EndpointResolutionStrategy.HyperVStandalone, pinnedEndpoints: null, CancellationToken.None,
+                    options: opts, upstreamNode: null,
+                    candidateVerifier: (_, _, _, _, _) => Task.FromResult(new NodeProbeResult("203.0.113.10", "KR", "Asia/Seoul", "Korea Standard Time", 88, true,
+                        "物理网卡 WLAN", "stub", "stub", "stub", "stub", ["127.0.0.1"], ["127.0.0.1"], "127.0.0.1:443")));
+            }
+            catch (SetupException) { rejectedPrivate = true; }
+            Assert(rejectedPrivate, "Private IPv4 candidate bypassed IsolationPolicy.ValidateEndpoints");
+
+            // Standard/macOS default strategy stays on resolver path and does not invoke HyperV candidate verifier
+            var defaultVerifierCalls = 0;
+            var defaultResolverCalls = 0;
+            var defaultBound = await Deployment.ResolveOrBindEndpointsAsync(
+                finalProxy, finalProxy, hasUpstream: false,
+                EndpointResolutionStrategy.Default, pinnedEndpoints: null, CancellationToken.None,
+                options: opts, upstreamNode: null,
+                resolver: (_, _, _, _) => {
+                    defaultResolverCalls++;
+                    return Task.FromResult(new EndpointResolutionReport(["9.9.9.9"], "标准版默认解析", "标准版默认解析", [], plan.HostNetwork, null));
+                },
+                candidateVerifier: (_, _, _, _, _) => {
+                    defaultVerifierCalls++;
+                    throw new InvalidOperationException("Default strategy must not use HyperVStandalone verifier");
+                });
+            Assert(defaultResolverCalls == 1 && defaultVerifierCalls == 0 && defaultBound.FirstHopAddresses.SequenceEqual(["9.9.9.9"]),
+                "Default strategy unexpectedly entered HyperVStandalone candidate verification");
         });
     }
 }

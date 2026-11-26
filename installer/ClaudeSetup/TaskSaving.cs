@@ -52,6 +52,7 @@ public sealed partial class SetupWindow
     }
     private void PauseCurrentTask()
     {
+        CancelPendingHyperVDisplayFit(resetViewport: true);
         desktopConnectionPolicy.Suspend();autoConnectDesktop=false;
         BoundaryRuntime.RevokeWindowsSignInHold(state);
         if (consoleHost?.IsAttached != true) desktopConnectionCancellation?.Cancel();

@@ -373,14 +373,67 @@ public sealed class NativeConsoleHost : HwndHost
         return bestCanvas ?? new(Math.Max(1, outer.Width - 4), Math.Max(1, outer.Height - 96));
     }
 
-    internal static (bool FullFill, double WidthRatio, double HeightRatio) EvaluateCoverage(ConsolePixelSize rendered, ConsolePixelSize contentArea)
+    internal enum DisplayFillState
     {
-        if (contentArea.Width <= 0 || contentArea.Height <= 0 || rendered.Width <= 0 || rendered.Height <= 0)
-            return (false, 0, 0);
-        var wr = rendered.Width / (double)contentArea.Width;
-        var hr = rendered.Height / (double)contentArea.Height;
-        var fits = rendered.Width <= contentArea.Width + 2 && rendered.Height <= contentArea.Height + 2;
-        return (fits && wr >= 0.88 && hr >= 0.88, wr, hr);
+        FullFill,
+        MarginsRemaining,
+        Unverified
+    }
+
+    internal readonly record struct DisplayFillResult(DisplayFillState State, string Detail);
+
+    internal Rect? MeasureActualGuestSurfaceRelativeToContainer()
+    {
+        if (!IsAttached || container == IntPtr.Zero || !GetWindowRect(container, out var hostRect))
+            return null;
+        var outerW = hostRect.Right - hostRect.Left;
+        var outerH = hostRect.Bottom - hostRect.Top;
+        if (outerW < 1 || outerH < 1) return null;
+
+        Rect? renderSurface = null;
+        var sb = new System.Text.StringBuilder(64);
+        EnumChildWindows(child, (window, _) =>
+        {
+            if (!IsWindowVisible(window) || GetWindowThreadProcessId(window, out var pid) == 0 || pid != childProcess) return true;
+            if (!GetWindowRect(window, out var r)) return true;
+            var w = r.Right - r.Left;
+            var h = r.Bottom - r.Top;
+            if (w < 160 || h < 120) return true;
+            sb.Clear();
+            var cls = GetClassName(window, sb, sb.Capacity) > 0 ? sb.ToString() : "";
+            // Match actual VMConnect RDP/Basic Session render surfaces rather than outer WinForms chrome.
+            var isSurfaceClass = cls.Equals("IHWindowClass", StringComparison.OrdinalIgnoreCase) ||
+                cls.Equals("OPWindowClass", StringComparison.OrdinalIgnoreCase) ||
+                cls.Equals("UIMainClass", StringComparison.OrdinalIgnoreCase);
+            if (!isSurfaceClass) return true;
+            var candidate = new Rect(r.Left - hostRect.Left, r.Top - hostRect.Top, w, h);
+            if (renderSurface is null || candidate.Width * candidate.Height > renderSurface.Value.Width * renderSurface.Value.Height)
+                renderSurface = candidate;
+            return true;
+        }, IntPtr.Zero);
+        return renderSurface;
+    }
+
+    internal static DisplayFillResult EvaluateEdgeToEdgeFill(Rect? actualSurface, ConsolePixelSize outerViewport, int tolerancePx = 4)
+    {
+        if (actualSurface is not { } surface || outerViewport.Width <= 0 || outerViewport.Height <= 0 ||
+            surface.Width <= 0 || surface.Height <= 0)
+            return new(DisplayFillState.Unverified, "未读取到实际来宾画面边界");
+
+        var leftGap = Math.Max(0, (int)Math.Round(surface.Left));
+        var topGap = Math.Max(0, (int)Math.Round(surface.Top));
+        var rightGap = Math.Max(0, (int)Math.Round(outerViewport.Width - (surface.Left + surface.Width)));
+        var bottomGap = Math.Max(0, (int)Math.Round(outerViewport.Height - (surface.Top + surface.Height)));
+        var clipped = surface.Left < -tolerancePx || surface.Top < -tolerancePx ||
+            (surface.Left + surface.Width) > outerViewport.Width + tolerancePx ||
+            (surface.Top + surface.Height) > outerViewport.Height + tolerancePx;
+        if (!clipped && leftGap <= tolerancePx && topGap <= tolerancePx && rightGap <= tolerancePx && bottomGap <= tolerancePx)
+            return new(DisplayFillState.FullFill, $"{(int)Math.Round(surface.Width)}x{(int)Math.Round(surface.Height)}");
+
+        return new(DisplayFillState.MarginsRemaining,
+            clipped
+                ? "画面超出内嵌区边界"
+                : $"左{leftGap}/上{topGap}/右{rightGap}/下{bottomGap}px 留边");
     }
 
     internal static ConsolePixelSize? FindScrollingContent(IReadOnlyList<Rect> children, double minimumWidth, double minimumHeight)

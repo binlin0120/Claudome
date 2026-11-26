@@ -574,6 +574,19 @@ Check 'guest-doh-fallback-and-hyperv-display-mode-selection' {
     }
 }
 
+Check 'hyperv-worker-display-only-isolation-and-task-cleanup' {
+    $workerPath = Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
+    $workerText = Get-Content -LiteralPath $workerPath -Raw -Encoding UTF8
+    $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile($workerPath, [ref]$null, [ref]$parseErrors)
+    Assert-Case ($parseErrors.Count -eq 0)
+    Assert-Case ($workerText -match '\$displayOnly\s*=\s*\$false')
+    Assert-Case ($workerText -match 'if\s*\(\$displayOnly\s*-and\s*\$request\.operation\s*-ne\s*''sync-display''\)\s*\{\s*throw\s+''UNSUPPORTED_OPERATION''\s*\}')
+    Assert-Case ($workerText -match 'if\s*\(\$verificationOnly\s*-and\s*\$request\.operation\s*-ne\s*''boundary-verify''\)\s*\{\s*throw\s+''UNSUPPORTED_OPERATION''\s*\}')
+    Assert-Case ($workerText -match 'ClaudomeDisplay-\*')
+    Assert-Case ($workerText -match 'Stop-ScheduledTask' -and $workerText -match 'Unregister-ScheduledTask' -and $workerText -match 'Remove-Item\s+-LiteralPath\s+\$bundle')
+}
+
 # Call the real .NET file API directly; the mock registry provider remains scoped
 # to this test process, not the user's PowerShell session or machine.
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null

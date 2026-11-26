@@ -19,7 +19,7 @@ if(-not $ProbeGuestStatus) {
     $reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,4096,$true)
     $writer=[IO.StreamWriter]::new($pipe,[Text.UTF8Encoding]::new($false),4096,$true);$writer.AutoFlush=$true
 }
-$o=$null;$verificationOnly=$false
+$o=$null;$verificationOnly=$false;$displayOnly=$false
 function Assert-LocalPath([string]$Path,[string]$Parent) {
     $full=[IO.Path]::GetFullPath($Path);$base=[IO.Path]::GetFullPath($Parent).TrimEnd('\')+'\'
     if(-not $full.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)){throw 'VM_SCOPE'}
@@ -862,12 +862,14 @@ try {
                 $script:hypervSubstage='init-options'
                 $o=$d.options
                 $verificationOnly=[bool]$d.verificationOnly
+                $displayOnly=[bool]$d.displayOnly
                 if(-not $o -or $o.PlatformId -ne 'hyperv' -or $o.VmName -notmatch '^[a-zA-Z0-9_-]{1,50}$' -or -not [IO.Path]::IsPathFullyQualified($o.Root) -or $o.Root.StartsWith('\\') -or ([IO.Path]::GetPathRoot($o.Root).TrimEnd('\') -eq $o.Root.TrimEnd('\'))){throw 'VM_SCOPE'}
                 $null=Assert-LocalPath (Join-Path $o.Root 'machines') $o.Root
                 $value='initialized'
             } else {
                 if(-not $o){throw 'VM_SCOPE'}
                 if($verificationOnly -and $request.operation -ne 'boundary-verify'){throw 'UNSUPPORTED_OPERATION'}
+                if($displayOnly -and $request.operation -ne 'sync-display'){throw 'UNSUPPORTED_OPERATION'}
                 if($request.operation -eq 'prepare') {
                     $script:hypervSubstage='edition-check'
                     $edition=(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
@@ -1016,6 +1018,13 @@ try {
                                     $runId=[guid]::NewGuid().ToString('N')
                                     $bundle='C:\ProgramData\ClaudeBootstrap\display-'+$runId
                                     $task='ClaudomeDisplay-'+$runId
+                                    # Reclaim any stale display tasks/bundles from previously interrupted syncs.
+                                    Get-ScheduledTask -TaskName 'ClaudomeDisplay-*' -ErrorAction SilentlyContinue | ForEach-Object {
+                                        if($_.State -ne 'Running'){Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue}
+                                    }
+                                    Get-ChildItem -LiteralPath 'C:\ProgramData\ClaudeBootstrap' -Directory -Filter 'display-*' -ErrorAction SilentlyContinue | ForEach-Object {
+                                        if($_.LastWriteTimeUtc -lt [datetime]::UtcNow.AddMinutes(-2)){Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue}
+                                    }
                                     New-Item -ItemType Directory -Path $bundle -Force | Out-Null
                                     $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetAccessRuleProtection($true,$false)
                                     foreach($sid in @('S-1-5-18','S-1-5-32-544')){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','ContainerInherit,ObjectInherit','None','Allow'))}
@@ -1086,7 +1095,10 @@ if([Claudome.GuestDisplaySync]::EnumDisplaySettingsW($null,-1,[ref]$adm)){$after
                                         }
                                         throw 'GUEST_LOGIN_REQUIRED'
                                     } finally {
-                                        if($registered){Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue}
+                                        if($registered){
+                                            Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+                                            Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
+                                        }
                                         Remove-Item -LiteralPath $bundle -Recurse -Force -ErrorAction SilentlyContinue
                                     }
                                 } -ArgumentList ([string]$o.UserName),([string]$vm.Id),([string]$o.WorkspaceId),$targetW,$targetH)

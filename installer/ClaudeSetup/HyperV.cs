@@ -37,16 +37,22 @@ internal sealed record HyperVWindowsInstallDiagnosis(
 public sealed class HyperV : IVmBackend
 {
     private readonly HyperV? launcher;
+    private readonly bool displayOnly;
     private readonly Func<SetupOptions, CancellationToken, Task<Stream>>? connectFixture;
+    private readonly Func<SetupOptions, CancellationToken, Task<Stream>>? displayConnectFixture;
     private HyperV? verifier;
+    private HyperV? displayHelper;
     private readonly IProgress<InstallationProgress>? progress;
     public HyperV(IProgress<InstallationProgress>? progress = null) { this.progress = progress; }
-    internal HyperV(Func<SetupOptions, CancellationToken, Task<Stream>> connectFixture, IProgress<InstallationProgress>? progress = null)
+    internal HyperV(Func<SetupOptions, CancellationToken, Task<Stream>> connectFixture, IProgress<InstallationProgress>? progress = null,
+        Func<SetupOptions, CancellationToken, Task<Stream>>? displayConnectFixture = null, bool displayOnly = false)
     {
         this.connectFixture = connectFixture;
+        this.displayConnectFixture = displayConnectFixture;
+        this.displayOnly = displayOnly;
         this.progress = progress;
     }
-    private HyperV(HyperV launcher) { this.launcher=launcher; }
+    private HyperV(HyperV launcher, bool displayOnly = false) { this.launcher = launcher; this.displayOnly = displayOnly; }
     private Stream? pipe;
     private StreamReader? reader;
     private StreamWriter? writer;
@@ -62,13 +68,13 @@ public sealed class HyperV : IVmBackend
 
     private static bool IsCancellableReadOperation(string operation) => operation is
         "ready" or "running" or "windows-install-state" or "windows-install-diagnose" or
-        "clipboard-status" or "boundary-verify" or "ensure-checkpoint-policy";
+        "clipboard-status" or "boundary-verify" or "ensure-checkpoint-policy" or "sync-display";
 
     private static TimeSpan? TimeoutForOperation(string operation) => operation switch
     {
         "ready" => TimeSpan.FromSeconds(30),
         "repair-guest-session" => TimeSpan.FromSeconds(90),
-        "sync-display" => TimeSpan.FromSeconds(20),
+        "sync-display" => TimeSpan.FromSeconds(15),
         _ when IsCancellableReadOperation(operation) => TimeSpan.FromSeconds(30),
         _ => null
     };
@@ -107,7 +113,7 @@ public sealed class HyperV : IVmBackend
             reader = new(pipe, Encoding.UTF8, false, 4096, true);
             writer = new(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
             ConnectionSequence++;
-            await CallLocked(o, "init", new { options = o, verificationOnly = launcher is not null }, token);
+            await CallLocked(o, "init", new { options = o, verificationOnly = launcher is not null && !displayOnly, displayOnly }, token);
             return;
         }
 
@@ -134,7 +140,7 @@ public sealed class HyperV : IVmBackend
         await serverPipe.WaitForConnectionAsync(timeout.Token);
         reader = new(pipe, Encoding.UTF8, false, 4096, true); writer = new(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
         ConnectionSequence++;
-        await CallLocked(o, "init", new { options = o, verificationOnly = launcher is not null }, token);
+        await CallLocked(o, "init", new { options = o, verificationOnly = launcher is not null && !displayOnly, displayOnly }, token);
     }
     private async Task<string> Call(SetupOptions options, string operation, object? data, CancellationToken token)
     {
@@ -511,8 +517,22 @@ public sealed class HyperV : IVmBackend
     }
     public async Task<HyperVDisplaySyncResult?> SyncGuestDisplayMode(SessionState s, Secrets secrets, int targetWidth, int targetHeight, CancellationToken token)
     {
-        var raw = await Call(s.Options, "sync-display", new { vmId = s.VmId, password = secrets.VmPassword, width = targetWidth, height = targetHeight }, token);
-        return JsonSerializer.Deserialize<HyperVDisplaySyncResult>(raw, JsonFile.Format);
+        // Always isolate display sync onto a dedicated display-only pipe so a timeout or user cancel
+        // can NEVER abort or disrupt the shared main management connection.
+        var helper = displayHelper ??= (displayConnectFixture is not null
+            ? new HyperV(displayConnectFixture, displayOnly: true)
+            : new HyperV(this, displayOnly: true));
+        try
+        {
+            var raw = await helper.Call(s.Options, "sync-display", new { vmId = s.VmId, password = secrets.VmPassword, width = targetWidth, height = targetHeight }, token);
+            return JsonSerializer.Deserialize<HyperVDisplaySyncResult>(raw, JsonFile.Format);
+        }
+        catch
+        {
+            if (ReferenceEquals(displayHelper, helper)) displayHelper = null;
+            try { await helper.DisposeAsync(); } catch { }
+            throw;
+        }
     }
     public async Task<bool> GuestFileExists(SessionState s, Secrets secrets, string file, CancellationToken token)
     {
@@ -538,6 +558,12 @@ public sealed class HyperV : IVmBackend
         var totalSw = Stopwatch.StartNew();
         try
         {
+            if (displayHelper is not null)
+            {
+                await displayHelper.DisposeAsync();
+                displayHelper = null;
+                disposeTrace.Add($"display-helper:{totalSw.ElapsedMilliseconds}ms");
+            }
             if (verifier is not null)
             {
                 await verifier.DisposeAsync();

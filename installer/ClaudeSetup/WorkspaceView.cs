@@ -36,6 +36,9 @@ public sealed partial class SetupWindow
     private bool taskFaulted, installationNetworkFailed;
     private NativeConsoleHost? consoleHost;
     private bool fittingVBoxDisplay, fittingHyperVDisplay;
+    private ConsolePixelSize? lastHyperVSyncedViewport;
+    private long hyperVFitGeneration;
+    private CancellationTokenSource? hyperVFitCts;
     private Button? openStandaloneHyperV, topStandaloneHyperV;
     private bool waitingForGuestFrame;
     private DateTime? waitingForGuestFrameSinceUtc;
@@ -354,6 +357,7 @@ public sealed partial class SetupWindow
     }
     private void ReleaseDesktopWindow()
     {
+        CancelPendingHyperVDisplayFit(resetViewport: true);
         // A VMware frontend can switch to a different VM within its existing window.
         var switched = lastConsoleWindow is { } window &&
             !ConsoleWindowLocator.IsAlive(window, state.Options.VmName);
@@ -577,21 +581,42 @@ public sealed partial class SetupWindow
         }
         finally { fittingVBoxDisplay = false; }
     }
+    private void CancelPendingHyperVDisplayFit(bool resetViewport = false)
+    {
+        Interlocked.Increment(ref hyperVFitGeneration);
+        try { hyperVFitCts?.Cancel(); } catch { }
+        hyperVFitCts?.Dispose();
+        hyperVFitCts = null;
+        if (resetViewport) lastHyperVSyncedViewport = null;
+    }
+
     private async Task FitHyperVConsole(NativeConsoleHost host)
     {
-        if (fittingHyperVDisplay || lastConsoleWindow is not { } window || host.GuestWindow != window.Handle) return;
+        if (lastConsoleWindow is not { } window || host.GuestWindow != window.Handle) return;
+        var contentArea = host.GetVmConnectContentViewport();
+        if (fittingHyperVDisplay && lastHyperVSyncedViewport == contentArea) return;
         var vmId = state.VmId;
+        var generation = Interlocked.Increment(ref hyperVFitGeneration);
+        try { hyperVFitCts?.Cancel(); } catch { }
+        hyperVFitCts?.Dispose();
         var lifetime = desktopConnectionCancellation?.Token ?? CancellationToken.None;
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
-        deadline.CancelAfter(TimeSpan.FromSeconds(22));
-        var token = deadline.Token;
+        var localCts = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        localCts.CancelAfter(TimeSpan.FromSeconds(20));
+        hyperVFitCts = localCts;
+        var token = localCts.Token;
         fittingHyperVDisplay = true;
         UpdateDesktopActivity();
         try
         {
-            var contentArea = host.GetVmConnectContentViewport();
+            var isStale = () => token.IsCancellationRequested || lifetime.IsCancellationRequested ||
+                Volatile.Read(ref hyperVFitGeneration) != generation ||
+                section != 7 || state.VmId != vmId || host != consoleHost ||
+                !host.IsAttached || host.GuestWindow != window.Handle ||
+                state.Status.Contains("暂停");
+
             HyperVDisplaySyncResult? synced = null;
-            if (state.Completed.Contains("guest-ready") &&
+            if (!isStale() && state.Completed.Contains("guest-ready") &&
+                lastHyperVSyncedViewport != contentArea &&
                 BoundaryRuntime.BackendFor(state) is HyperV activeHv &&
                 activeHv.HasManagementConnection)
             {
@@ -601,11 +626,14 @@ public sealed partial class SetupWindow
                     try
                     {
                         synced = await activeHv.SyncGuestDisplayMode(state, login, contentArea.Width, contentArea.Height, token);
+                        if (!isStale() && synced is not null)
+                            lastHyperVSyncedViewport = contentArea;
                     }
-                    catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { throw; }
+                    catch (OperationCanceledException) when (isStale()) { return; }
                     catch { }
                 }
             }
+            if (isStale()) return;
 
             var initialLevel = synced is { SelectedZoom: > 0 }
                 ? HyperVConsoleZoom.ZoomLevelForScale(synced.SelectedZoom)
@@ -615,41 +643,35 @@ public sealed partial class SetupWindow
             var stillOverflow = false;
             foreach (var level in HyperVConsoleZoom.StepDownZoomLevels(initialLevel))
             {
-                token.ThrowIfCancellationRequested();
+                if (isStale()) return;
                 var clicked = await Task.Run(() => HyperVConsoleZoom.TrySelectZoomLevel(window, level, token), token)
                     .WaitAsync(token);
                 if (!clicked) continue;
                 applied = true;
                 chosenLevel = level;
-                await Task.Delay(320, lifetime); // VMConnect can animate its own resize after selecting zoom level.
-                if (lifetime.IsCancellationRequested || section != 7 || state.VmId != vmId ||
-                    host != consoleHost || !host.IsAttached || host.GuestWindow != window.Handle)
-                    return;
+                await Task.Delay(320, token); // VMConnect can animate its own resize after selecting zoom level.
+                if (isStale()) return;
                 host.Fit(forceRedraw: true);
                 stillOverflow = host.HasOverflowScrollbars();
                 if (!stillOverflow) break;
             }
-            if (!lifetime.IsCancellationRequested && section == 7 && state.VmId == vmId &&
-                host == consoleHost && host.IsAttached && host.GuestWindow == window.Handle)
+            if (!isStale())
             {
                 if (!applied) host.Fit(forceRedraw: true);
                 stillOverflow = host.HasOverflowScrollbars();
                 if (applied && !stillOverflow)
                 {
                     var zoomText = HyperVConsoleZoom.ZoomLabel(chosenLevel);
-                    if (synced is not null && TryParseDisplayMode(synced.After, out var gw, out var gh))
+                    var modeLabel = synced is not null && !string.IsNullOrWhiteSpace(synced.After) ? $"{synced.After} @ {zoomText}" : $"缩放 {zoomText}";
+                    var actualSurface = host.MeasureActualGuestSurfaceRelativeToContainer();
+                    var fill = NativeConsoleHost.EvaluateEdgeToEdgeFill(actualSurface, host.ViewportPixels);
+                    var statusText = fill.State switch
                     {
-                        var scale = HyperVConsoleZoom.ScaleForZoomLevel(chosenLevel);
-                        var rendered = new ConsolePixelSize((int)Math.Round(gw * scale), (int)Math.Round(gh * scale));
-                        var coverage = NativeConsoleHost.EvaluateCoverage(rendered, contentArea);
-                        SetDesktopConnectionStatus(coverage.FullFill
-                            ? $"已完成 Hyper-V 桌面铺满适配（{synced.After} @ {zoomText}）。"
-                            : $"已消除滚动条（当前 {synced.After} @ {zoomText}，受限于基本会话固定比例/档位仍有留白，可用「独立窗口查看」）。");
-                    }
-                    else
-                    {
-                        SetDesktopConnectionStatus($"已消除滚动条（当前缩放 {zoomText}；首次设置/锁屏阶段受限于固定分辨率可能仍有留白，可用「独立窗口查看」）。");
-                    }
+                        NativeConsoleHost.DisplayFillState.FullFill => $"已完成 Hyper-V 桌面四边铺满适配（{modeLabel}）。",
+                        NativeConsoleHost.DisplayFillState.MarginsRemaining => $"已消除滚动条，但四边尚未完全贴合（{fill.Detail}；当前 {modeLabel}，可用「独立窗口查看」）。",
+                        _ => $"铺满待核验（已消除滚动条，当前 {modeLabel}，未读取到实际来宾画面四边边界，可用「独立窗口查看」）。"
+                    };
+                    SetDesktopConnectionStatus(statusText);
                 }
                 else
                     SetDesktopConnectionStatus(HyperVZoomFallbackMessage(applied));
@@ -657,13 +679,19 @@ public sealed partial class SetupWindow
         }
         catch (OperationCanceledException)
         {
-            if (!lifetime.IsCancellationRequested && section == 7 && state.VmId == vmId && host.IsAttached && host.GuestWindow == window.Handle)
+            if (!lifetime.IsCancellationRequested && Volatile.Read(ref hyperVFitGeneration) == generation &&
+                section == 7 && state.VmId == vmId && host.IsAttached && host.GuestWindow == window.Handle)
                 SetDesktopConnectionStatus(HyperVZoomFallbackMessage(false));
         }
         finally
         {
-            fittingHyperVDisplay = false;
-            UpdateDesktopActivity();
+            if (Volatile.Read(ref hyperVFitGeneration) == generation)
+            {
+                fittingHyperVDisplay = false;
+                if (ReferenceEquals(hyperVFitCts, localCts)) hyperVFitCts = null;
+                localCts.Dispose();
+                UpdateDesktopActivity();
+            }
         }
     }
 
@@ -686,6 +714,7 @@ public sealed partial class SetupWindow
 
         desktopConnectionPolicy.Suspend();
         autoConnectDesktop = false;
+        CancelPendingHyperVDisplayFit(resetViewport: true);
         desktopConnectionCancellation?.Cancel();
         consoleHost?.Detach(showOriginal: true);
         if (consoleHost is not null) consoleHost.Visibility = Visibility.Collapsed;

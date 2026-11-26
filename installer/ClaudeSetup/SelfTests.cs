@@ -1993,15 +1993,138 @@ public static class SelfTests
                    HyperVConsoleZoom.ZoomLevelForScale(1.0) == 6 &&
                    HyperVConsoleZoom.ZoomLevelForScale(0.75) == 3,
                 "Zoom levels must include 100% and descend to 25% without implicit Auto fallback");
-            var partial = NativeConsoleHost.EvaluateCoverage(new ConsolePixelSize(512, 384), new ConsolePixelSize(1000, 500));
-            var full = NativeConsoleHost.EvaluateCoverage(new ConsolePixelSize(960, 480), new ConsolePixelSize(1000, 500));
-            Assert(!partial.FullFill && full.FullFill, "Coverage check must distinguish partial margins from full fill");
+            var viewport = new ConsolePixelSize(1000, 500);
+            var partialRight = NativeConsoleHost.EvaluateEdgeToEdgeFill(new System.Windows.Rect(0, 0, 900, 500), viewport);
+            var partialChrome = NativeConsoleHost.EvaluateEdgeToEdgeFill(new System.Windows.Rect(0, 48, 1000, 428), viewport);
+            var clippedSurface = NativeConsoleHost.EvaluateEdgeToEdgeFill(new System.Windows.Rect(-20, 0, 1020, 500), viewport);
+            var unverified = NativeConsoleHost.EvaluateEdgeToEdgeFill(null, viewport);
+            var exactFull = NativeConsoleHost.EvaluateEdgeToEdgeFill(new System.Windows.Rect(0, 0, 1000, 500), viewport);
+            var roundedFull = NativeConsoleHost.EvaluateEdgeToEdgeFill(new System.Windows.Rect(2, 2, 996, 496), viewport);
+            Assert(partialRight.State == NativeConsoleHost.DisplayFillState.MarginsRemaining &&
+                   partialRight.Detail.Contains("右100") &&
+                   partialChrome.State == NativeConsoleHost.DisplayFillState.MarginsRemaining &&
+                   clippedSurface.State == NativeConsoleHost.DisplayFillState.MarginsRemaining &&
+                   unverified.State == NativeConsoleHost.DisplayFillState.Unverified &&
+                   exactFull.State == NativeConsoleHost.DisplayFillState.FullFill &&
+                   roundedFull.State == NativeConsoleHost.DisplayFillState.FullFill,
+                "Edge-to-edge fill check must reject 100px margin, reject clipping, report Unverified when surface is absent, and pass only within pixel tolerance on all 4 edges");
             var sample = new NodeProbeResult("1.1.1.1", "KR", "Asia/Seoul", "Korea Standard Time", 120, true,
                 "物理网卡 WLAN", "采用 宿主机系统 DNS（1 个公网 IPv4）", "物理网卡 WLAN · TCP 25 ms", "api.ip.sb · 120 ms", "未检测到宿主 TUN");
             Assert(sample.ResolutionSummary.Contains("宿主机系统 DNS") && sample.HandshakeSummary.Contains("TCP 25 ms") &&
                    sample.TargetSummary.Contains("api.ip.sb") && sample.HostNetworkSummary.Contains("TUN"),
                 "NodeProbeResult segmented diagnostics fields missing");
         }));
+        await Check("hyperv-display-sync-timeout-and-pause-isolate-main-management-pipe", async () => {
+            var opts = new SetupOptions { PlatformId = "hyperv", VmName = "DisplayIsoVm", Root = Path.Combine(root, "hv-display-iso") };
+            var st = new SessionState { VmId = "22222222-2222-2222-2222-222222222222", Options = opts };
+            var sec = new Secrets { VmPassword = "Password!234" };
+            var mainServerHold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var displaySyncEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var displayServerHold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var displayInitSawDisplayOnly = false;
+            var displayInitSawVerificationOnly = true;
+            var mainRunningReplies = 0;
+            Task? mainServerTask = null;
+            Task? displayServerTask = null;
+
+            await using var hv = new HyperV(
+                connectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeMainPipe-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    mainServerTask = Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    if (line.Contains("\"init\"")) await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"running\""))
+                                    {
+                                        Interlocked.Increment(ref mainRunningReplies);
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"True\",\"code\":\"OK\"}");
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } mainServerHold.TrySetResult(); }
+                        }
+                    });
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayConnectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeDisplayPipe-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    displayServerTask = Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                var initLine = await r.ReadLineAsync();
+                                if (initLine is not null)
+                                {
+                                    displayInitSawDisplayOnly = initLine.Contains("\"displayOnly\":true");
+                                    displayInitSawVerificationOnly = initLine.Contains("\"verificationOnly\":true");
+                                    await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                }
+                                var syncLine = await r.ReadLineAsync();
+                                if (syncLine is not null && syncLine.Contains("\"sync-display\""))
+                                    displaySyncEntered.TrySetResult();
+                                await displayServerHold.Task; // Simulate hung guest display sync
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    });
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                });
+
+            Assert(await hv.IsRunning(st, CancellationToken.None) && hv.HasManagementConnection && hv.ConnectionSequence == 1,
+                "Main Hyper-V management pipe failed initial connect");
+
+            using var displayCts = new CancellationTokenSource();
+            var syncTask = hv.SyncGuestDisplayMode(st, sec, 1280, 720, displayCts.Token);
+            await displaySyncEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+            // While isolated sync-display is hung, main management pipe must remain responsive and unbroken.
+            var concurrentRunning = await hv.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+            Assert(concurrentRunning && hv.HasManagementConnection && hv.ConnectionSequence == 1,
+                "Hung display sync blocked or disrupted the main management pipe");
+
+            var cancelSw = System.Diagnostics.Stopwatch.StartNew();
+            displayCts.Cancel();
+            var syncCancelled = false;
+            try { await syncTask.WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (OperationCanceledException) { syncCancelled = true; }
+            catch (SetupException) { syncCancelled = true; }
+            cancelSw.Stop();
+            displayServerHold.TrySetResult();
+            if (displayServerTask is not null) await displayServerTask.WaitAsync(TimeSpan.FromSeconds(3));
+
+            var postCancelRunning = await hv.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+            Assert(syncCancelled && cancelSw.ElapsedMilliseconds < 1500 &&
+                   displayInitSawDisplayOnly && !displayInitSawVerificationOnly &&
+                   hv.HasManagementConnection && hv.ConnectionSequence == 1 &&
+                   postCancelRunning && mainRunningReplies == 3,
+                "Display sync timeout/cancel must leave main management connection untouched on sequence 1");
+            await hv.DisposeAsync();
+            if (mainServerTask is not null) await mainServerTask.WaitAsync(TimeSpan.FromSeconds(3));
+        });
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));

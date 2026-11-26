@@ -24,7 +24,8 @@ public sealed record NodeProbeResult(
     string TargetSummary = "",
     string HostNetworkSummary = "",
     string[]? VerifiedFirstHopAddresses = null,
-    string[]? VerifiedExitAddresses = null);
+    string[]? VerifiedExitAddresses = null,
+    string? VerifiedConnectedEndpoint = null);
 
 public static class RegionCatalog
 {
@@ -200,6 +201,9 @@ public static class NodeExitProbe
                 var handshakeText = tcpLatency is { } ms
                     ? $"{ifaceLabel} · TCP {ms} ms · 节点协议与 TLS 握手成功"
                     : $"{ifaceLabel} · 节点协议与 TLS 握手成功";
+                var connectedEndpoint = reach is { Reachable: true, ConnectedIp: { Length: > 0 } ip }
+                    ? $"{ip}:{first.Port}"
+                    : null;
                 return geo with
                 {
                     OutboundInterfaceSummary = ifaceLabel,
@@ -207,7 +211,8 @@ public static class NodeExitProbe
                     HandshakeSummary = handshakeText,
                     HostNetworkSummary = report.HostNetwork.Summary,
                     VerifiedFirstHopAddresses = [.. report.Addresses],
-                    VerifiedExitAddresses = [.. exitAddresses]
+                    VerifiedExitAddresses = [.. exitAddresses],
+                    VerifiedConnectedEndpoint = connectedEndpoint
                 };
             }, progress);
 

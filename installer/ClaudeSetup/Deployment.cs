@@ -254,7 +254,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             await downloader.Get(resource, o.Cache, downloads, token);
         }
     }
-    public sealed record PinnedRouteEndpoints(string[] FirstHopAddresses, string[] ExitAddresses, string SourceSummary);
+    public sealed record PinnedRouteEndpoints(string[] FirstHopAddresses, string[] ExitAddresses, string SourceSummary, string? ConnectedEndpoint = null);
 
     internal static async Task<(string[] FirstHopAddresses, string[] ExitAddresses, string Summary)> ResolveOrBindEndpointsAsync(
         ProxyNode firstHop,
@@ -263,7 +263,10 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         EndpointResolutionStrategy strategy,
         PinnedRouteEndpoints? pinnedEndpoints,
         CancellationToken token,
-        Func<string, int, EndpointResolutionStrategy, CancellationToken, Task<EndpointResolutionReport>>? resolver = null)
+        SetupOptions? options = null,
+        ProxyNode? upstreamNode = null,
+        Func<string, int, EndpointResolutionStrategy, CancellationToken, Task<EndpointResolutionReport>>? resolver = null,
+        Func<SetupOptions, ProxyNode, ProxyNode?, EndpointResolutionStrategy, CancellationToken, Task<NodeProbeResult>>? candidateVerifier = null)
     {
         if (pinnedEndpoints is not null)
         {
@@ -271,7 +274,22 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             var exitPinned = hasUpstream
                 ? IsolationPolicy.ValidateEndpoints(pinnedEndpoints.ExitAddresses).Order(StringComparer.Ordinal).ToArray()
                 : firstPinned;
-            return (firstPinned, exitPinned, $"沿用刚核验通过的端点（{pinnedEndpoints.SourceSummary}）");
+            var connectedNote = string.IsNullOrEmpty(pinnedEndpoints.ConnectedEndpoint) ? "" : $" · 实连端点 {pinnedEndpoints.ConnectedEndpoint}";
+            return (firstPinned, exitPinned, $"沿用刚核验通过的端点（候选组 {firstPinned.Length} 个{connectedNote}；{pinnedEndpoints.SourceSummary}）");
+        }
+        if (strategy == EndpointResolutionStrategy.HyperVStandalone && options is not null)
+        {
+            var verify = candidateVerifier ?? ((o, sel, up, st, ct) => NodeExitProbe.ProbeAsync(o, sel, up, ct, strategy: st));
+            var verified = await verify(options, finalNode, upstreamNode, strategy, token);
+            if (verified.VerifiedFirstHopAddresses is not { Length: > 0 })
+                throw new SetupException("节点候选组未返回已核验的公网 IPv4 端点。");
+            var firstVerified = IsolationPolicy.ValidateEndpoints(verified.VerifiedFirstHopAddresses).Order(StringComparer.Ordinal).ToArray();
+            var exitVerified = hasUpstream
+                ? IsolationPolicy.ValidateEndpoints(verified.VerifiedExitAddresses ?? []).Order(StringComparer.Ordinal).ToArray()
+                : firstVerified;
+            var connectedNote = string.IsNullOrEmpty(verified.VerifiedConnectedEndpoint) ? "" : $" · 实连端点 {verified.VerifiedConnectedEndpoint}";
+            return (firstVerified, exitVerified,
+                $"{verified.ResolutionSummary}（候选组 {firstVerified.Length} 个{connectedNote} · 出口 {verified.ExitIp}/{verified.CountryCode}）；{verified.HostNetworkSummary}");
         }
         var resolve = resolver ?? ((s, p, st, ct) => NodeEndpointResolver.ResolveDetailedAsync(s, p, st, ct));
         var firstResolution = await resolve(firstHop.Server, firstHop.Port, strategy, token);
@@ -362,7 +380,8 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 port = firstHop.Port;
                 var resolutionStrategy = ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default;
                 var (resolvedFirst, exitAddresses, resolutionSummary) = await ResolveOrBindEndpointsAsync(
-                    firstHop, node, upstream is not null, resolutionStrategy, pinnedEndpoints, token);
+                    firstHop, node, upstream is not null, resolutionStrategy, pinnedEndpoints, token,
+                    options: o, upstreamNode: upstream);
                 addresses = resolvedFirst;
                 messages.Report($"节点解析：{resolutionSummary}。");
                 config = NetworkImport.CoreConfig(node, addresses, o.PlatformId == "virtualbox" ? null : "ClaudomeBridge", upstream, exitAddresses);

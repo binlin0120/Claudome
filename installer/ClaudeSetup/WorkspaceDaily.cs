@@ -194,8 +194,10 @@ public sealed partial class Deployment
         if (state.Options.ChainEnabled != (upstream is not null))
             throw new SetupException("保存的链式线路资料不完整。");
         var first = upstream ?? node;
-        var addresses = await ResolveEndpoints(first.Server, token, first.Port);
-        var finalAddresses = upstream is null ? addresses : await ResolveEndpoints(node.Server, token);
+        var resolutionStrategy = ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default;
+        var (addresses, finalAddresses, _) = await ResolveOrBindEndpointsAsync(
+            first, node, upstream is not null, resolutionStrategy, pinnedEndpoints: null, token,
+            options: state.Options, upstreamNode: upstream);
         var config = NetworkImport.CoreConfig(node, addresses,
             state.Options.PlatformId == "virtualbox" ? null : "ClaudomeBridge", upstream, finalAddresses);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(config)));
