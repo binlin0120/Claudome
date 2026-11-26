@@ -90,16 +90,16 @@ function Test-VMKeyProtectorPresent($Vm) {
 }
 function Enable-TaskVirtualTpm($Vm) {
     if((Get-VMSecurity -VM $Vm).TpmEnabled){return}
-    try{$present=Test-VMKeyProtectorPresent $Vm}catch{throw 'VM_KEY_PROTECTOR_READ_FAILED'}
+    try{$present=Test-VMKeyProtectorPresent $Vm}catch{Save-HyperVErrorContext $_;throw 'VM_KEY_PROTECTOR_READ_FAILED'}
     if(-not $present){
         try{
             Set-VMKeyProtector -VM $Vm -NewLocalKeyProtector
             if(-not(Test-VMKeyProtectorPresent $Vm)){throw 'VM_KEY_PROTECTOR_SETUP_FAILED'}
-        }catch{throw 'VM_KEY_PROTECTOR_SETUP_FAILED'}
+        }catch{Save-HyperVErrorContext $_;throw 'VM_KEY_PROTECTOR_SETUP_FAILED'}
     }
     $script:tpmErrorHResult = $null
     try { Enable-VMTPM -VM $Vm }
-    catch { $script:tpmErrorHResult = [int]$_.Exception.GetBaseException().HResult; throw 'VM_TPM_ENABLE_FAILED' }
+    catch { Save-HyperVErrorContext $_;$script:tpmErrorHResult = [int]$_.Exception.GetBaseException().HResult; throw 'VM_TPM_ENABLE_FAILED' }
 }
 function Guest-Session($Data,[switch]$Default) {
     $vm=Target-VM $Data
@@ -467,16 +467,86 @@ function Confirm-WindowsDisk($Checkpoint,$Vm,[switch]$AllowAttached) {
     if($vhd.Attached -and -not $AllowAttached){throw 'HYPERV_DISK_MOUNTED'}
     return $vhd
 }
+function Reset-HyperVRequestDiagnostics {
+    $script:windowsInstallStage = ''
+    $script:windowsNativeCode = $null
+    $script:hypervSubstage = ''
+    $script:capturedErrorHResult = $null
+    $script:capturedErrorNativeCode = $null
+    $script:capturedErrorCategory = $null
+    $script:capturedNativeExitCode = $null
+    $script:tpmErrorHResult = $null
+    $script:copyStage = ''
+    $global:LASTEXITCODE = 0
+}
+function Save-HyperVErrorContext($ErrorRecord) {
+    if ($null -eq $ErrorRecord) { return }
+    $ex = if ($ErrorRecord.Exception) { $ErrorRecord.Exception.GetBaseException() } else { $null }
+    if ($null -ne $ex -and $ex.HResult -ne 0) {
+        $script:capturedErrorHResult = [int]$ex.HResult
+    }
+    if ($ex -is [ComponentModel.Win32Exception]) {
+        $script:capturedErrorNativeCode = [int]$ex.NativeErrorCode
+    }
+    if ($ErrorRecord.CategoryInfo -and $ErrorRecord.CategoryInfo.Category) {
+        $script:capturedErrorCategory = [string]$ErrorRecord.CategoryInfo.Category
+    }
+}
+function Format-HyperVErrorResponse($Request, $ErrorRecord) {
+    $code = $ErrorRecord.Exception.Message
+    if ($code -notmatch '^(GUEST_BRIDGE_(2[0-9]|3[01])|GUEST_COPY_(INVALID|DIRECTORY|DISK_FULL|HASH|SOURCE)|HYPERV_(MODULE_UNAVAILABLE|VMMS_MISSING|VMMS_DISABLED|VMMS_STOPPED|FEATURE_NOT_FOUND|FEATURE_QUERY_FAILED))$' -and $code -notin @('HYPERV_RESTART','HYPERV_EDITION','HYPERV_SWITCH','HYPERV_NOT_READY','VM_SCOPE','VM_COLLISION','DISK_SCOPE','HYPERV_DISK_RECOVERY','HYPERV_DISK_MOUNTED','WINDOWS_MEDIA_UNSUPPORTED','WINDOWS_IMAGE_APPLY_FAILED','WINDOWS_BOOT_FILES_FAILED','GUEST_COMMAND_FAILED','GUEST_SHUTDOWN_PENDING','BOUNDARY_NICS','BOUNDARY_SERVICE','BOUNDARY_METADATA','HYPERV_CONSOLE_CONSENT','HYPERV_CONSOLE_SHUTDOWN','HYPERV_CONSOLE_POLICY','GUEST_LOGIN_REQUIRED','VM_SECURITY','VM_KEY_PROTECTOR_READ_FAILED','VM_KEY_PROTECTOR_SETUP_FAILED','VM_TPM_ENABLE_FAILED','UNSUPPORTED_OPERATION')) { $code = 'HYPERV_STEP_FAILED' }
+    $resp = @{ ok = $false; value = ''; code = $code }
+    $cause = $ErrorRecord.Exception.GetBaseException()
+    $resp.errorOperation = [string]$Request.operation
+    $substage = if ($script:windowsInstallStage) { $script:windowsInstallStage } elseif ($script:hypervSubstage) { $script:hypervSubstage } else { '' }
+    if ($substage) { $resp.errorSubstage = [string]$substage }
+    if ($null -ne $script:capturedErrorHResult) {
+        $resp.errorHResult = [int]$script:capturedErrorHResult
+    } elseif ($null -ne $cause -and -not ($cause -is [Management.Automation.RuntimeException] -and $cause.HResult -eq -2146233087)) {
+        $resp.errorHResult = [int]$cause.HResult
+    }
+    if ($null -ne $script:capturedErrorNativeCode) {
+        $resp.errorNativeCode = [int]$script:capturedErrorNativeCode
+    } elseif ($cause -is [ComponentModel.Win32Exception]) {
+        $resp.errorNativeCode = [int]$cause.NativeErrorCode
+    } elseif ($null -ne $script:capturedNativeExitCode -and $script:capturedNativeExitCode -ne 0) {
+        $resp.errorNativeCode = [int]$script:capturedNativeExitCode
+    } elseif ($null -ne $script:windowsNativeCode -and $script:windowsNativeCode -ne 0) {
+        $resp.errorNativeCode = [int]$script:windowsNativeCode
+    }
+    if ($script:capturedErrorCategory) {
+        $resp.errorCategory = [string]$script:capturedErrorCategory
+    } elseif ($ErrorRecord.CategoryInfo -and $ErrorRecord.CategoryInfo.Category) {
+        $resp.errorCategory = [string]$ErrorRecord.CategoryInfo.Category
+    }
+    if ($code -eq 'HYPERV_STEP_FAILED' -and $Request.operation -in @('copy-to','copy-from')) {
+        $resp.copyErrorStage = $script:copyStage
+        $resp.copyErrorCategory = [string]$ErrorRecord.CategoryInfo.Category
+        $resp.copyErrorHResult = [int]$cause.HResult
+    }
+    if ($code -eq 'VM_TPM_ENABLE_FAILED' -and $null -ne $script:tpmErrorHResult) {
+        $resp.tpmErrorHResult = $script:tpmErrorHResult
+    }
+    if ($Request.operation -eq 'windows' -and $script:windowsInstallStage) {
+        $resp.windowsStage = $script:windowsInstallStage
+        if ($null -ne $script:windowsNativeCode) {
+            $resp.windowsNativeCode = [int]$script:windowsNativeCode
+        } elseif ($code -eq 'HYPERV_STEP_FAILED') {
+            if ($cause -is [ComponentModel.Win32Exception]) { $resp.windowsNativeCode = $cause.NativeErrorCode }
+            elseif ($cause -isnot [Management.Automation.RuntimeException]) { $resp.windowsNativeCode = $cause.HResult }
+        }
+    }
+    return $resp
+}
 function Get-WindowsInstallProbe($Vm) {
     $path=Assert-LocalPath (Join-Path $Vm.Path '.windows-install.json') $Vm.Path
-    $defaultDisk=Assert-InstallDiskPath (Join-Path $Vm.Path 'Windows11.vhdx') $Vm
-    try { $drives=@(Assert-InstallDrives $Vm $defaultDisk) } catch { return 'needs-recovery' }
     if([IO.File]::Exists($path)) {
         try {
             if(([IO.FileInfo]::new($path)).Length -gt 65536){return 'needs-recovery'}
             $c=[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
-            if($c.schema -ne 1 -or $c.vmId -ne [string]$Vm.Id -or $c.workspaceId -ne $o.WorkspaceId -or $c.isoSha256 -ne $o.IsoSha256 -or $c.imageIndex -ne $o.WindowsImageIndex -or $c.userName -ne $o.UserName -or $c.diskGb -ne $o.DiskGb -or $c.phase -notin @('planned','applying','image-ready','ready')){return 'needs-recovery'}
+            if($c.schema -ne 1 -or $c.vmId -ne [string]$Vm.Id -or $c.workspaceId -ne $o.WorkspaceId -or $c.isoSha256 -ne $o.IsoSha256 -or $c.imageIndex -ne $o.WindowsImageIndex -or $c.userName -ne $o.UserName -or $c.diskGb -ne $o.DiskGb -or $c.phase -notin @('planned','applying','image-ready','ready') -or @($c.preservedDisks).Count -gt 128){return 'needs-recovery'}
             $disk=Assert-InstallDiskPath ([string]$c.diskPath) $Vm
+            foreach($old in @($c.preservedDisks)){$null=Assert-InstallDiskPath ([string]$old) $Vm}
             $drives=@(Assert-InstallDrives $Vm $disk)
             if($c.phase -eq 'ready') {
                 if($drives.Count -ne 1){return 'needs-recovery'}
@@ -488,10 +558,13 @@ function Get-WindowsInstallProbe($Vm) {
                 $null=Confirm-WindowsDisk $c $Vm
                 return 'image-ready'
             }
+            if($c.phase -eq 'applying'){return 'needs-recovery'}
             if($drives.Count -gt 0 -or [IO.File]::Exists($disk)){return 'needs-recovery'}
             return 'empty'
         } catch { return 'needs-recovery' }
     }
+    $defaultDisk=Assert-InstallDiskPath (Join-Path $Vm.Path 'Windows11.vhdx') $Vm
+    try { $drives=@(Assert-InstallDrives $Vm $defaultDisk) } catch { return 'needs-recovery' }
     $ready=Assert-LocalPath (Join-Path $Vm.Path '.windows-applied') $Vm.Path
     $legacy=([IO.File]::Exists($ready)) -and ([IO.File]::ReadAllText($ready)).Trim() -eq 'applied'
     if($legacy) {
@@ -622,9 +695,7 @@ function Apply-WindowsImageToNewDisk($vm,$checkpoint,$Data) {
 }
 try {
     while($null -ne ($line=$reader.ReadLine())) {
-        $script:windowsInstallStage=''
-        $script:windowsNativeCode=$null
-        $script:hypervSubstage=''
+        Reset-HyperVRequestDiagnostics
         $response=@{ok=$false;value='';code='HYPERV_STEP_FAILED'}
         try {
             $request=$line | ConvertFrom-Json;$d=$request.data
@@ -647,6 +718,7 @@ try {
                     try {
                         $feature=Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop
                     } catch {
+                        Save-HyperVErrorContext $_
                         $hr=[int]$_.Exception.GetBaseException().HResult
                         if($hr -eq -2146498548){throw 'HYPERV_FEATURE_NOT_FOUND'}
                         throw 'HYPERV_FEATURE_QUERY_FAILED'
@@ -658,6 +730,7 @@ try {
                         try {
                             Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart -ErrorAction Stop | Out-Null
                         } catch {
+                            Save-HyperVErrorContext $_
                             $hr=[int]$_.Exception.GetBaseException().HResult
                             if($hr -eq -2146498548){throw 'HYPERV_FEATURE_NOT_FOUND'}
                             throw
@@ -665,7 +738,7 @@ try {
                         throw 'HYPERV_RESTART'
                     }
                     $script:hypervSubstage='import-module'
-                    try { Import-Module Hyper-V -ErrorAction Stop } catch { throw 'HYPERV_MODULE_UNAVAILABLE' }
+                    try { Import-Module Hyper-V -ErrorAction Stop } catch { Save-HyperVErrorContext $_; throw 'HYPERV_MODULE_UNAVAILABLE' }
                     $script:hypervSubstage='check-vmms'
                     $service = Get-Service vmms -ErrorAction SilentlyContinue
                     if (!$service) { throw 'HYPERV_VMMS_MISSING' }
@@ -862,34 +935,7 @@ try {
             }
             $response=@{ok=$true;value=[string]$value;code='OK'}
         }catch {
-            $code=$_.Exception.Message
-            if($code -notmatch '^(GUEST_BRIDGE_(2[0-9]|3[01])|GUEST_COPY_(INVALID|DIRECTORY|DISK_FULL|HASH|SOURCE)|HYPERV_(MODULE_UNAVAILABLE|VMMS_MISSING|VMMS_DISABLED|VMMS_STOPPED|FEATURE_NOT_FOUND|FEATURE_QUERY_FAILED))$' -and $code -notin @('HYPERV_RESTART','HYPERV_EDITION','HYPERV_SWITCH','HYPERV_NOT_READY','VM_SCOPE','VM_COLLISION','DISK_SCOPE','HYPERV_DISK_RECOVERY','HYPERV_DISK_MOUNTED','WINDOWS_MEDIA_UNSUPPORTED','WINDOWS_IMAGE_APPLY_FAILED','WINDOWS_BOOT_FILES_FAILED','GUEST_COMMAND_FAILED','GUEST_SHUTDOWN_PENDING','BOUNDARY_NICS','BOUNDARY_SERVICE','BOUNDARY_METADATA','HYPERV_CONSOLE_CONSENT','HYPERV_CONSOLE_SHUTDOWN','HYPERV_CONSOLE_POLICY','GUEST_LOGIN_REQUIRED','VM_SECURITY','VM_KEY_PROTECTOR_READ_FAILED','VM_KEY_PROTECTOR_SETUP_FAILED','VM_TPM_ENABLE_FAILED','UNSUPPORTED_OPERATION')){$code='HYPERV_STEP_FAILED'}
-            $response=@{ok=$false;value='';code=$code}
-            $cause=$_.Exception.GetBaseException()
-            $response.errorOperation=[string]$request.operation
-            $substage=if($script:windowsInstallStage){$script:windowsInstallStage}elseif($script:hypervSubstage){$script:hypervSubstage}else{''}
-            if($substage){$response.errorSubstage=[string]$substage}
-            if($null -ne $cause){$response.errorHResult=[int]$cause.HResult}
-            if($cause -is [ComponentModel.Win32Exception]){$response.errorNativeCode=[int]$cause.NativeErrorCode}
-            elseif($LASTEXITCODE -and $LASTEXITCODE -ne 0){$response.errorNativeCode=[int]$LASTEXITCODE}
-            if($_.CategoryInfo -and $_.CategoryInfo.Category){$response.errorCategory=[string]$_.CategoryInfo.Category}
-            if($code -eq 'HYPERV_STEP_FAILED' -and $request.operation -in @('copy-to','copy-from')){
-                $response.copyErrorStage = $script:copyStage
-                $response.copyErrorCategory=[string]$_.CategoryInfo.Category
-                $response.copyErrorHResult=[int]$cause.HResult
-            }
-            if($code -eq 'VM_TPM_ENABLE_FAILED' -and $null -ne $script:tpmErrorHResult){
-                $response.tpmErrorHResult = $script:tpmErrorHResult
-            }
-            if($request.operation -eq 'windows' -and $script:windowsInstallStage){
-                $response.windowsStage=$script:windowsInstallStage
-                if($null -ne $script:windowsNativeCode){
-                    $response.windowsNativeCode=[int]$script:windowsNativeCode
-                }elseif($code -eq 'HYPERV_STEP_FAILED'){
-                    if($cause -is [ComponentModel.Win32Exception]){$response.windowsNativeCode=$cause.NativeErrorCode}
-                    elseif($cause -isnot [Management.Automation.RuntimeException]){$response.windowsNativeCode=$cause.HResult}
-                }
-            }
+            $response = Format-HyperVErrorResponse $request $_
         }
         $writer.WriteLine(($response | ConvertTo-Json -Compress -Depth 4))
         $request=$null;$d=$null

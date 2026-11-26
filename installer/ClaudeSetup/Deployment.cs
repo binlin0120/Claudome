@@ -87,55 +87,102 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         }
     }
 
+    internal static async Task EnsureWindowsInstallGateAsync(
+        SessionState state,
+        CancellationToken token,
+        Func<string, CancellationToken, Task<string>>? hashIsoAsync = null,
+        Action<SetupOptions, string>? requireSelectedMedia = null,
+        Action<SetupOptions>? checkHostForInstall = null,
+        Action<SetupOptions>? validateOptions = null)
+    {
+        var o = state.Options;
+        if (!o.AcceptChanges || !o.AcceptWindowsLicense)
+            throw new SetupException("开始前请确认安装范围，以及所选 Windows 的许可与授权。");
+        (validateOptions ?? (opts => opts.Validate(true)))(o);
+        (checkHostForInstall ?? (opts => Machine.CheckRun(opts, false, true)))(o);
+        var hashAsync = hashIsoAsync ?? ((path, ct) => Downloader.Hash(path, ct));
+        var actualHash = await hashAsync(o.IsoPath, token);
+        if (!string.IsNullOrEmpty(o.IsoSha256) && actualHash != o.IsoSha256.ToLowerInvariant())
+            throw new SetupException("Windows ISO 校验不匹配，未启动安装。");
+        if (string.IsNullOrEmpty(o.IsoSha256))
+        {
+            o.IsoSha256 = actualHash;
+            state.Save();
+        }
+        (requireSelectedMedia ?? WindowsMedia.RequireSelected)(o, o.IsoSha256);
+    }
+
+    internal static async Task<bool> VerifyHyperVDiskBeforeDesktopEntryAsync(
+        SessionState state,
+        Func<Task<HyperVWindowsInstallState>> probeInstallStateAsync)
+    {
+        if (state.Options.PlatformId != "hyperv" || state.Completed.Contains("guest-ready"))
+            return ResumePlan.HasVerifiedSystemDiskProof(state);
+        if (string.IsNullOrEmpty(state.VmId) || !ResumePlan.HasWindowsInstallStarted(state))
+            return false;
+        var probe = await probeInstallStateAsync();
+        if (probe == HyperVWindowsInstallState.Ready)
+            return true;
+        if (probe == HyperVWindowsInstallState.Empty && state.Completed.RemoveAll(x => x == "windows-started") > 0)
+            state.Save();
+        return false;
+    }
+
     internal static async Task ExecuteHyperVWindowsStageAsync(
         SessionState state,
         Func<Task<HyperVWindowsInstallState>> probeInstallStateAsync,
         Func<Task<bool>> isRunningAsync,
         Func<Task> installWindowsAsync,
-        Func<Task> openVmAsync)
+        Func<Task> openVmAsync,
+        Func<Task>? ensureInstallGateAsync = null,
+        bool installGateVerifiedUpFront = false)
     {
         if (!state.Completed.Contains("guest-ready"))
         {
             var probe = await probeInstallStateAsync();
-            if (state.Completed.Contains("windows-started"))
+            if (probe == HyperVWindowsInstallState.Ready)
             {
-                if (probe == HyperVWindowsInstallState.Empty)
-                {
-                    state.Completed.RemoveAll(x => x == "windows-started");
-                    state.Save();
-                }
-                else if (probe == HyperVWindowsInstallState.NeedsRecovery)
-                {
-                    if (await isRunningAsync())
-                        throw new HandoffException(new("先安全关闭原虚拟机以核对磁盘", [
-                            "原任务已记录进入安装阶段，但当前虚拟机正在运行且未核验到完整的 Windows 启动盘检查点。",
-                            "请先在虚拟机操作栏或 Hyper-V 管理器安全关机（不会覆盖现有磁盘），然后回到助手继续核对磁盘。"
-                        ], "vm-stop-before-install"));
-                    await installWindowsAsync();
-                    return;
-                }
-            }
-
-            if (ResumePlan.For(state).InstallWindows)
-            {
-                var running = await isRunningAsync();
-                if (probe == HyperVWindowsInstallState.Ready)
+                if (!state.Completed.Contains("windows-started"))
                 {
                     state.Completed.Add("windows-started");
                     state.Save();
-                    if (!running) await openVmAsync();
-                    return;
                 }
-                if (running)
+                if (!await isRunningAsync()) await openVmAsync();
+                return;
+            }
+
+            if (state.Completed.Contains("windows-started"))
+            {
+                if (probe == HyperVWindowsInstallState.NeedsRecovery && await isRunningAsync())
+                    throw new HandoffException(new("先安全关闭原虚拟机以核对磁盘", [
+                        "原任务已记录进入安装阶段，但当前虚拟机正在运行且未核验到完整的 Windows 启动盘检查点。",
+                        "请先在虚拟机操作栏或 Hyper-V 管理器安全关机（不会覆盖现有磁盘），然后回到助手继续核对磁盘。"
+                    ], "vm-stop-before-install"));
+                state.Completed.RemoveAll(x => x == "windows-started");
+                state.Save();
+            }
+
+            if (ResumePlan.For(state).InstallWindows || probe == HyperVWindowsInstallState.ImageReady)
+            {
+                if (await isRunningAsync())
                 {
                     throw new HandoffException(new("先安全关闭尚未安装系统的虚拟机", [
                         "检测到当前虚拟机正在运行（可能停留在 UEFI 启动画面），但尚未核验到可启动的 Windows 系统盘。",
                         "请先在「专属桌面」操作栏或 Hyper-V 管理器安全关闭虚拟机（不会自动格式化或覆盖任何磁盘），再返回「开始安装」点击「开始 / 继续部署」。"
                     ], "vm-stop-before-install"));
                 }
+                if (!installGateVerifiedUpFront && probe != HyperVWindowsInstallState.ImageReady)
+                {
+                    await (ensureInstallGateAsync is not null
+                        ? ensureInstallGateAsync()
+                        : EnsureWindowsInstallGateAsync(state, CancellationToken.None));
+                }
                 await installWindowsAsync();
-                state.Completed.Add("windows-started");
-                state.Save();
+                if (!state.Completed.Contains("windows-started"))
+                {
+                    state.Completed.Add("windows-started");
+                    state.Save();
+                }
                 return;
             }
         }
@@ -178,6 +225,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         var previousBackend=BoundaryRuntime.BackendFor(state);
         var box = previousBackend ?? Backends.Create(o.PlatformId, installation); var retained = previousBackend is not null; BridgeSpec? bridge = null; BusPacketRelay? relay = null;
         var plan=ResumePlan.For(state);
+        var initialInstallWindows = plan.InstallWindows;
         var browserCheckpoint = ResumePlan.CanResumeBrowser(state, checkSavedNetwork);
         var recheckNetworkFirst = checkSavedNetwork || o.ManualAdsPower || state.PendingActions.Any(ResumePlan.IsGuestNetworkProbe);
         o.Validate(plan.InstallWindows);
@@ -203,9 +251,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             Machine.CheckRun(o,false,plan.InstallWindows);
             if(plan.InstallWindows)Stage(state,"1 / 7  核验 Windows 镜像");
             else { Stage(state,browserCheckpoint ? (recheckNetworkFirst ? "恢复任务：核对已配置的专用网络" : "恢复任务：核对专用网络，准备继续 AdsPower") : plan.ResumeTitle);messages.Report("恢复原任务，已完成的创建和安装步骤保留。"); }
-            if (plan.InstallWindows && !string.IsNullOrEmpty(o.IsoSha256) && await Downloader.Hash(o.IsoPath, token) != o.IsoSha256.ToLowerInvariant()) throw new SetupException("Windows ISO 校验不匹配，未启动安装。");
-            if (plan.InstallWindows && string.IsNullOrEmpty(o.IsoSha256)) { o.IsoSha256 = await Downloader.Hash(o.IsoPath, token); state.Save(); }
-            if(plan.InstallWindows) WindowsMedia.RequireSelected(o,o.IsoSha256);
+            if (plan.InstallWindows) await EnsureWindowsInstallGateAsync(state, token);
             var resourceStamp=ResumePlan.ResourceStamp();
             var hostPackages = RequiredHostPackages(o);
             if (hostPackages.Length > 0)
@@ -302,7 +348,9 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                     () => hvBox.ProbeWindowsInstallState(state, token),
                     () => box.IsRunning(state, token),
                     () => { Stage(state, "4 / 7  安装 Windows"); return box.InstallWindows(state, secrets, token); },
-                    () => box.Open(state, token));
+                    () => box.Open(state, token),
+                    () => EnsureWindowsInstallGateAsync(state, token),
+                    initialInstallWindows);
                 plan = ResumePlan.For(state);
             }
             else if (plan.InstallWindows)
@@ -381,7 +429,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                                 if (probe.AdditionsMounted && !additionsNotified)
                                 {
                                     additionsNotified = true;
-                                    messages.Report("已自动挂载 VirtualBox 来宾工具光盘。若右侧已进入 Windows 桌面，请打开「此电脑」双击 CD 驱动器 VirtualBox Guest Additions 运行 VBoxWindowsAdditions.exe 安装。");
+                                    messages.Report("已自动挂载 VirtualBox 来宾工具光盘。若来宾画面已进入 Windows 桌面，请打开「此电脑」双击 CD 驱动器 VirtualBox Guest Additions 运行 VBoxWindowsAdditions.exe 安装。");
                                 }
                                 if (i % 2 == 0)
                                     installation?.Report(new($"4 / 7  等待 Windows 与来宾工具 · 已等待 {waiting.Elapsed.TotalMinutes:F1} 分钟（若已进桌面，请在虚拟机「此电脑」双击 VirtualBox Guest Additions 安装）"));
@@ -402,7 +450,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
 
                             if (hyperVStatus == HyperVGuestStatus.CredentialsRejected)
                                 throw new HandoffException(new("需要同步虚拟机 Windows 登录账号与密码",
-                                    [detail + "。请在来宾内核对原 Windows 登录账号，再使用左侧「同步虚拟机账号密码」。"], "guest-auth-sync"));
+                                    [detail + "。请在来宾内核对原 Windows 登录账号，再点击「检测出错问题 → 同步虚拟机账号密码」。"], "guest-auth-sync"));
                             if (hyperVStatus == HyperVGuestStatus.AccessDenied)
                                 throw new HandoffException(new("Hyper-V 来宾拒绝 PowerShell Direct 访问",
                                     [detail + "。", "请确认虚拟机内部账号属于 Administrators 组且已完成首次桌面登录，然后继续原任务。"], "guest-auth-sync"));
@@ -419,7 +467,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                                     hyperVStatus = await hyperV.TryRepairGuestSession(state, secrets, token);
                                     if (hyperVStatus == HyperVGuestStatus.CredentialsRejected)
                                         throw new HandoffException(new("需要同步虚拟机 Windows 登录账号与密码",
-                                            ["来宾 Windows 登录凭据未通过验证，请使用左侧「同步虚拟机账号密码」。"], "guest-auth-sync"));
+                                            ["来宾 Windows 登录凭据未通过验证，请在「检测出错问题 → 同步虚拟机账号密码」更新凭据。"], "guest-auth-sync"));
                                     if (hyperVStatus is not (HyperVGuestStatus.EndpointUnavailable or HyperVGuestStatus.Initializing))
                                         break;
                                 }
@@ -448,7 +496,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                     throw new HandoffException(new("Hyper-V 来宾初始化尚未完成",
                         [HyperV.DescribeGuestStatus(hyperVStatus) + "。",
                          "请在原虚拟机中确认 Windows 首次设置及来宾 PowerShell Direct 状态，再继续原任务。"], "guest-wait"));
-                if(!ready)throw new HandoffException(new("Windows 或来宾工具尚未就绪",["打开程序内的虚拟机桌面，确认 Windows 安装是否完成。安装中继续等待，不要反复重建虚拟机。","如已进入桌面但尚未安装来宾工具，请在虚拟机内打开「此电脑」双击 VirtualBox Guest Additions 运行 VBoxWindowsAdditions.exe。","如手动设置了不同的账号密码，点击左侧「同步虚拟机账号密码」后继续。"],"guest-wait"));
+                if(!ready)throw new HandoffException(new("Windows 或来宾工具尚未就绪",["打开程序内的虚拟机桌面，确认 Windows 安装是否完成。安装中继续等待，不要反复重建虚拟机。","如已进入桌面但尚未安装来宾工具，请在虚拟机内打开「此电脑」双击 VirtualBox Guest Additions 运行 VBoxWindowsAdditions.exe。","如手动设置了不同的账号密码，点击「检测出错问题 → 同步虚拟机账号密码」后继续。"],"guest-wait"));
                 state.PendingActions.RemoveAll(a => a.Id is "guest-wait" or "guest-auth-sync" or "guest-status-unreadable");
                 if (!state.Completed.Contains("guest-ready")) state.Completed.Add("guest-ready"); state.Save();
                 if(o.NetworkSource!="稍后配置"&&BoundaryRuntime.HasInstallationNetwork) {

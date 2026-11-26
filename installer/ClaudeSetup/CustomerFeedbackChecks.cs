@@ -855,14 +855,25 @@ public sealed partial class SetupWindow
         var savedOptsSnapshot = Clone(state.Options);
         var savedAppliedSnapshot = appliedSecrets;
         var emptyBlocked = false;
+        var legacyUnverifiedBlocked = false;
         var startedAllowed = false;
         var snapshotOk = false;
         var draftDetected = false;
         var badDetected = false;
+        var deployClickUsedSnapshot = false;
+        var manualRestoreOk = false;
+        var manualRestoreFailureNotified = false;
         var step0Fits = false;
         double step0Bottom = 0, step0Viewport = 0;
+        var capturedNotices = new List<string>();
+        noticeSinkForTests = msg => capturedNotices.Add(msg);
         try
         {
+            var emptyRoot = Path.Combine(autoRestoreDir, "p1-gating-root");
+            Paths.EnsureWorkspace(emptyRoot);
+            state.Options.Root = emptyRoot;
+            state.Options.VmName = "GateTestVm";
+            state.Options.PlatformId = "hyperv";
             state.VmId = "55555555-5555-5555-5555-555555555555";
             state.Completed.Remove("windows-started");
             state.Completed.Remove("guest-ready");
@@ -875,7 +886,25 @@ public sealed partial class SetupWindow
                 overviewNoWin.Any(t => t.Contains("继续构建空间")) && !overviewNoWin.Any(t => t.Contains("继续进入空间")) &&
                 machinesNoWin.Any(t => t.Contains("继续构建空间")) && !machinesNoWin.Any(t => t == "进入虚拟机");
 
+            // Misrecorded legacy windows-started without local disk proof must ALSO stay blocked from desktop entry
             state.Completed.Add("windows-started");
+            Navigate(0);
+            var overviewLegacy = Descendants<Button>(main).Select(b => b.Content?.ToString() ?? "").ToList();
+            legacyUnverifiedBlocked = !CanEnterDesktopWorkspace() &&
+                overviewLegacy.Any(t => t.Contains("继续构建空间")) && !overviewLegacy.Any(t => t.Contains("继续进入空间"));
+
+            // Create local Hyper-V ready disk checkpoint matching VmId/WorkspaceId/diskPath
+            Directory.CreateDirectory(state.Options.VmDirectory);
+            var dummyDiskPath = Path.Combine(state.Options.VmDirectory, "Windows11.vhdx");
+            File.WriteAllBytes(dummyDiskPath, [1, 2, 3]);
+            JsonFile.Write(Path.Combine(state.Options.VmDirectory, ".windows-install.json"), new
+            {
+                schema = 1,
+                vmId = state.VmId,
+                workspaceId = state.Options.WorkspaceId,
+                phase = "ready",
+                diskPath = dummyDiskPath
+            });
             Navigate(0);
             var overviewWithWin = Descendants<Button>(main).Select(b => b.Content?.ToString() ?? "").ToList();
             Navigate(2);
@@ -905,7 +934,7 @@ public sealed partial class SetupWindow
             var twoHopSecrets = new Secrets
             {
                 VmPassword = "TwoHopPassword!12",
-                SubscriptionUrl = "https://example.invalid/offline-sub",
+                SubscriptionUrl = "https://127.0.0.1:9/offline-sub",
                 SelectedNodeJson = twoHopParsed[1].Json,
                 UpstreamNodeJson = twoHopParsed[0].Json,
                 UpstreamNetworkText = twoHopYml
@@ -924,6 +953,77 @@ public sealed partial class SetupWindow
             try { ValidateSavedRouteSnapshot(state.Options, new Secrets { SelectedNodeJson = "{invalid" }); }
             catch (SetupException) { badDetected = true; }
 
+            // Click the actual "开始 / 继续部署" button with an unreachable offline subscription and confirm saved two-hop snapshot runs directly
+            consent.IsChecked = true;
+            Secrets? engineSecrets = null;
+            SetupOptions? engineOpts = null;
+            runEngineHookForTests = (st, sec, _, _, _, _) =>
+            {
+                engineOpts = st.Options;
+                engineSecrets = sec;
+                return Task.CompletedTask;
+            };
+            var deployButton = Descendants<Button>(pages[5]).First(b => b.Content?.ToString() == "开始 / 继续部署");
+            deployButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            for (var wait = 0; wait < 20 && installationFinished is not null; wait++)
+            {
+                await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                if (installationFinished is { } pendingDeploy)
+                    await Task.WhenAny(pendingDeploy.Task, Task.Delay(50));
+            }
+            runEngineHookForTests = null;
+            deployClickUsedSnapshot = engineOpts is not null && engineSecrets is not null &&
+                NetworkImport.SameSavedDefinition(engineSecrets.SelectedNodeJson, twoHopSecrets.SelectedNodeJson) &&
+                NetworkImport.SameSavedDefinition(engineSecrets.UpstreamNodeJson, twoHopSecrets.UpstreamNodeJson) &&
+                engineOpts.NodeName == twoHopOpts.NodeName && engineOpts.UpstreamName == twoHopOpts.UpstreamName;
+
+            // Verify "恢复原已保存线路" repopulates all manual HTTP/SOCKS5 controls & fingerprint, plus failure notice
+            var manualSavedParsed = NetworkImport.Parse("socks5://savedU:savedP@saved-manual.example:1080#SavedManual").Nodes.Single();
+            var manualOpts = new SetupOptions
+            {
+                Root = Path.Combine(autoRestoreDir, "manual-restore-root"),
+                NetworkSource = "手动 HTTP / SOCKS5 节点",
+                NodeName = manualSavedParsed.Name,
+                Country = "SG",
+                TimeZoneId = "Singapore Standard Time",
+                Remember = true
+            };
+            Paths.EnsureWorkspace(manualOpts.Root);
+            var manualSecrets = new Secrets
+            {
+                VmPassword = "ManualPassword!12",
+                SelectedNodeJson = manualSavedParsed.Json
+            };
+            state.VmId = "77777777-7777-7777-7777-777777777777";
+            state.Options = manualOpts;
+            state.Save();
+            SecretStore.Save(manualOpts.Private, manualSecrets);
+            ApplyLoadedTask(state, loadSecrets: true, interactive: false);
+            var expectedFingerprint = ManualFingerprint();
+            protocol.SelectedItem = "https";
+            server.Text = "dirty-draft.example";
+            port.Text = "9999";
+            proxyUser.Text = "dirtyUser";
+            proxyPassword.Password = "dirtyPass";
+            var dirtyBeforeRestore = HasUnappliedNetworkDraft(Options(), ReadSecrets(), state.Options, ResolveAppliedSnapshotSecrets());
+            capturedNotices.Clear();
+            restoreRouteDraftButton?.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            manualRestoreOk = dirtyBeforeRestore &&
+                server.Text == "saved-manual.example" &&
+                port.Text == "1080" &&
+                Equals(protocol.SelectedItem, "socks5") &&
+                proxyUser.Text == "savedU" &&
+                proxyPassword.Password == "savedP" &&
+                ManualFingerprint() == expectedFingerprint &&
+                !HasUnappliedNetworkDraft(Options(), ReadSecrets(), state.Options, ResolveAppliedSnapshotSecrets()) &&
+                capturedNotices.Any(n => n.Contains("已恢复"));
+
+            // Trigger restore failure with invalid saved snapshot -> must emit actionable error notice
+            appliedSecrets = new Secrets { SelectedNodeJson = "{invalid-json" };
+            capturedNotices.Clear();
+            restoreRouteDraftButton?.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            manualRestoreFailureNotified = capturedNotices.Any(n => n.Contains("未能恢复原已保存线路") && n.Contains("应用线路"));
+
             Go(0);
             await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
             UpdateLayout();
@@ -934,10 +1034,14 @@ public sealed partial class SetupWindow
                 step0Viewport = shellContentScroll.ViewportHeight;
                 step0Fits = step0Bottom <= step0Viewport + 4;
             }
-            p1FlowOk = emptyBlocked && startedAllowed && snapshotOk && draftDetected && badDetected && step0Fits;
+            p1FlowOk = emptyBlocked && legacyUnverifiedBlocked && startedAllowed &&
+                snapshotOk && draftDetected && badDetected &&
+                deployClickUsedSnapshot && manualRestoreOk && manualRestoreFailureNotified && step0Fits;
         }
         finally
         {
+            noticeSinkForTests = null;
+            runEngineHookForTests = null;
             state.VmId = savedVmForP1;
             if (!savedWinStarted) state.Completed.Remove("windows-started");
             state.SetupFinished = savedSetupFinished;
@@ -945,7 +1049,7 @@ public sealed partial class SetupWindow
             appliedSecrets = savedAppliedSnapshot;
         }
         if (!p1FlowOk) failed++;
-        rows.Add(new { name = "empty-vm-routes-to-build-step-and-resumed-route-snapshot-avoids-refetch", passed = p1FlowOk, emptyBlocked, startedAllowed, snapshotOk, draftDetected, badDetected, step0Fits, step0Bottom, step0Viewport });
+        rows.Add(new { name = "empty-vm-routes-to-build-step-and-resumed-route-snapshot-avoids-refetch", passed = p1FlowOk, emptyBlocked, legacyUnverifiedBlocked, startedAllowed, snapshotOk, draftDetected, badDetected, deployClickUsedSnapshot, manualRestoreOk, manualRestoreFailureNotified, step0Fits, step0Bottom, step0Viewport });
 
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);

@@ -491,11 +491,11 @@ function Resume-AdsPower {
 }
 function Add-AdsPowerApiHandoff([string]$Code) {
     if($Code -eq 'ADSPOWER_API_UNREACHABLE'){
-        Add-Pending 'AdsPower 本机 API 未连接' @('保持虚拟机内 AdsPower 打开。到「自动化 → API」查看接口是否已启用，默认端口为 50325。','接口就绪后可继续自动配置，也可以在助手左侧选择「不用 API，手动使用 AdsPower」。') 'adspower'
+        Add-Pending 'AdsPower 本机 API 未连接' @('保持虚拟机内 AdsPower 打开。到「自动化 → API」查看接口是否已启用，默认端口为 50325。','接口就绪后可继续自动配置，也可以在助手选择「不用 API，手动使用 AdsPower」。') 'adspower'
         return $true
     }
     if($Code -eq 'ADSPOWER_API_PERMISSION_OR_LOGIN'){
-        Add-Pending 'AdsPower 本机 API 拒绝请求' @('已登录时，请核对账号的本机 API 权限、API 开关及所需的 API Key。API Key 填在助手「本机资料」。','可继续自动配置，或在助手左侧选择「不用 API，手动使用 AdsPower」。') 'adspower'
+        Add-Pending 'AdsPower 本机 API 拒绝请求' @('已登录时，请核对账号的本机 API 权限、API 开关及所需的 API Key。API Key 填在助手「本机资料」。','可继续自动配置，或在助手选择「不用 API，手动使用 AdsPower」。') 'adspower'
         return $true
     }
     return $false
@@ -556,7 +556,7 @@ function Configure-AdsPower {
         if($_.Exception.Message -eq 'ADSPOWER_CLOSE_BEFORE_UPDATE'){Add-Pending '先保存并关闭专用浏览器' @('该专用环境正在使用。请保存工作并正常关闭它，再点继续部署；不会强制关闭或清理资料。') 'browser-active'}
         elseif(Add-AdsPowerApiHandoff $_.Exception.Message){return}
         elseif($_.Exception.Message -eq 'ADSPOWER_PROFILE_REVIEW_REQUIRED'){Add-Pending 'AdsPower 环境需确认' @('打开 AdsPower 环境列表，确认同名 Claude 环境，不要删除已有环境。','回到安装助手，点击继续自动配置。') 'adspower'}
-        else{Add-Pending '完成 AdsPower 登录与环境配置' @('在虚拟机中打开 AdsPower，用你自己的账号登录。','如支持本机 API，在 AdsPower 的自动化 → API 中确认已开启；需要 API Key 时填到安装助手的本机资料页。','回到助手点继续。程序会尝试新建 Claude 专用环境，并配置本地 SOCKS5 代理、WebRTC 与时区。','如需自行配置，选择助手左侧「不用 API，手动使用 AdsPower」，按当次指引检查原环境。','打开这个专用环境，先访问 https://ip.net.coffee/claude/，确认结果后再登录 Claude。') 'adspower'}
+        else{Add-Pending '完成 AdsPower 登录与环境配置' @('在虚拟机中打开 AdsPower，用你自己的账号登录。','如支持本机 API，在 AdsPower 的自动化 → API 中确认已开启；需要 API Key 时填到安装助手的本机资料页。','回到助手点继续。程序会尝试新建 Claude 专用环境，并配置本地 SOCKS5 代理、WebRTC 与时区。','如需自行配置，选择助手中的「不用 API，手动使用 AdsPower」，按当次指引检查原环境。','打开这个专用环境，先访问 https://ip.net.coffee/claude/，确认结果后再登录 Claude。') 'adspower'}
     }
 }
 function Set-HyperVGuestRedirectionPolicy([bool]$AllowClipboard) {

@@ -754,7 +754,9 @@ public sealed partial class SetupWindow : Window
             desktopConnectionCancellation?.Cancel();
             lastConsoleWindow = null;
         }
-        await Engine().Run(state, secrets, token, preserveUnloadedSecrets: !secretsLoaded, checkSavedNetwork: checkSavedNetwork, reconfigureGuestNetwork: reconfigureGuestNetwork);
+        await (runEngineHookForTests is not null
+            ? runEngineHookForTests(state, secrets, token, !secretsLoaded, checkSavedNetwork, reconfigureGuestNetwork)
+            : Engine().Run(state, secrets, token, preserveUnloadedSecrets: !secretsLoaded, checkSavedNetwork: checkSavedNetwork, reconfigureGuestNetwork: reconfigureGuestNetwork));
         secretsLoaded = true;
         RememberAppliedSecrets(secrets);
         var adsPending = state.PendingActions.FirstOrDefault(action => action.Id is "adspower" or "browser-active" or CustomerGuide.ManualAdsPowerId);
@@ -988,17 +990,7 @@ public sealed partial class SetupWindow : Window
             subscription.Text = saved.SubscriptionUrl; networkText.Text = saved.NetworkText; expectedIp.Text = saved.ExpectedExitIp; adsApiKey.Password = saved.AdsPowerApiKey;
             if (!string.IsNullOrEmpty(saved.SelectedNodeJson))
             {
-                var parsed = NetworkImport.Parse("{\"proxies\":[" + saved.SelectedNodeJson + "]}"); nodes = parsed.Nodes; node.ItemsSource = nodes; node.SelectedIndex = 0;
-                if (o.NetworkSource == "手动 HTTP / SOCKS5 节点")
-                {
-                    using var json = JsonDocument.Parse(saved.SelectedNodeJson); var n = json.RootElement;
-                    server.Text = parsed.Nodes[0].Server; port.Text = parsed.Nodes[0].Port.ToString();
-                    protocol.SelectedItem = n.GetProperty("type").GetString() == "http" && n.TryGetProperty("tls", out var tls) && tls.ValueKind == JsonValueKind.True ? "https" : n.GetProperty("type").GetString();
-                    proxyUser.Text = n.TryGetProperty("username", out var u) ? u.GetString() ?? "" : "";
-                    proxyPassword.Password = n.TryGetProperty("password", out var p) ? p.GetString() ?? "" : "";
-                }
-                RestoreChainRelationship(saved,o);
-                importedInput = o.NetworkSource == "已有订阅链接" ? subscription.Text.Trim() : o.NetworkSource == "手动 HTTP / SOCKS5 节点" ? ManualFingerprint() : networkText.Text;
+                PopulateSavedFinalNodeUi(saved, o);
             }
         }
         return "";
@@ -1364,8 +1356,16 @@ public sealed partial class SetupWindow : Window
         }
         catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
     }
+    internal Action<string>? noticeSinkForTests;
+    internal Func<SessionState, Secrets, CancellationToken, bool, bool, bool, Task>? runEngineHookForTests;
+
     private void Notice(string text)
     {
+        if (noticeSinkForTests is { } sink)
+        {
+            sink(text);
+            return;
+        }
         if (text.Length <= 220 && text.Count(c => c == '\n') < 6)
         {
             MessageBox.Show(this, text, ProductProfile.WindowTitle, MessageBoxButton.OK, MessageBoxImage.Information);

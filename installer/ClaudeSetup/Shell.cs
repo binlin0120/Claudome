@@ -487,7 +487,7 @@ public sealed partial class SetupWindow
         shellContentScroll?.ScrollToTop();
     }
     private bool CanEnterDesktopWorkspace() =>
-        !string.IsNullOrEmpty(state.VmId) && ResumePlan.HasWindowsInstallStarted(state);
+        !string.IsNullOrEmpty(state.VmId) && ResumePlan.HasVerifiedSystemDiskProof(state);
 
     private void DrawOverview()
     {
@@ -566,7 +566,7 @@ public sealed partial class SetupWindow
             async (_, _) =>
             {
                 if (overviewHost.OpenHostCheck) Go(0);
-                else if (state.SetupFinished) await EnterOriginalWorkspace();
+                else if (state.SetupFinished && CanEnterDesktopWorkspace()) await EnterOriginalWorkspace();
                 else Go(page);
             }, true);
         heroPrimary.Background = new SolidColorBrush(Appearance.Color("#FDF3E6"));

@@ -73,7 +73,7 @@ public sealed partial class SetupWindow
         (!string.IsNullOrEmpty(state.VmId) && (appliedSecrets is not null || state.Options.NetworkSource == "稍后配置")) ||
         (File.Exists(state.Options.StatePath) && (!string.IsNullOrEmpty(appliedSecrets?.SelectedNodeJson) || state.Options.NetworkSource == "稍后配置"));
 
-    private Secrets ResolveAppliedSnapshotSecrets()
+    private Secrets ResolveAppliedSnapshotSecrets(bool throwOnSecretError = false)
     {
         if (appliedSecrets is { SelectedNodeJson.Length: > 0 } || state.Options.NetworkSource == "稍后配置")
             return AppliedLogin();
@@ -88,7 +88,10 @@ public sealed partial class SetupWindow
                     return AppliedLogin();
                 }
             }
-            catch (SetupException) { }
+            catch (SetupException)
+            {
+                if (throwOnSecretError) throw;
+            }
         }
         return AppliedLogin();
     }
@@ -175,46 +178,78 @@ public sealed partial class SetupWindow
         BackupRoutes = [.. (currentUi.BackupRoutes.Count > 0 ? currentUi.BackupRoutes : saved.BackupRoutes)]
     };
 
+    private void PopulateSavedManualNodeFields(ProxyNode parsedNode, string nodeJson)
+    {
+        using var json = JsonDocument.Parse(nodeJson);
+        var n = json.RootElement;
+        var typeValue = n.GetProperty("type").GetString();
+        server.Text = parsedNode.Server;
+        port.Text = parsedNode.Port.ToString();
+        protocol.SelectedItem = typeValue == "http" && n.TryGetProperty("tls", out var tls) && tls.ValueKind == JsonValueKind.True
+            ? "https"
+            : typeValue;
+        proxyUser.Text = n.TryGetProperty("username", out var u) ? u.GetString() ?? "" : "";
+        proxyPassword.Password = n.TryGetProperty("password", out var p) ? p.GetString() ?? "" : "";
+    }
+
+    private void PopulateSavedFinalNodeUi(Secrets saved, SetupOptions o)
+    {
+        var parsed = NetworkImport.Parse("{\"proxies\":[" + saved.SelectedNodeJson + "]}");
+        if (parsed.Nodes.Count == 0)
+            throw new SetupException("已保存的节点快照无法解析，请重新读取或填写后再点击「应用线路」。");
+        nodes = parsed.Nodes;
+        node.ItemsSource = nodes;
+        node.SelectedIndex = 0;
+        if (o.NetworkSource == "手动 HTTP / SOCKS5 节点")
+            PopulateSavedManualNodeFields(parsed.Nodes[0], saved.SelectedNodeJson);
+        RestoreChainRelationship(saved, o);
+        importedInput = o.NetworkSource == "已有订阅链接"
+            ? subscription.Text.Trim()
+            : o.NetworkSource == "手动 HTTP / SOCKS5 节点"
+                ? ManualFingerprint()
+                : networkText.Text;
+        currentFinalSubscription = false;
+    }
+
     private void RestoreSavedRouteDraft()
     {
         if (busy) return;
-        var saved = ResolveAppliedSnapshotSecrets();
-        var o = state.Options;
-        updatingCpuRecommendation = true;
         try
         {
-            source.SelectedItem = o.NetworkSource;
-            country.SelectedValue = o.Country;
-            timeZone.SelectedValue = o.TimeZoneId;
-            chain.IsChecked = o.ChainEnabled && !o.ChainFromImport;
-            upstreamSource.SelectedItem = o.UpstreamSource;
+            var saved = ResolveAppliedSnapshotSecrets(throwOnSecretError: true);
+            var o = state.Options;
+            ValidateSavedRouteSnapshot(o, saved);
+            updatingCpuRecommendation = true;
+            try
+            {
+                source.SelectedItem = o.NetworkSource;
+                country.SelectedValue = o.Country;
+                timeZone.SelectedValue = o.TimeZoneId;
+                chain.IsChecked = o.ChainEnabled && !o.ChainFromImport;
+                upstreamSource.SelectedItem = o.UpstreamSource;
+            }
+            finally { updatingCpuRecommendation = false; }
+            subscription.Text = saved.SubscriptionUrl;
+            networkText.Text = saved.NetworkText;
+            expectedIp.Text = saved.ExpectedExitIp;
+            LoadChainSecrets(saved);
+            if (o.NetworkSource != "稍后配置")
+            {
+                PopulateSavedFinalNodeUi(saved, o);
+            }
+            else
+            {
+                nodes = [];
+                node.ItemsSource = nodes;
+                importedInput = "";
+            }
+            UpdateRouteActionsVisibility();
+            Notice("已恢复为当前任务已保存的线路配置。");
         }
-        finally { updatingCpuRecommendation = false; }
-        subscription.Text = saved.SubscriptionUrl;
-        networkText.Text = saved.NetworkText;
-        expectedIp.Text = saved.ExpectedExitIp;
-        LoadChainSecrets(saved);
-        if (!string.IsNullOrEmpty(saved.SelectedNodeJson))
+        catch (Exception ex)
         {
-            var parsed = NetworkImport.Parse("{\"proxies\":[" + saved.SelectedNodeJson + "]}");
-            nodes = parsed.Nodes;
-            node.ItemsSource = nodes;
-            node.SelectedIndex = 0;
-            RestoreChainRelationship(saved, o);
-            importedInput = o.NetworkSource == "已有订阅链接"
-                ? subscription.Text.Trim()
-                : o.NetworkSource == "手动 HTTP / SOCKS5 节点"
-                    ? ManualFingerprint()
-                    : networkText.Text;
-            currentFinalSubscription = false;
+            Notice("未能恢复原已保存线路：" + Redaction.SafeError(ex) + "\n\n请确认是否已解锁本机保存的凭据，或在「4 网络节点」重新读取、选择并点击「应用线路」。");
         }
-        else
-        {
-            nodes = [];
-            node.ItemsSource = nodes;
-            importedInput = "";
-        }
-        Notice("已恢复为当前任务已保存的线路配置。");
     }
 
     private Task MeasureCurrentGuest() => Perform(async (_, token) =>

@@ -1686,16 +1686,32 @@ public static class SelfTests
         {
             var ws = Path.Combine(root, "hv-install-guards");
             Paths.EnsureWorkspace(ws);
-            var st1 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = new() { Root = ws, PlatformId = "hyperv" } };
-            var installed = 0; var opened = 0;
+            var fakeIso = Path.Combine(ws, "fake-win11.iso");
+            await File.WriteAllBytesAsync(fakeIso, new byte[4096]);
+            SetupOptions ValidGateOpts() => new()
+            {
+                Root = ws,
+                PlatformId = "hyperv",
+                IsoPath = fakeIso,
+                IsoSha256 = new string('a', 64),
+                WindowsImageIndex = 4,
+                AcceptChanges = true,
+                AcceptWindowsLicense = true
+            };
+
+            var st1 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = ValidGateOpts() };
+            var installed = 0; var opened = 0; var gateChecks = 0;
             await Deployment.ExecuteHyperVWindowsStageAsync(st1,
                 () => Task.FromResult(HyperVWindowsInstallState.Empty),
                 () => Task.FromResult(false),
                 () => { installed++; return Task.CompletedTask; },
-                () => { opened++; return Task.CompletedTask; });
-            Assert(installed == 1 && opened == 0 && st1.Completed.Contains("windows-started"), "Empty off VM must install and record windows-started");
+                () => { opened++; return Task.CompletedTask; },
+                () => { gateChecks++; return Task.CompletedTask; },
+                installGateVerifiedUpFront: false);
+            Assert(installed == 1 && opened == 0 && gateChecks == 1 && st1.Completed.Contains("windows-started"),
+                "Empty off VM must pass gate, install, and record windows-started");
 
-            var st2 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = new() { Root = ws, PlatformId = "hyperv" } };
+            var st2 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = ValidGateOpts() };
             var uefiBlocked = false;
             try
             {
@@ -1703,26 +1719,94 @@ public static class SelfTests
                     () => Task.FromResult(HyperVWindowsInstallState.Empty),
                     () => Task.FromResult(true),
                     () => { installed++; return Task.CompletedTask; },
-                    () => { opened++; return Task.CompletedTask; });
+                    () => { opened++; return Task.CompletedTask; },
+                    () => { gateChecks++; return Task.CompletedTask; });
             }
             catch (HandoffException hex) { uefiBlocked = hex.Action.Id == "vm-stop-before-install"; }
-            Assert(uefiBlocked && installed == 1 && !st2.Completed.Contains("windows-started"), "Running empty UEFI VM must stop before install without recording windows-started");
+            Assert(uefiBlocked && installed == 1 && !st2.Completed.Contains("windows-started"),
+                "Running empty UEFI VM must stop before install without recording windows-started");
 
-            var st3 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = new() { Root = ws, PlatformId = "hyperv" } };
+            // Ready system disk reuses existing disk even without running ISO/license gate
+            var st3 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = new() { Root = ws, PlatformId = "hyperv", AcceptChanges = true, AcceptWindowsLicense = false } };
+            var readyGateCalls = 0;
             await Deployment.ExecuteHyperVWindowsStageAsync(st3,
                 () => Task.FromResult(HyperVWindowsInstallState.Ready),
                 () => Task.FromResult(false),
                 () => throw new Exception("Must not re-apply image when Ready checkpoint exists"),
-                () => { opened++; return Task.CompletedTask; });
-            Assert(opened == 1 && st3.Completed.Contains("windows-started"), "Ready checkpoint must backfill windows-started and open VM without re-applying");
+                () => { opened++; return Task.CompletedTask; },
+                () => { readyGateCalls++; return Task.CompletedTask; });
+            Assert(opened == 1 && readyGateCalls == 0 && st3.Completed.Contains("windows-started"),
+                "Ready checkpoint must reuse VM without re-applying or gating ISO");
 
-            var st4 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Completed = ["windows-started"], Options = new() { Root = ws, PlatformId = "hyperv" } };
+            // Case 1: False windows-started + Empty VM + unconfirmed license -> gate rejects with 0 disk writes
+            var noLicenseOpts = ValidGateOpts();
+            noLicenseOpts.AcceptWindowsLicense = false;
+            var stNoLicense = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Completed = ["windows-started"], Options = noLicenseOpts };
+            var writesOnBadLicense = 0; var rejectedNoLicense = false;
+            try
+            {
+                await Deployment.ExecuteHyperVWindowsStageAsync(stNoLicense,
+                    () => Task.FromResult(HyperVWindowsInstallState.Empty),
+                    () => Task.FromResult(false),
+                    () => { writesOnBadLicense++; return Task.CompletedTask; },
+                    () => Task.CompletedTask,
+                    () => Deployment.EnsureWindowsInstallGateAsync(stNoLicense, CancellationToken.None,
+                        (_, _) => Task.FromResult(new string('a', 64)),
+                        (_, _) => { },
+                        _ => { },
+                        opts => opts.Validate(false)));
+            }
+            catch (SetupException ex) { rejectedNoLicense = ex.Message.Contains("许可与授权"); }
+            Assert(rejectedNoLicense && writesOnBadLicense == 0 && !stNoLicense.Completed.Contains("windows-started"),
+                "Misrecorded windows-started with unconfirmed license must block write and clear stale checkpoint");
+
+            // Case 2: False windows-started + Empty VM + ISO hash mismatch -> gate rejects with 0 disk writes
+            var mismatchOpts = ValidGateOpts();
+            var stBadHash = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Completed = ["windows-started"], Options = mismatchOpts };
+            var writesOnBadHash = 0; var rejectedBadHash = false;
+            try
+            {
+                await Deployment.ExecuteHyperVWindowsStageAsync(stBadHash,
+                    () => Task.FromResult(HyperVWindowsInstallState.Empty),
+                    () => Task.FromResult(false),
+                    () => { writesOnBadHash++; return Task.CompletedTask; },
+                    () => Task.CompletedTask,
+                    () => Deployment.EnsureWindowsInstallGateAsync(stBadHash, CancellationToken.None,
+                        (_, _) => Task.FromResult(new string('b', 64)),
+                        (_, _) => { },
+                        _ => { },
+                        opts => opts.Validate(false)));
+            }
+            catch (SetupException ex) { rejectedBadHash = ex.Message.Contains("校验不匹配"); }
+            Assert(rejectedBadHash && writesOnBadHash == 0 && !stBadHash.Completed.Contains("windows-started"),
+                "Misrecorded windows-started with mismatched ISO hash must block write and clear stale checkpoint");
+
+            // Case 3: After fixing license & ISO hash, resumed task installs cleanly
+            var st4 = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Completed = ["windows-started"], Options = ValidGateOpts() };
             await Deployment.ExecuteHyperVWindowsStageAsync(st4,
                 () => Task.FromResult(HyperVWindowsInstallState.Empty),
                 () => Task.FromResult(false),
                 () => { installed++; return Task.CompletedTask; },
-                () => Task.CompletedTask);
-            Assert(installed == 2 && st4.Completed.Contains("windows-started"), "Falsely recorded windows-started on empty VM must fall back to install");
+                () => Task.CompletedTask,
+                () => Deployment.EnsureWindowsInstallGateAsync(st4, CancellationToken.None,
+                    (_, _) => Task.FromResult(new string('a', 64)),
+                    (_, _) => { },
+                    _ => { },
+                    opts => opts.Validate(false)));
+            Assert(installed == 2 && st4.Completed.Contains("windows-started"),
+                "Legitimate resumed task must pass gate, install, and record windows-started");
+
+            // Desktop entry guard: misrecorded windows-started without guest-ready checks probe and clears empty marker
+            var legacyEmpty = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Completed = ["windows-started"], Options = new() { Root = ws, PlatformId = "hyperv" } };
+            Assert(!await Deployment.VerifyHyperVDiskBeforeDesktopEntryAsync(legacyEmpty, () => Task.FromResult(HyperVWindowsInstallState.Empty)) &&
+                   !legacyEmpty.Completed.Contains("windows-started"),
+                "Desktop entry must redirect legacy empty VM and clear false windows-started");
+            var legacyRecovery = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Completed = ["windows-started"], Options = new() { Root = ws, PlatformId = "hyperv" } };
+            Assert(!await Deployment.VerifyHyperVDiskBeforeDesktopEntryAsync(legacyRecovery, () => Task.FromResult(HyperVWindowsInstallState.NeedsRecovery)),
+                "Desktop entry must redirect unverified recovery disk to install recovery");
+            var legacyReady = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Completed = ["windows-started"], Options = new() { Root = ws, PlatformId = "hyperv" } };
+            Assert(await Deployment.VerifyHyperVDiskBeforeDesktopEntryAsync(legacyReady, () => Task.FromResult(HyperVWindowsInstallState.Ready)),
+                "Desktop entry should allow confirmed ready system disk");
         });
         await Check("hyperv-diagnostics-context-aware-and-handoff-includes-steps", () => Sync(() =>
         {

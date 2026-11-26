@@ -16,6 +16,40 @@ public sealed record ResumePlan(bool CreateMachine,bool InstallWindows,string Re
     }
     internal static bool HasWindowsInstallStarted(SessionState state) =>
         state.Completed.Contains("windows-started") || state.Completed.Contains("guest-ready");
+    internal static bool HasVerifiedSystemDiskProof(SessionState state)
+    {
+        if (string.IsNullOrEmpty(state.VmId)) return false;
+        if (state.Completed.Contains("guest-ready")) return true;
+        if (!state.Completed.Contains("windows-started")) return false;
+        if (state.Options.PlatformId != "hyperv") return true;
+        try
+        {
+            var vmDir = state.Options.VmDirectory;
+            if (string.IsNullOrWhiteSpace(vmDir) || !Directory.Exists(vmDir)) return false;
+            var vmFull = Path.GetFullPath(vmDir).TrimEnd('\\') + '\\';
+            var logPath = Path.Combine(vmDir, ".windows-install.json");
+            if (File.Exists(logPath))
+            {
+                if (new FileInfo(logPath).Length > 65536) return false;
+                using var doc = JsonDocument.Parse(File.ReadAllText(logPath));
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("schema", out var schema) || schema.GetInt32() != 1) return false;
+                if (!root.TryGetProperty("vmId", out var vmIdEl) || !string.Equals(vmIdEl.GetString(), state.VmId, StringComparison.OrdinalIgnoreCase)) return false;
+                if (!root.TryGetProperty("workspaceId", out var wsEl) || !string.Equals(wsEl.GetString(), state.Options.WorkspaceId, StringComparison.OrdinalIgnoreCase)) return false;
+                if (!root.TryGetProperty("phase", out var phaseEl) || phaseEl.GetString() != "ready") return false;
+                if (!root.TryGetProperty("diskPath", out var diskEl) || string.IsNullOrWhiteSpace(diskEl.GetString())) return false;
+                var diskFull = Path.GetFullPath(diskEl.GetString()!);
+                return diskFull.StartsWith(vmFull, StringComparison.OrdinalIgnoreCase) && File.Exists(diskFull);
+            }
+            var legacyApplied = Path.Combine(vmDir, ".windows-applied");
+            var legacyDisk = Path.Combine(vmDir, "Windows11.vhdx");
+            return File.Exists(legacyApplied) && File.ReadAllText(legacyApplied).Trim() == "applied" && File.Exists(legacyDisk);
+        }
+        catch
+        {
+            return false;
+        }
+    }
     internal static bool CanResumeBrowser(SessionState state, bool checkSavedNetwork = false) =>
         Guid.TryParse(state.VmId, out _) && state.Options.NetworkSource != "稍后配置" &&
         // This checkpoint selects the next phase. The guest must still verify the live network.

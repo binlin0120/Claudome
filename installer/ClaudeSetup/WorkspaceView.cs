@@ -470,7 +470,7 @@ public sealed partial class SetupWindow
             ConsoleWindowLocator.Track(connectingVm, window);
             if (backend is VirtualBox vboxFit)
             {
-                const string framePending = "已接入原虚拟机控制台，正在等待来宾画面。可点击右侧按 Shift 唤醒。";
+                const string framePending = "已接入原虚拟机控制台，正在等待来宾画面。可点击画面唤醒按钮或按 Shift 唤醒。";
                 SetWaitingForGuestFrame(VirtualBoxDisplayFit.ReadGuestSize(lastVmInfo) is null);
                 if (waitingForGuestFrame)
                 {
@@ -597,7 +597,7 @@ public sealed partial class SetupWindow
         }
     }
 
-    private const string HyperVZoomUnavailable = "无法调用 Hyper-V 自动缩放。请在右侧选择「查看 → 缩放级别 → 自动」，或用「在独立窗口查看 Hyper-V 桌面」。";
+    private const string HyperVZoomUnavailable = "无法调用 Hyper-V 自动缩放。请在内嵌控制台顶部菜单选择「查看 → 缩放级别 → 自动」，或用「在独立窗口查看 Hyper-V 桌面」。";
 
     private void ShowStandaloneHyperV()
     {
@@ -705,7 +705,7 @@ public sealed partial class SetupWindow
                 ManualAdsPowerReady ? "查看 AdsPower 指引" :
                 state.PendingActions.Any(ResumePlan.IsGuestNetworkProbe) ? "重试来宾联网检查" :
                 state.Status.Contains("暂停") || state.Options.ManualAdsPower ? "继续任务并连接" :
-                !ResumePlan.HasWindowsInstallStarted(state) ? "继续去「开始安装」" :
+                !CanEnterDesktopWorkspace() ? "继续去「开始安装」" :
                 ResumePlan.CanResumeBrowser(state) ? "继续配置与验收" : "连接到虚拟机";
         }
         var showActivity = busy || taskFaulted;
@@ -760,7 +760,7 @@ public sealed partial class SetupWindow
             return;
         }
         if (busy) return;
-        if (state.SetupFinished)
+        if (state.SetupFinished && CanEnterDesktopWorkspace())
         {
             await EnterOriginalWorkspace();
             return;
@@ -778,10 +778,10 @@ public sealed partial class SetupWindow
             return;
         }
         if(string.IsNullOrEmpty(state.VmId)){Go(1);Notice("请先创建或载入一个任务，再继续连接。");return;}
-        if (!ResumePlan.HasWindowsInstallStarted(state))
+        if (!CanEnterDesktopWorkspace())
         {
             Go(5);
-            Notice("原虚拟机尚未写入 Windows 系统。请先在「6 开始安装」点击「开始 / 继续部署」，系统开始写入后再连接专属桌面。");
+            Notice("原虚拟机尚未写入或未核验到可启动的 Windows 系统盘。请先在「6 开始安装」点击「开始 / 继续部署」，系统盘就绪后再连接专属桌面。");
             return;
         }
         if(consent.IsChecked!=true)
@@ -933,7 +933,7 @@ public sealed partial class SetupWindow
             RefreshCreationFields();
             UpdateDesktopGuide();
             SetDesktopConnectionStatus("已完成强制关机与单核防卡死修复。点击“继续原任务并连接”重新启动。");
-            Notice("已安全关闭卡死的虚拟机，并启用 1 核防卡死兼容配置（原磁盘与进度保留）。\n\n现在可直接点击左侧“继续原任务并连接”启动。");
+            Notice("已安全关闭卡死的虚拟机，并启用 1 核防卡死兼容配置（原磁盘与进度保留）。\n\n现在可直接点击上方“继续原任务并连接”启动。");
         }
         catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
         finally

@@ -7,7 +7,7 @@ $ErrorActionPreference='Stop'
 $worker=Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($worker,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'PRODUCTION_PARSE_FAILED'}
-$names=@('Invoke-ConsolePolicyLock','Console-Owner','Use-BasicConsolePolicy','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm','Assert-LocalPath','Test-OwnedVmMarker','Save-OwnedVmMarker','Resolve-OrCreateTaskVm','Assert-InstallDiskPath','Assert-InstallDrives','Confirm-WindowsDisk','Get-WindowsInstallProbe')
+$names=@('Invoke-ConsolePolicyLock','Console-Owner','Use-BasicConsolePolicy','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm','Assert-LocalPath','Test-OwnedVmMarker','Save-OwnedVmMarker','Resolve-OrCreateTaskVm','Assert-InstallDiskPath','Assert-InstallDrives','Confirm-WindowsDisk','Get-WindowsInstallProbe','Reset-HyperVRequestDiagnostics','Save-HyperVErrorContext','Format-HyperVErrorResponse')
 foreach($name in $names){$definition=$ast.FindAll({param($a)$a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq $name},$true) | Select-Object -First 1;if(-not $definition){throw 'FUNCTION_MISSING'};Invoke-Expression -Command $definition.Extent.Text}
 $script:store=@{};$script:policyEnabled=$true;$script:nicCount=0;$script:metadataEnabled=$true;$script:changes=0
 $script:o=[pscustomobject]@{WorkspaceId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';HyperVBasicConsoleConfirmed=$false}
@@ -307,19 +307,52 @@ Check 'hyperv-windows-install-probe-distinguishes-empty-ready-and-needs-recovery
         $vm = [pscustomobject]@{ Id = $vmId; Path = $vmDir; Name = 'ProbeVm' }
         $script:o = [pscustomobject]@{ Root = $tempRoot; WorkspaceId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; IsoSha256 = ('a' * 64); WindowsImageIndex = 4; UserName = 'ClaudeUser'; DiskGb = 80 }
         $script:probeDrives = @()
-        $diskPath = Join-Path $vmDir 'Windows11.vhdx'
-        $script:probeDiskGuid = [guid]'88888888-8888-8888-8888-888888888888'
+        $defaultDisk = Join-Path $vmDir 'Windows11.vhdx'
+        $retryDisk = Join-Path $vmDir 'Windows11-retry-0123456789abcdef0123456789abcdef.vhdx'
+        $defaultGuid = [guid]'88888888-8888-8888-8888-888888888888'
+        $retryGuid = [guid]'99999999-9999-9999-9999-999999999999'
+        $script:vhdReadCount = 0
+        $script:activeGuidMap = @{
+            $defaultDisk = $defaultGuid
+            $retryDisk = $retryGuid
+        }
         function script:Get-VMHardDiskDrive($VM) { $script:probeDrives }
-        function script:Get-VHD([string]$Path) { [pscustomobject]@{ Path = $Path; DiskIdentifier = $script:probeDiskGuid; Size = 80L * 1GB; VhdFormat = 'VHDX'; VhdType = 'Dynamic'; ParentPath = $null; Attached = $true } }
+        function script:Get-VHD([string]$Path) {
+            $script:vhdReadCount++
+            $id = $script:activeGuidMap[$Path]
+            if (-not $id) { throw 'WRONG_VHD_PATH' }
+            [pscustomobject]@{ Path = $Path; DiskIdentifier = $id; Size = 80L * 1GB; VhdFormat = 'VHDX'; VhdType = 'Dynamic'; ParentPath = $null; Attached = $true }
+        }
 
-        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'empty')
-        $script:probeDrives = @([pscustomobject]@{ Path = $diskPath })
+        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'empty' -and $script:vhdReadCount -eq 0)
+        $script:probeDrives = @([pscustomobject]@{ Path = $defaultDisk })
         Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'needs-recovery')
+
+        # 1. Default disk with valid checkpoint reads VHD once -> ready
         $cpPath = Join-Path $vmDir '.windows-install.json'
-        @{ schema = 1; vmId = [string]$vmId; workspaceId = $script:o.WorkspaceId; isoSha256 = $script:o.IsoSha256; imageIndex = 4; userName = 'ClaudeUser'; diskGb = 80; diskPath = $diskPath; diskId = [string]$script:probeDiskGuid; phase = 'ready'; preservedDisks = @() } |
+        $script:vhdReadCount = 0
+        @{ schema = 1; vmId = [string]$vmId; workspaceId = $script:o.WorkspaceId; isoSha256 = $script:o.IsoSha256; imageIndex = 4; userName = 'ClaudeUser'; diskGb = 80; diskPath = $defaultDisk; diskId = [string]$defaultGuid; phase = 'ready'; preservedDisks = @() } |
             ConvertTo-Json | Set-Content -LiteralPath $cpPath -Encoding utf8NoBOM
-        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'ready')
-        @{ schema = 1; vmId = [string]$vmId; workspaceId = 'wrong-workspace'; isoSha256 = $script:o.IsoSha256; imageIndex = 4; userName = 'ClaudeUser'; diskGb = 80; diskPath = $diskPath; diskId = [string]$script:probeDiskGuid; phase = 'ready'; preservedDisks = @() } |
+        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'ready' -and $script:vhdReadCount -eq 1)
+
+        # 2. Legitimate retry disk (with preserved incomplete default disk present) reads VHD once -> ready
+        [IO.File]::WriteAllBytes($defaultDisk, [byte[]]@(1, 2, 3))
+        $script:probeDrives = @([pscustomobject]@{ Path = $retryDisk })
+        $script:vhdReadCount = 0
+        @{ schema = 1; vmId = [string]$vmId; workspaceId = $script:o.WorkspaceId; isoSha256 = $script:o.IsoSha256; imageIndex = 4; userName = 'ClaudeUser'; diskGb = 80; diskPath = $retryDisk; diskId = [string]$retryGuid; phase = 'ready'; preservedDisks = @($defaultDisk) } |
+            ConvertTo-Json | Set-Content -LiteralPath $cpPath -Encoding utf8NoBOM
+        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'ready' -and $script:vhdReadCount -eq 1)
+
+        # 3. Wrong disk identity (VHD DiskIdentifier mismatch or wrong attached drive) -> needs-recovery
+        $script:activeGuidMap[$retryDisk] = [guid]'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'needs-recovery')
+        $script:activeGuidMap[$retryDisk] = $retryGuid
+        $script:probeDrives = @([pscustomobject]@{ Path = $defaultDisk })
+        Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'needs-recovery')
+
+        # 4. Wrong task binding (workspaceId / vmId / isoSha256 mismatch) -> needs-recovery
+        $script:probeDrives = @([pscustomobject]@{ Path = $retryDisk })
+        @{ schema = 1; vmId = [string]$vmId; workspaceId = 'wrong-workspace'; isoSha256 = $script:o.IsoSha256; imageIndex = 4; userName = 'ClaudeUser'; diskGb = 80; diskPath = $retryDisk; diskId = [string]$retryGuid; phase = 'ready'; preservedDisks = @($defaultDisk) } |
             ConvertTo-Json | Set-Content -LiteralPath $cpPath -Encoding utf8NoBOM
         Assert-Case ((Get-WindowsInstallProbe $vm) -eq 'needs-recovery')
     } finally {
@@ -327,6 +360,53 @@ Check 'hyperv-windows-install-probe-distinguishes-empty-ready-and-needs-recovery
         if ($savedGetDrives) { Set-Item function:script:Get-VMHardDiskDrive -Value $savedGetDrives } else { Remove-Item function:script:Get-VMHardDiskDrive -ErrorAction SilentlyContinue }
         if ($savedGetVhd) { Set-Item function:script:Get-VHD -Value $savedGetVhd } else { Remove-Item function:script:Get-VHD -ErrorAction SilentlyContinue }
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+Check 'hyperv-prepare-preserves-dism-hresult-and-resets-last-exit-code' {
+    $ifPrepared = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -match "operation\s*-eq\s*'prepare'" }, $true) | Select-Object -First 1
+    Assert-Case ($null -ne $ifPrepared)
+    $prepareBlockText = $ifPrepared.Clauses[0].Item2.Extent.Text
+    $prepareBlock = [scriptblock]::Create($prepareBlockText.Substring(1, $prepareBlockText.Length - 2))
+    $savedO = $script:o
+    $savedGetItemProp = ${function:Get-ItemProperty}
+    $savedGetFeature = ${function:Get-WindowsOptionalFeature}
+    $savedEnableFeature = ${function:Enable-WindowsOptionalFeature}
+    try {
+        function script:Get-ItemProperty([string]$Path) { [pscustomobject]@{ EditionID = 'Professional' } }
+        $script:featureThrowHr = -2146498548
+        $script:featureState = 'Disabled'
+        function script:Get-WindowsOptionalFeature([switch]$Online, [string]$FeatureName, $ErrorAction) {
+            if ($script:featureThrowHr -ne 0) {
+                $ex = [System.Runtime.InteropServices.COMException]::new('D:\secret\path\should-not-leak: feature missing', [int]$script:featureThrowHr)
+                throw $ex
+            }
+            [pscustomobject]@{ State = $script:featureState }
+        }
+        function script:Enable-WindowsOptionalFeature([switch]$Online, [string]$FeatureName, [switch]$All, [switch]$NoRestart, $ErrorAction) {
+            throw ([System.Runtime.InteropServices.COMException]::new('enable failure', -2146498548))
+        }
+
+        # Case 1: HYPERV_FEATURE_NOT_FOUND preserves 0x800F080C (-2146498548), not 0x80131501
+        Reset-HyperVRequestDiagnostics
+        $req1 = [pscustomobject]@{ operation = 'prepare'; data = @{} }
+        $resp1 = $null
+        try { & $prepareBlock } catch { $resp1 = Format-HyperVErrorResponse $req1 $_ }
+        $json1 = $resp1 | ConvertTo-Json -Compress
+        Assert-Case ($resp1.code -eq 'HYPERV_FEATURE_NOT_FOUND' -and $resp1.errorHResult -eq -2146498548 -and $resp1.errorSubstage -eq 'query-feature' -and -not $json1.Contains('should-not-leak'))
+
+        # Case 2: HYPERV_FEATURE_QUERY_FAILED preserves 0x80070005 (-2147024891), and previous LASTEXITCODE does not leak across requests
+        $global:LASTEXITCODE = 77
+        $script:windowsNativeCode = 99
+        Reset-HyperVRequestDiagnostics
+        $script:featureThrowHr = -2147024891
+        $resp2 = $null
+        try { & $prepareBlock } catch { $resp2 = Format-HyperVErrorResponse $req1 $_ }
+        Assert-Case ($resp2.code -eq 'HYPERV_FEATURE_QUERY_FAILED' -and $resp2.errorHResult -eq -2147024891 -and (-not $resp2.ContainsKey('errorNativeCode')) -and $global:LASTEXITCODE -eq 0)
+    } finally {
+        $script:o = $savedO
+        if ($savedGetItemProp) { Set-Item function:script:Get-ItemProperty -Value $savedGetItemProp } else { Remove-Item function:script:Get-ItemProperty -ErrorAction SilentlyContinue }
+        if ($savedGetFeature) { Set-Item function:script:Get-WindowsOptionalFeature -Value $savedGetFeature } else { Remove-Item function:script:Get-WindowsOptionalFeature -ErrorAction SilentlyContinue }
+        if ($savedEnableFeature) { Set-Item function:script:Enable-WindowsOptionalFeature -Value $savedEnableFeature } else { Remove-Item function:script:Enable-WindowsOptionalFeature -ErrorAction SilentlyContinue }
     }
 }
 

@@ -66,7 +66,7 @@ internal static class VirtualBoxClipboard
             }
             catch (Exception rollback) when (rollback is SetupException or IOException or OperationCanceledException or UnauthorizedAccessException)
             {
-                throw new SetupException("未能确认双向剪贴板的当前状态。虚拟机运行时可在左侧点“关闭双向剪贴板”并重新确认。");
+                throw new SetupException("未能确认双向剪贴板的当前状态。虚拟机运行时可在上方剪贴板菜单点“关闭双向剪贴板”并重新确认。");
             }
             throw;
         }

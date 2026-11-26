@@ -24,11 +24,32 @@ public sealed partial class SetupWindow
             return;
         }
         if (string.IsNullOrEmpty(state.VmId)) return;
-        if (!ResumePlan.HasWindowsInstallStarted(state))
+        if (!CanEnterDesktopWorkspace())
         {
-            Notice("原虚拟机尚未开始写入 Windows 系统，请先前往「安装向导 → 6 开始安装」点击「开始 / 继续部署」。");
+            Notice("原虚拟机尚未写入或未核验到可启动的 Windows 系统盘，请先前往「安装向导 → 6 开始安装」点击「开始 / 继续部署」。");
             Go(5);
             return;
+        }
+        if (state.Options.PlatformId == "hyperv" && !state.Completed.Contains("guest-ready"))
+        {
+            var probeOk = false;
+            try
+            {
+                await Perform(async (_, token) =>
+                {
+                    await using var hv = new HyperV();
+                    probeOk = await Deployment.VerifyHyperVDiskBeforeDesktopEntryAsync(
+                        state,
+                        () => hv.ProbeWindowsInstallState(state, token));
+                }, useSavedOptions: true);
+            }
+            catch (OperationCanceledException) { return; }
+            if (!probeOk)
+            {
+                Notice("检测到原虚拟机系统盘尚未写入或尚待恢复核验，已改为引导至「6 开始安装」继续。");
+                Go(5);
+                return;
+            }
         }
         enteringWorkspace = true;
         try
