@@ -332,8 +332,12 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 if (!o.ChainEnabled && upstream is not null) throw new SetupException("前置节点与当前链式选项不一致，请重新选择。");
                 var firstHop = upstream ?? node;
                 messages.Report("恢复检查：解析所选节点地址，准备专用网络。");
-                port = firstHop.Port; addresses = await ResolveEndpoints(firstHop.Server, token);
-                var exitAddresses = upstream is null ? addresses : await ResolveEndpoints(node.Server, token);
+                port = firstHop.Port;
+                var resolutionStrategy = ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default;
+                var firstResolution = await NodeEndpointResolver.ResolveDetailedAsync(firstHop.Server, port, resolutionStrategy, token);
+                addresses = firstResolution.Addresses;
+                messages.Report($"节点解析：{firstResolution.Summary}；{firstResolution.HostNetwork.Summary}。");
+                var exitAddresses = upstream is null ? addresses : (await NodeEndpointResolver.ResolveDetailedAsync(node.Server, 0, resolutionStrategy, token)).Addresses;
                 config = NetworkImport.CoreConfig(node, addresses, o.PlatformId == "virtualbox" ? null : "ClaudomeBridge", upstream, exitAddresses);
                 var configHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(config))).ToLowerInvariant();
                 var reuseGateway=previousBackend is not null && state.CoreConfigSha256==configHash;
@@ -677,7 +681,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                     "RUNTIME_CONTROLLER_NOT_LOCAL" => "Clash 控制接口未限制在来宾本机",
                     "CLASH_TUN_REQUIRED" => "Clash 的 ClaudeTun 虚拟网卡未就绪",
                     "RUNTIME_NETWORK_SETTINGS_MISMATCH" or "RUNTIME_ROUTE_MISMATCH" or
-                        "RUNTIME_CONFIG_OUT_OF_SCOPE" or "RUNTIME_CONFIG_NOT_LOCATED" => "Clash 实际运行配置未通过核对",
+                        "RUNTIME_CONFIG_OUT_OF_SCOPE" or "RUNTIME_CONFIG_NOT_LOCATED" => "来宾 Clash 实际运行配置偏离本任务专用受控配置；请勿在虚拟机 Clash 内切换配置或测速，请在助手使用「重试来宾联网检查 / 应用线路」恢复",
                     "PHYSICAL_INTERFACE_AMBIGUOUS" => "无法确认唯一的来宾上行网卡，请检查虚拟机的受控网卡连接",
                     "VBOX_DHCP_RULE_FAILED" => "来宾防火墙的受控 DHCP 规则未通过回读",
                     "VBOX_DHCP_NOT_ENABLED" => "来宾受控网卡未启用 DHCP",
@@ -807,5 +811,10 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         var result=await backend.RestoreConsole(state,token);state.Options.HyperVBasicConsoleConfirmed=false;state.Status="基本会话保护已请求撤回";state.Save();
         messages.Report(result=="kept-for-other-environments"?"其他受保护环境仍在使用基本会话策略，主机设置暂时保留。":"已按记录恢复主机增强会话设置；再次使用受保护环境前会重新确认。");
     }
-    public static Task<string[]> ResolveEndpoints(string server,CancellationToken token)=>NodeEndpointResolver.Resolve(server,token);
+    public static async Task<string[]> ResolveEndpoints(string server, CancellationToken token, int port = 0)
+    {
+        var strategy = ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default;
+        var report = await NodeEndpointResolver.ResolveDetailedAsync(server, port, strategy, token);
+        return report.Addresses;
+    }
 }

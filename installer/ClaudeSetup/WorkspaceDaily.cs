@@ -194,7 +194,7 @@ public sealed partial class Deployment
         if (state.Options.ChainEnabled != (upstream is not null))
             throw new SetupException("保存的链式线路资料不完整。");
         var first = upstream ?? node;
-        var addresses = await ResolveEndpoints(first.Server, token);
+        var addresses = await ResolveEndpoints(first.Server, token, first.Port);
         var finalAddresses = upstream is null ? addresses : await ResolveEndpoints(node.Server, token);
         var config = NetworkImport.CoreConfig(node, addresses,
             state.Options.PlatformId == "virtualbox" ? null : "ClaudomeBridge", upstream, finalAddresses);

@@ -8,12 +8,14 @@ public static class CustomerGuide
     private const string ManualProfile = "在虚拟机中打开 AdsPower Browser，登录自己的账号。找到已有的 Default Profile，点「打开」旁边的「⋮ → 编辑」。如果没有 Default Profile，先查看是否已有本任务的环境。";
     private const string ManualProxyType = "确认助手已核验来宾网络，Clash 服务和 TUN 保持开启。在「代理信息」保持 No Proxy（本地直连），浏览器流量由虚拟机内的 Clash TUN 转发。";
     private const string ProxyChecks = "IP 查询渠道选 ip-api，「标签页」留空。";
-    private const string ManualFingerprint = "将 WebRTC 选为「禁用」。核对时区、地理位置和语言均为「基于 IP」，地理位置权限为「每次询问」，界面语言为「基于语言」。分辨率及其后的 Canvas、WebGL、WebGPU 和硬件噪音等设置保留原样。点击「确定」保存。";
+    private const string ManualFingerprint = "将 WebRTC 选为「禁用」。核对时区、地理位置和「语言」均为「基于 IP」，地理位置权限为「每次询问」。注意：「语言」与「界面语言」是两个不同设置，「语言」决定网页检测到的浏览器语言，「界面语言」可保持「基于语言」（不要只改界面语言而漏改「语言」）。分辨率及其后的 Canvas、WebGL、WebGPU 和硬件噪音等设置保留原样。点击「确定」保存。";
 
     internal static UserAction ManualAdsPower() => new("手动配置与检查 AdsPower", [
         ManualProfile,
-        ManualProxyType + ProxyChecks,
-        "按「检测出错问题 → 操作指引与检测网址」核对 Windows 和 WebRTC 等设置，保存后打开该环境，访问 https://ip.net.coffee/claude/ 核对实际出口。"
+        "基础设置：操作系统选「Windows」，User-Agent 保持「全部」。",
+        ManualProxyType + ProxyChecks + "（No Proxy 依赖 Claudome 已核验的来宾 TUN 流量，请勿仅凭此处名称判断流量走法。）",
+        ManualFingerprint,
+        "保存后打开该环境访问 https://ip.net.coffee/claude/ 核对实际出口、时区与语言，再回助手确认浏览器出口。切勿在虚拟机内的 Clash Verge 点测速或切换配置（外层网关仅放行本任务所选节点，测速其他未绑定节点显示 Timeout 属正常预期）；测速当前线路或换线请回到助手操作。"
     ], ManualAdsPowerId);
 
     public static string Country(string code)=>RegionCatalog.All.FirstOrDefault(r=>r.Code.Equals(code,StringComparison.OrdinalIgnoreCase))?.Label??"所选节点的实际出口地区";
@@ -37,8 +39,8 @@ public static class CustomerGuide
             : "保留助手写入的自定义 SOCKS5（127.0.0.1:17897）。" + ProxyChecks),
         new("ads-fingerprint","4. 检查指纹配置", options.ManualAdsPower
             ? ManualFingerprint
-            : "确认 WebRTC 为「禁用」。核对助手写入的时区和语言与实际出口一致。地理位置权限可保持「每次询问」，界面语言可保持「基于语言」。分辨率及其后的设置保留原样。"),
-        new("clash","5. Clash 检查","核对 Clash Verge 服务模式和 TUN 已开启，使用本任务专用配置与所选节点。保持助手及保护通道开启；不要关闭 Clash，也不要改成 NAT 或直连来绕过检查。"),
+            : "确认 WebRTC 为「禁用」。核对助手写入的时区和「语言」与实际出口一致（注意「语言」与「界面语言」是两个设置）。地理位置权限可保持「每次询问」，界面语言可保持「基于语言」。分辨率及其后的设置保留原样。"),
+        new("clash","5. Clash 检查","来宾 Clash Verge 使用本任务专用受控配置，服务模式和 TUN 已由助手核验。不要在虚拟机内 Clash Verge 点选其他节点测速或切换配置（外层网关仅放行当前绑定节点，未绑定节点显示 Timeout 属隔离预期）；如需测速当前线路或更换节点，请回到 Claudome 助手操作，保持助手及保护通道开启。"),
         new("leak-check","6. 首次网络检测","在 AdsPower 点「打开」，在浏览器访问 https://ip.net.coffee/claude/ 。核对国家/地区为 "+Country(options.Country)+"，并检查出口、DNS、IPv6、WebRTC 和时区。\n\n不要求评分或每个项目全绿；国家正确本身不能证明没有泄露。存在本地地址或未完成检查时，保留提示继续排查。"),
         new("claude","7. 登录与收藏","完成检测后保留同一个 AdsPower 窗口，新开标签访问 https://claude.ai/ ，由本人登录并完成一次对话，再收藏到书签栏。账号、验证码、付款由本人处理。官方 Claude 客户端需要单独检查网络与登录，不能直接沿用浏览器的验收结果。"),
         new("daily","8. 以后每天使用","打开助手并恢复原任务 → 等待网络与虚拟桌面自动连接 → 打开 AdsPower 原专用环境 → 先检查连接状态，再使用 Claude 书签。重开、更新或网络变化后重新检测。\n\n不要随意生成新指纹、删除环境、关闭 Clash，或在其他浏览器混用账号。关闭助手时先保存并暂停；下次继续原任务即可。"),

@@ -225,7 +225,7 @@ public sealed partial class SetupWindow
 
             consoleHost=new NativeConsoleHost{Focusable=true,MinHeight=320,Visibility=Visibility.Collapsed};
             consoleHost.SizeChanged += (_, _) => {
-                if (state.Options.PlatformId != "virtualbox" || consoleHost?.IsAttached != true) return;
+                if (state.Options.PlatformId is not ("virtualbox" or "hyperv") || consoleHost?.IsAttached != true) return;
                 consoleResizeTimer.Stop();
                 consoleResizeTimer.Start();
             };
@@ -255,12 +255,12 @@ public sealed partial class SetupWindow
                 };
                 consoleResizeTimer.Tick += async (_, _) => {
                     consoleResizeTimer.Stop();
-                    if (connectingConsole || fittingVBoxDisplay || shuttingDownVm)
+                    if (connectingConsole || fittingVBoxDisplay || fittingHyperVDisplay || shuttingDownVm)
                     {
                         consoleResizeTimer.Start();
                         return;
                     }
-                    await FitConnectedConsole();
+                    await FitConnectedConsole(requested: state.Options.PlatformId == "hyperv");
                 };
                 desktopTimer.Tick += async (_, _) => {
                     UpdateDesktopGuide();
@@ -589,16 +589,29 @@ public sealed partial class SetupWindow
         UpdateDesktopActivity();
         try
         {
-            var targetLevel = HyperVConsoleZoom.ChooseZoomMenuLevel(host.ViewportPixels.Height);
-            var applied = await Task.Run(() => HyperVConsoleZoom.TrySelectZoomLevel(window, targetLevel, token), token)
-                .WaitAsync(token);
-            if (applied)
-                await Task.Delay(350, lifetime); // VMConnect can animate its own resize after selecting zoom level.
+            var initialLevel = HyperVConsoleZoom.ChooseZoomMenuLevel(host.ViewportPixels.Height);
+            var applied = false;
+            var stillOverflow = false;
+            foreach (var level in HyperVConsoleZoom.StepDownZoomLevels(initialLevel))
+            {
+                token.ThrowIfCancellationRequested();
+                var clicked = await Task.Run(() => HyperVConsoleZoom.TrySelectZoomLevel(window, level, token), token)
+                    .WaitAsync(token);
+                if (!clicked) continue;
+                applied = true;
+                await Task.Delay(320, lifetime); // VMConnect can animate its own resize after selecting zoom level.
+                if (lifetime.IsCancellationRequested || section != 7 || state.VmId != vmId ||
+                    host != consoleHost || !host.IsAttached || host.GuestWindow != window.Handle)
+                    return;
+                host.Fit(forceRedraw: true);
+                stillOverflow = host.HasOverflowScrollbars();
+                if (!stillOverflow) break;
+            }
             if (!lifetime.IsCancellationRequested && section == 7 && state.VmId == vmId &&
                 host == consoleHost && host.IsAttached && host.GuestWindow == window.Handle)
             {
-                host.Fit(forceRedraw: true);
-                var stillOverflow = host.HasOverflowScrollbars();
+                if (!applied) host.Fit(forceRedraw: true);
+                stillOverflow = host.HasOverflowScrollbars();
                 if (applied && !stillOverflow)
                     SetDesktopConnectionStatus("已完成 Hyper-V 显示区域缩放适配。");
                 else

@@ -52,5 +52,56 @@ public static class ResolverTests
             var handler=new Handler((_,_)=>throw new Exception("No HTTP allowed"));using var client=new HttpClient(handler);
             try{await NodeEndpointResolver.Resolve("bad.example:443",CancellationToken.None,client);throw new Exception("Expected malformed server rejection");}catch(SetupException){Assert(handler.Calls==0,"malformed hostname sent to DNS service");}
         });
+        await check("hyperv-resolver-rejects-fakeip-from-system-dns-and-fails-over-to-reachable-direct-doh", async () => {
+            var calls = new List<string>();
+            var handler = new Handler((request, _) => {
+                calls.Add(request.RequestUri!.Host);
+                var ip = request.RequestUri.Host == "dns.alidns.com" ? "1.1.1.1" : "8.8.8.8";
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
+                    Content = new StringContent("{\"Status\":0,\"Answer\":[{\"type\":1,\"data\":\"" + ip + "\"}]}")
+                });
+            });
+            using var client = new HttpClient(handler);
+            var tcpCalls = new List<string>();
+            var report = await NodeEndpointResolver.ResolveDetailedAsync(
+                "node.example",
+                443,
+                EndpointResolutionStrategy.HyperVStandalone,
+                CancellationToken.None,
+                client,
+                TimeSpan.FromMilliseconds(200),
+                systemDnsLookup: (_, _) => Task.FromResult(new[] { IPAddress.Parse("198.18.0.55") }),
+                tcpProbe: (addrs, _, _) => {
+                    tcpCalls.AddRange(addrs);
+                    // AliDNS IP 1.1.1.1 fails TCP -> must fail over to DNSPod 8.8.8.8
+                    return Task.FromResult(addrs.Contains("8.8.8.8")
+                        ? new TcpReachabilityResult(true, "8.8.8.8", 22, "物理网卡 WLAN")
+                        : new TcpReachabilityResult(false, null, null, "宿主出站路径待核对"));
+                },
+                hostNetworkOverride: new HostNetworkContext(true, false, [], "检测到宿主 HTTP 系统代理"));
+            Assert(report.Addresses.SequenceEqual(["8.8.8.8"]) &&
+                report.SelectedSource == "直连 DoH (DNSPod)" &&
+                calls.Contains("dns.alidns.com") && calls.Contains("doh.pub") &&
+                tcpCalls.Contains("1.1.1.1") && tcpCalls.Contains("8.8.8.8") &&
+                report.Attempts.Any(a => a.Source == "宿主机系统 DNS" && a.Outcome.Contains("Fake-IP")),
+                "HyperVStandalone resolver did not reject Fake-IP and fail over across direct DoH providers");
+        });
+        await check("hyperv-resolver-prefers-system-dns-when-public-and-reachable", async () => {
+            var handler = new Handler((_, _) => throw new Exception("DoH should not be called when system DNS is valid and reachable"));
+            using var client = new HttpClient(handler);
+            var report = await NodeEndpointResolver.ResolveDetailedAsync(
+                "node.example",
+                443,
+                EndpointResolutionStrategy.HyperVStandalone,
+                CancellationToken.None,
+                client,
+                systemDnsLookup: (_, _) => Task.FromResult(new[] { IPAddress.Parse("9.9.9.9") }),
+                tcpProbe: (addrs, _, _) => Task.FromResult(new TcpReachabilityResult(true, addrs[0], 14, "虚拟 TUN/代理接口 Meta")),
+                hostNetworkOverride: new HostNetworkContext(false, true, ["Meta"], "检测到宿主 TUN（Meta）"));
+            Assert(handler.Calls == 0 && report.Addresses.SequenceEqual(["9.9.9.9"]) &&
+                report.SelectedSource == "宿主机系统 DNS" &&
+                report.HostNetwork.HostTunnelDetected,
+                "Reachable system DNS skipped or TUN context missing");
+        });
     }
 }

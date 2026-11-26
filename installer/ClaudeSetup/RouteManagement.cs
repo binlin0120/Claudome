@@ -378,7 +378,8 @@ public sealed partial class SetupWindow
                     try
                     {
                         var speed = await NodeExitProbe.MeasureAsync(state.Options, item,
-                            string.IsNullOrEmpty(route.UpstreamJson) ? null : StoredNode(route.UpstreamJson), probeCancel.Token);
+                            string.IsNullOrEmpty(route.UpstreamJson) ? null : StoredNode(route.UpstreamJson), probeCancel.Token,
+                            ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default);
                         measured[item] = $"{DateTime.Now:HH:mm} · {speed}";
                     }
                     catch (OperationCanceledException) { throw; }
@@ -520,7 +521,8 @@ public sealed partial class SetupWindow
             throw new SetupException("预期固定出口请输入有效的 IPv4 地址。");
 
         RecordTaskActivity("正在核验候选线路，原连接仍可使用。");
-        var result = await NodeExitProbe.ProbeAsync(options, selected, upstream, token);
+        var probeStrategy = ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default;
+        var result = await NodeExitProbe.ProbeAsync(options, selected, upstream, token, strategy: probeStrategy);
         if (result.CountryCode != options.Country || (candidate.ExpectedExitIp.Length > 0 && result.ExitIp != candidate.ExpectedExitIp))
             throw new SetupException("候选线路的实测出口与预期不符，未切换当前线路。");
         candidate.BackupRoutes = [.. (pendingBackupRoutes ??

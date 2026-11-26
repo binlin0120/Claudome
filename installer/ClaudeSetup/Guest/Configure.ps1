@@ -103,6 +103,10 @@ try {
     if($payload.platformId -eq 'hyperv'){
         $allowHyperVClipboard=if($null -ne $payload.PSObject.Properties['sharedClipboardEnabled']){[bool]$payload.sharedClipboardEnabled}else{$true}
         Set-HyperVGuestRedirectionPolicy -AllowClipboard:$allowHyperVClipboard
+        $prefW=if($null -ne $payload.PSObject.Properties['preferredDesktopWidth']){[int]$payload.preferredDesktopWidth}else{0}
+        $prefH=if($null -ne $payload.PSObject.Properties['preferredDesktopHeight']){[int]$payload.preferredDesktopHeight}else{0}
+        $displayInfo=Sync-HyperVGuestDisplayMode $prefW $prefH
+        if($displayInfo){$report.displayState=$displayInfo}
     }
     if(-not $browserOnly){
         Set-GuestStep '核对来宾微软 VC++ x64 运行库'

@@ -176,6 +176,7 @@ public sealed partial class Deployment
             checkedUtc = DateTime.UtcNow,
             setupFinished = state.SetupFinished,
             networkVerified = state.NetworkPassed,
+            hostNetwork = NodeEndpointResolver.InspectHostNetworkContext().Summary,
             boundary = SafeCheck(state.Protection.Boundary),
             guestExit = SafeCheck(state.Protection.Exit),
             browserExit = SafeCheck(state.Protection.Browser),
@@ -204,7 +205,8 @@ public sealed partial class SetupWindow
         } + (item.CheckedUtc is { } time ? $" · {time.ToLocalTime():MM-dd HH:mm} · {item.Evidence}" : "");
         var p = state.Protection;
         var network = BoundaryRuntime.BackendFor(state) is not null && state.NetworkPassed ? "当前受控连接已核对" : "当前连接待核对";
-        return $"{network}\n外层网关与来宾防火墙　{Show(p.Boundary)}\n来宾出口　{Show(p.Exit)}\n" +
+        var hostNet = NodeEndpointResolver.InspectHostNetworkContext();
+        return $"{network}\n宿主网络状态　{hostNet.Summary}\n外层网关与来宾防火墙　{Show(p.Boundary)}\n来宾出口　{Show(p.Exit)}\n" +
             $"AdsPower 窗口出口　{Show(p.Browser)}\nDNS 与直连旁路　{Show(p.Dns)}" +
             (p.BlockAuditNote.Length == 0 ? "" : $"\nWindows 阻断审核　{p.BlockAuditNote}") +
             $"\n断线阻断与恢复　{Show(p.Outage)}";

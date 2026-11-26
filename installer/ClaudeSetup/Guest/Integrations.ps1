@@ -570,3 +570,106 @@ function Set-HyperVGuestRedirectionPolicy([bool]$AllowClipboard) {
         Get-Process -Name 'rdpclip' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     }
 }
+function Select-PreferredHyperVDisplayMode($Modes, [int]$ViewportWidth, [int]$ViewportHeight) {
+    $valid = @($Modes | Where-Object { $_.width -ge 1024 -and $_.height -ge 720 } | Sort-Object @{Expression={$_.width * $_.height};Descending=$true} -Unique)
+    if (-not $valid.Count -or $ViewportWidth -le 0 -or $ViewportHeight -le 0) { return $null }
+    $zoomFactors = @(1.0, 0.75, 0.5)
+    $best = $null
+    $bestScore = -1.0
+    foreach ($mode in $valid) {
+        foreach ($zoom in $zoomFactors) {
+            $scaledW = [double]$mode.width * $zoom
+            $scaledH = [double]$mode.height * $zoom
+            if ($scaledW -le [double]$ViewportWidth -and $scaledH -le [double]$ViewportHeight) {
+                $fillRatio = ($scaledW * $scaledH) / ([double]$ViewportWidth * [double]$ViewportHeight)
+                $widescreenBonus = if ($mode.width / [double]$mode.height -ge 1.55) { 0.15 } else { 0.0 }
+                $zoomPreference = $zoom * 0.05
+                $score = $fillRatio + $widescreenBonus + $zoomPreference
+                if ($score -gt $bestScore) {
+                    $bestScore = $score
+                    $best = [pscustomobject]@{ width = [int]$mode.width; height = [int]$mode.height; zoom = $zoom; fillRatio = [Math]::Round($fillRatio, 3) }
+                }
+            }
+        }
+    }
+    return $best
+}
+function Sync-HyperVGuestDisplayMode([int]$ViewportWidth = 0, [int]$ViewportHeight = 0) {
+    try {
+        if (-not ('Claudome.GuestDisplay' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Claudome {
+    public static class GuestDisplay {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct DEVMODE {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+            public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+            public uint dmFields;
+            public int dmPositionX, dmPositionY;
+            public uint dmDisplayOrientation, dmDisplayFixedOutput;
+            public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+            public ushort dmLogPixels;
+            public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+            public uint dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+        }
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern bool EnumDisplaySettingsW(string? lpszDeviceName, int iModeNum, ref DEVMODE lpDevMode);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int ChangeDisplaySettingsExW(string? lpszDeviceName, ref DEVMODE lpDevMode, IntPtr hwnd, uint dwflags, IntPtr lParam);
+    }
+}
+'@
+        }
+        $dm = [Claudome.GuestDisplay+DEVMODE]::new()
+        $dm.dmSize = [uint16][Runtime.InteropServices.Marshal]::SizeOf([type][Claudome.GuestDisplay+DEVMODE])
+        $currentBefore = ''
+        if ([Claudome.GuestDisplay]::EnumDisplaySettingsW($null, -1, [ref]$dm)) {
+            $currentBefore = "$($dm.dmPelsWidth)x$($dm.dmPelsHeight)"
+        }
+        $modes = [Collections.Generic.List[object]]::new()
+        $seen = [Collections.Generic.HashSet[string]]::new()
+        for ($i = 0; $i -lt 512; $i++) {
+            $iter = [Claudome.GuestDisplay+DEVMODE]::new()
+            $iter.dmSize = $dm.dmSize
+            if (-not [Claudome.GuestDisplay]::EnumDisplaySettingsW($null, $i, [ref]$iter)) { break }
+            if ($iter.dmBitsPerPel -ne 32 -or $iter.dmPelsWidth -lt 800) { continue }
+            $key = "$($iter.dmPelsWidth)x$($iter.dmPelsHeight)"
+            if ($seen.Add($key)) {
+                $modes.Add([pscustomobject]@{ width = [int]$iter.dmPelsWidth; height = [int]$iter.dmPelsHeight })
+            }
+        }
+        $applied = ''
+        $target = Select-PreferredHyperVDisplayMode $modes $ViewportWidth $ViewportHeight
+        if ($target -and $currentBefore -ne "$($target.width)x$($target.height)") {
+            for ($i = 0; $i -lt 512; $i++) {
+                $cand = [Claudome.GuestDisplay+DEVMODE]::new()
+                $cand.dmSize = $dm.dmSize
+                if (-not [Claudome.GuestDisplay]::EnumDisplaySettingsW($null, $i, [ref]$cand)) { break }
+                if ($cand.dmBitsPerPel -eq 32 -and $cand.dmPelsWidth -eq $target.width -and $cand.dmPelsHeight -eq $target.height) {
+                    $cand.dmFields = 0x180000 # DM_PELSWIDTH | DM_PELSHEIGHT
+                    $testRc = [Claudome.GuestDisplay]::ChangeDisplaySettingsExW($null, [ref]$cand, [IntPtr]::Zero, 2, [IntPtr]::Zero)
+                    if ($testRc -eq 0) {
+                        $applyRc = [Claudome.GuestDisplay]::ChangeDisplaySettingsExW($null, [ref]$cand, [IntPtr]::Zero, 1, [IntPtr]::Zero)
+                        if ($applyRc -eq 0) { $applied = "$($target.width)x$($target.height)" }
+                    }
+                    break
+                }
+            }
+        }
+        $currentAfter = $currentBefore
+        $afterDm = [Claudome.GuestDisplay+DEVMODE]::new()
+        $afterDm.dmSize = $dm.dmSize
+        if ([Claudome.GuestDisplay]::EnumDisplaySettingsW($null, -1, [ref]$afterDm)) {
+            $currentAfter = "$($afterDm.dmPelsWidth)x$($afterDm.dmPelsHeight)"
+        }
+        return [pscustomobject]@{
+            before = $currentBefore
+            after = $currentAfter
+            applied = $applied
+            modes = @($modes | ForEach-Object { "$($_.width)x$($_.height)" })
+        }
+    } catch { return $null }
+}

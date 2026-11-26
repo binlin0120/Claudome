@@ -392,20 +392,27 @@ function Test-ObservedDns {
     $v6=@(Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 -DestinationPrefix '::/0' -ErrorAction SilentlyContinue)
     if($other.Count -or $v6.Count){return 'BYPASS'}
     $nonce='claudome-'+[guid]::NewGuid().ToString('N')+'.example.com'
+    $dohProvider=''
+    foreach($provider in @(
+        @{Name='Cloudflare';Url=('https://cloudflare-dns.com/dns-query?type=A&name='+$nonce)},
+        @{Name='Google';Url=('https://dns.google/resolve?type=A&name='+$nonce)}
+    )) {
+        try {
+            $result=Invoke-RestMethod -Uri $provider.Url -NoProxy -MaximumRedirection 0 -ConnectionTimeoutSeconds 6 -OperationTimeoutSeconds 8 -Headers @{Accept='application/dns-json';'Cache-Control'='no-cache'}
+            if($null -ne $result.Status -and $result.Status -in @(0,3)){$dohProvider=$provider.Name;break}
+        }catch{}
+    }
+    $probeStatus='PROBE_ERROR'
     try {
-        $result=Invoke-RestMethod -Uri ('https://cloudflare-dns.com/dns-query?type=A&name='+$nonce) -NoProxy -MaximumRedirection 0 -ConnectionTimeoutSeconds 6 -OperationTimeoutSeconds 8 -Headers @{Accept='application/dns-json';'Cache-Control'='no-cache'}
-        if($null -eq $result.Status -or $result.Status -notin @(0,3)){return 'DOH_UNVERIFIED'}
-    }catch{return 'DOH_UNVERIFIED'}
-    try {
-        switch(Test-PhysicalProbe -Dns){
-            'BYPASS' {return 'BYPASS'}
-            'DENIED' {return 'PASSED'}
-            default {
-                if((Get-GuestBlockAuditStatus) -eq 'DISABLED'){return 'BLOCK_AUDIT_DISABLED'}
-                return 'NO_DENIAL_EVIDENCE'
-            }
-        }
-    }catch{return 'PHYSICAL_PROBE_UNVERIFIED'}
+        $probeStatus=Test-PhysicalProbe -Dns
+    }catch{$probeStatus='PROBE_ERROR'}
+    $script:LastObservedDnsDetail=@{dohOk=[bool]$dohProvider;dohProvider=$dohProvider;physical=$probeStatus}
+    if($probeStatus -eq 'BYPASS'){return 'BYPASS'}
+    if(-not $dohProvider){return 'DOH_UNVERIFIED'}
+    if($probeStatus -eq 'DENIED'){return 'PASSED'}
+    if($probeStatus -eq 'PROBE_ERROR'){return 'PHYSICAL_PROBE_UNVERIFIED'}
+    if((Get-GuestBlockAuditStatus) -eq 'DISABLED'){return 'BLOCK_AUDIT_DISABLED'}
+    return 'NO_DENIAL_EVIDENCE'
 }
 function Measure-GuestNetwork {
     $h=[Net.Http.SocketsHttpHandler]::new()

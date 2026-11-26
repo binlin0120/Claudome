@@ -573,12 +573,16 @@ public sealed partial class SetupWindow
         manualCard.Measure(new Size(440, double.PositiveInfinity));
         manualCard.Arrange(new Rect(0, 0, 440, manualCard.DesiredSize.Height));
         var manualCardText = string.Join("\n", Descendants<TextBlock>(manualCard).Select(block => block.Text));
+        var manualPopupSteps = string.Join("\n", CustomerGuide.ManualAdsPower().Steps);
         var matchesManualChecklist = manualGuide["ads-login"].Contains("Default Profile") &&
             manualGuide["ads-os"].Contains("User-Agent 保持「全部」") &&
             manualGuide["ads-proxy"].Contains("No Proxy") && manualGuide["ads-proxy"].Contains("Clash TUN") &&
             manualGuide["ads-proxy"].Contains("ip-api") && manualGuide["ads-proxy"].Contains("留空") &&
             manualGuide["ads-fingerprint"].Contains("「基于 IP」") && manualGuide["ads-fingerprint"].Contains("「每次询问」") &&
             manualGuide["ads-fingerprint"].Contains("WebRTC 选为「禁用」") &&
+            manualPopupSteps.Contains("Windows") && manualPopupSteps.Contains("No Proxy") &&
+            manualPopupSteps.Contains("WebRTC") && manualPopupSteps.Contains("「基于 IP」") &&
+            manualPopupSteps.Contains("界面语言") &&
             !manualGuide.Values.Any(value => value.Contains("17897")) &&
             manualCardText.Contains("No Proxy") && !manualCardText.Contains("17897");
         if (!matchesManualChecklist) failed++;

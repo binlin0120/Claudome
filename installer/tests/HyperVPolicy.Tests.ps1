@@ -485,6 +485,72 @@ Check 'hyperv-prepare-preserves-dism-hresult-and-resets-last-exit-code' {
         if ($savedEnableFeature) { Set-Item function:script:Enable-WindowsOptionalFeature -Value $savedEnableFeature } else { Remove-Item function:script:Enable-WindowsOptionalFeature -ErrorAction SilentlyContinue }
     }
 }
+Check 'guest-doh-fallback-and-hyperv-display-mode-selection' {
+    $auditTokens = $null; $auditErrors = $null
+    $auditAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\NetworkAudit.ps1'), [ref]$auditTokens, [ref]$auditErrors)
+    if ($auditErrors.Count) { throw 'NETWORK_AUDIT_PARSE_FAILED' }
+    $fnDns = $auditAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-ObservedDns' }, $true)
+    if (-not $fnDns) { throw 'MISSING_TEST_OBSERVED_DNS' }
+    . ([scriptblock]::Create($fnDns.Extent.Text))
+
+    $intTokens = $null; $intErrors = $null
+    $intAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\Integrations.ps1'), [ref]$intTokens, [ref]$intErrors)
+    if ($intErrors.Count) { throw 'INTEGRATIONS_PARSE_FAILED' }
+    $fnMode = $intAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Select-PreferredHyperVDisplayMode' }, $true)
+    if (-not $fnMode) { throw 'MISSING_DISPLAY_SELECTOR' }
+    . ([scriptblock]::Create($fnMode.Extent.Text))
+
+    $savedGetTaskUplink = ${function:Get-TaskUplink}
+    $savedGetNetAdapter = ${function:Get-NetAdapter}
+    $savedGetNetRoute = ${function:Get-NetRoute}
+    $savedInvokeRest = ${function:Invoke-RestMethod}
+    $savedTestPhysical = ${function:Test-PhysicalProbe}
+    $savedGetBlockAudit = ${function:Get-GuestBlockAuditStatus}
+    try {
+        function script:Get-TaskUplink { [pscustomobject]@{ ifIndex = 5 } }
+        function script:Get-NetAdapter { @([pscustomobject]@{ ifIndex = 5; Status = 'Up'; Name = 'ClaudomeBridge' }, [pscustomobject]@{ ifIndex = 9; Status = 'Up'; Name = 'ClaudeTun' }) }
+        function script:Get-NetRoute { @() }
+        function script:Get-GuestBlockAuditStatus { 'ENABLED' }
+        $script:physicalStub = 'DENIED'
+        function script:Test-PhysicalProbe([switch]$Dns) { $script:physicalStub }
+
+        # Case 1: Cloudflare fails, Google JSON succeeds + DENIED => PASSED
+        function script:Invoke-RestMethod {
+            param([string]$Uri, [switch]$NoProxy, $MaximumRedirection, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds, $Headers)
+            if ($Uri -like '*cloudflare-dns.com*') { throw 'cloudflare blocked' }
+            [pscustomobject]@{ Status = 3 }
+        }
+        Assert-Case ((Test-ObservedDns) -eq 'PASSED' -and $script:LastObservedDnsDetail.dohProvider -eq 'Google')
+
+        # Case 2: Both DoH fail, BUT real physical probe shows BYPASS => BYPASS wins over DOH_UNVERIFIED
+        function script:Invoke-RestMethod {
+            param([string]$Uri, [switch]$NoProxy, $MaximumRedirection, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds, $Headers)
+            throw 'all doh failed'
+        }
+        $script:physicalStub = 'BYPASS'
+        Assert-Case ((Test-ObservedDns) -eq 'BYPASS')
+
+        # Case 3: Both DoH fail + DENIED => DOH_UNVERIFIED
+        $script:physicalStub = 'DENIED'
+        Assert-Case ((Test-ObservedDns) -eq 'DOH_UNVERIFIED')
+
+        # Case 4: Display mode picks fitting widescreen resolution for embedded viewport without exceeding height
+        $modes = @(
+            [pscustomobject]@{ width = 1024; height = 768 },
+            [pscustomobject]@{ width = 1280; height = 720 },
+            [pscustomobject]@{ width = 1920; height = 1080 }
+        )
+        $picked = Select-PreferredHyperVDisplayMode $modes 1000 500
+        Assert-Case ($null -ne $picked -and $picked.width -eq 1280 -and $picked.height -eq 720 -and ($picked.height * $picked.zoom) -le 500)
+    } finally {
+        if ($savedGetTaskUplink) { Set-Item function:script:Get-TaskUplink -Value $savedGetTaskUplink } else { Remove-Item function:script:Get-TaskUplink -ErrorAction SilentlyContinue }
+        if ($savedGetNetAdapter) { Set-Item function:script:Get-NetAdapter -Value $savedGetNetAdapter } else { Remove-Item function:script:Get-NetAdapter -ErrorAction SilentlyContinue }
+        if ($savedGetNetRoute) { Set-Item function:script:Get-NetRoute -Value $savedGetNetRoute } else { Remove-Item function:script:Get-NetRoute -ErrorAction SilentlyContinue }
+        if ($savedInvokeRest) { Set-Item function:script:Invoke-RestMethod -Value $savedInvokeRest } else { Remove-Item function:script:Invoke-RestMethod -ErrorAction SilentlyContinue }
+        if ($savedTestPhysical) { Set-Item function:script:Test-PhysicalProbe -Value $savedTestPhysical } else { Remove-Item function:script:Test-PhysicalProbe -ErrorAction SilentlyContinue }
+        if ($savedGetBlockAudit) { Set-Item function:script:Get-GuestBlockAuditStatus -Value $savedGetBlockAudit } else { Remove-Item function:script:Get-GuestBlockAuditStatus -ErrorAction SilentlyContinue }
+    }
+}
 
 # Call the real .NET file API directly; the mock registry provider remains scoped
 # to this test process, not the user's PowerShell session or machine.

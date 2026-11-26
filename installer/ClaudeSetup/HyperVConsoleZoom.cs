@@ -13,7 +13,8 @@ internal static partial class HyperVConsoleZoom
         ["Zoom Level", "缩放级别", "缩放等级", "缩放", "縮放層級", "縮放比例", "縮放"],
         ["Auto", "Automatic", "自动", "自動"],
         ["75%"],
-        ["50%"]
+        ["50%"],
+        ["25%"]
     ];
 
     internal static bool MatchesMenu(string name, int level)
@@ -28,6 +29,17 @@ internal static partial class HyperVConsoleZoom
 
     internal static int ChooseZoomMenuLevel(int viewportHeight) =>
         viewportHeight < 560 ? 4 : viewportHeight < 790 ? 3 : 2;
+
+    internal static int[] StepDownZoomLevels(int initialLevel)
+    {
+        var sequence = new List<int> { initialLevel };
+        foreach (var candidate in new[] { 3, 4, 5 })
+        {
+            if (candidate >= initialLevel && !sequence.Contains(candidate))
+                sequence.Add(candidate);
+        }
+        return [.. sequence];
+    }
 
     internal static bool TrySelectAuto(ConsoleWindow window, CancellationToken token) =>
         TrySelectZoomLevel(window, 2, token);

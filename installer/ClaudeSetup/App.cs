@@ -804,8 +804,9 @@ public sealed partial class SetupWindow : Window
             AllowEditing(false);
             banner.Text = "正在经所选节点测速并识别出口国家与时区…";
             var probeOptions = new SetupOptions { Root = root.Text.Trim() };
+            var probeStrategy = ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default;
             var result = await NodeExitProbe.ProbeAsync(probeOptions, selectedNode, upstream, cancellation.Token,
-                new Progress<DownloadProgress>(p => { progressText.Text = p.Display; banner.Text = p.Display; }));
+                new Progress<DownloadProgress>(p => { progressText.Text = p.Display; banner.Text = p.Display; }), probeStrategy);
             updatingCpuRecommendation = true;
             try
             {
@@ -821,11 +822,16 @@ public sealed partial class SetupWindow : Window
                 ? "请手动核对 Windows 时区"
                 : $"已自动匹配时区：{result.WindowsTimeZoneId}" + (string.IsNullOrEmpty(result.IanaTimeZone) ? "" : $"（{result.IanaTimeZone}）");
             var ifaceNote = string.IsNullOrEmpty(result.OutboundInterfaceSummary) ? "" : $" · {result.OutboundInterfaceSummary}";
-            var ifaceLine = string.IsNullOrEmpty(result.OutboundInterfaceSummary) ? "" : $"\n宿主机出站接口：{result.OutboundInterfaceSummary}";
+            var segmentLines = new List<string>();
+            if (!string.IsNullOrEmpty(result.ResolutionSummary)) segmentLines.Add($"1) 节点地址解析：{result.ResolutionSummary}");
+            if (!string.IsNullOrEmpty(result.HandshakeSummary)) segmentLines.Add($"2) 节点连接／握手：{result.HandshakeSummary}");
+            if (!string.IsNullOrEmpty(result.TargetSummary)) segmentLines.Add($"3) 出口目标验证：{result.TargetSummary}");
+            else segmentLines.Add($"3) 出口目标验证：{result.LatencyMs} ms · 检测出口 IP：{result.ExitIp}");
+            if (!string.IsNullOrEmpty(result.HostNetworkSummary)) segmentLines.Add($"4) 宿主网络环境：{result.HostNetworkSummary}");
+            var detailBlock = string.Join("\n", segmentLines);
             banner.Text = $"检测服务已返回出口资料（{result.LatencyMs} ms）· {regionHint}{ifaceNote}";
             if (MessageBox.Show(this,
-                $"出口检测服务响应耗时 {result.LatencyMs} ms\n" +
-                $"检测出口 IP：{result.ExitIp}{ifaceLine}\n" +
+                $"{detailBlock}\n" +
                 $"{regionHint}\n{zoneHint}\n\n" +
                 "是否将该 IP 填入“预期固定出口 IPv4”？（独享静态 IP 推荐选择“是”；机场动态节点请选择“否”留空）",
                 "节点出口测速与自动匹配", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)

@@ -1984,6 +1984,17 @@ public static class SelfTests
                 ensureCheckpointPolicyAsync: () => { readyCpPolicies++; return Task.CompletedTask; });
             Assert(readyCpPolicies == 1, "Resumed Ready disk must invoke EnsureCheckpointPolicy before start");
         });
+        await Check("hyperv-zoom-stepdown-and-segmented-node-probe-diagnostics", () => Sync(() => {
+            Assert(HyperVConsoleZoom.StepDownZoomLevels(3).SequenceEqual([3, 4, 5]) &&
+                   HyperVConsoleZoom.StepDownZoomLevels(4).SequenceEqual([4, 5]) &&
+                   HyperVConsoleZoom.MatchesMenu("25%", 5),
+                "Zoom step-down sequence must descend to 25% when larger presets overflow");
+            var sample = new NodeProbeResult("1.1.1.1", "KR", "Asia/Seoul", "Korea Standard Time", 120, true,
+                "物理网卡 WLAN", "采用 宿主机系统 DNS（1 个公网 IPv4）", "物理网卡 WLAN · TCP 25 ms", "api.ip.sb · 120 ms", "未检测到宿主 TUN");
+            Assert(sample.ResolutionSummary.Contains("宿主机系统 DNS") && sample.HandshakeSummary.Contains("TCP 25 ms") &&
+                   sample.TargetSummary.Contains("api.ip.sb") && sample.HostNetworkSummary.Contains("TUN"),
+                "NodeProbeResult segmented diagnostics fields missing");
+        }));
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));

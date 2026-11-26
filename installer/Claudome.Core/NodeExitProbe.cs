@@ -11,7 +11,18 @@ using System.Text.RegularExpressions;
 namespace ClaudeSetup;
 
 public sealed record RegionOption(string Code, string Label, string DefaultWindowsTimeZone);
-public sealed record NodeProbeResult(string ExitIp, string CountryCode, string IanaTimeZone, string? WindowsTimeZoneId, int LatencyMs, bool SupportedRegion, string OutboundInterfaceSummary = "");
+public sealed record NodeProbeResult(
+    string ExitIp,
+    string CountryCode,
+    string IanaTimeZone,
+    string? WindowsTimeZoneId,
+    int LatencyMs,
+    bool SupportedRegion,
+    string OutboundInterfaceSummary = "",
+    string ResolutionSummary = "",
+    string HandshakeSummary = "",
+    string TargetSummary = "",
+    string HostNetworkSummary = "");
 
 public static class RegionCatalog
 {
@@ -135,24 +146,43 @@ public static class NodeExitProbe
     }
 
     public static Task<NodeProbeResult> ProbeAsync(SetupOptions options, ProxyNode selectedNode, ProxyNode? upstreamNode,
-        CancellationToken token, IProgress<DownloadProgress>? progress = null) =>
-        ProbeThroughCore(options, selectedNode, upstreamNode, token,
-            async (client, runtime, addresses) =>
+        CancellationToken token, IProgress<DownloadProgress>? progress = null,
+        EndpointResolutionStrategy strategy = EndpointResolutionStrategy.Default) =>
+        ProbeThroughCore(options, selectedNode, upstreamNode, strategy, token,
+            async (client, runtime, report) =>
             {
                 var first = upstreamNode ?? selectedNode;
-                var interfaceTask = ProbeTcpInterface(addresses, first.Port, token);
-                var geo = await ProbeEndpoints(client, GeoEndpoints, Cooldown, token, runtime);
+                var reach = report.FirstHopReachability;
+                var interfaceTask = reach?.Reachable == true
+                    ? Task.FromResult<(long ElapsedMs, string InterfaceLabel)?>(null)
+                    : ProbeTcpInterface(report.Addresses, first.Port, token);
+                var geo = await ProbeEndpoints(client, GeoEndpoints, Cooldown, token, runtime, report, first.Port);
                 var probe = await interfaceTask;
-                return geo with { OutboundInterfaceSummary = probe?.InterfaceLabel ?? "上行接口未识别" };
+                var ifaceLabel = reach?.Reachable == true
+                    ? reach.OutboundInterfaceLabel
+                    : probe?.InterfaceLabel ?? "宿主出站路径待核对";
+                var tcpLatency = reach?.Reachable == true ? reach.LatencyMs : (probe is { } h ? (int)Math.Max(1, h.ElapsedMs) : (int?)null);
+                var handshakeText = tcpLatency is { } ms
+                    ? $"{ifaceLabel} · TCP {ms} ms · 节点协议与 TLS 握手成功"
+                    : $"{ifaceLabel} · 节点协议与 TLS 握手成功";
+                return geo with
+                {
+                    OutboundInterfaceSummary = ifaceLabel,
+                    ResolutionSummary = report.Summary,
+                    HandshakeSummary = handshakeText,
+                    HostNetworkSummary = report.HostNetwork.Summary
+                };
             }, progress);
 
     internal static Task<string> MeasureAsync(SetupOptions options, ProxyNode selectedNode, ProxyNode? upstreamNode,
-        CancellationToken token) =>
-        ProbeThroughCore(options, selectedNode, upstreamNode, token, async (client, runtime, addresses) =>
+        CancellationToken token, EndpointResolutionStrategy strategy = EndpointResolutionStrategy.Default) =>
+        ProbeThroughCore(options, selectedNode, upstreamNode, strategy, token, async (client, runtime, report) =>
         {
             var first = upstreamNode ?? selectedNode;
-            var tcp = await MeasureEndpoint(addresses, first.Port, token);
-            var exit = await ProbeEndpoints(client, GeoEndpoints, Cooldown, token, runtime);
+            var tcp = report.FirstHopReachability?.Reachable == true
+                ? $"{report.FirstHopReachability.LatencyMs} ms（{report.FirstHopReachability.OutboundInterfaceLabel}）"
+                : await MeasureEndpoint(report.Addresses, first.Port, token);
+            var exit = await ProbeEndpoints(client, GeoEndpoints, Cooldown, token, runtime, report, first.Port);
             var samples = new List<(double Latency, double Megabits)>();
             for (var attempt = 0; attempt < 2; attempt++)
             {
@@ -184,8 +214,8 @@ public static class NodeExitProbe
                     token.ThrowIfCancellationRequested();
                 }
             }
-            return $"公网出口 {exit.ExitIp} ({exit.CountryCode}) · 主机 TCP {tcp} · " +
-                (samples.Count == 0 ? "HTTPS 未能验证 2/2" :
+            return $"公网出口 {exit.ExitIp} ({exit.CountryCode}) · 解析 {report.SelectedSource} · 主机 TCP {tcp} · " +
+                (samples.Count == 0 ? "HTTPS 测速未能验证 2/2" :
                     $"HTTPS 首字节 {samples.Average(s => s.Latency):F0} ms · 短下载 {samples.Average(s => s.Megabits):F2} Mbps · 失败 {2-samples.Count}/2");
         });
 
@@ -242,8 +272,9 @@ public static class NodeExitProbe
         SetupOptions options,
         ProxyNode selectedNode,
         ProxyNode? upstreamNode,
+        EndpointResolutionStrategy strategy,
         CancellationToken token,
-        Func<HttpClient, BootstrapCore, string[], Task<T>> operation,
+        Func<HttpClient, BootstrapCore, EndpointResolutionReport, Task<T>> operation,
         IProgress<DownloadProgress>? progress = null)
     {
         Paths.ValidateRoot(options.Root);
@@ -260,9 +291,12 @@ public static class NodeExitProbe
             HostPlatform.Environment.RestrictPrivateDirectory(probeOptions.Private);
 
             var firstHop = upstreamNode ?? selectedNode;
-            var firstAddresses = await NodeEndpointResolver.Resolve(firstHop.Server, token);
-            var exitAddresses = upstreamNode is null ? firstAddresses : await NodeEndpointResolver.Resolve(selectedNode.Server, token);
-            var coreConfig = NetworkImport.CoreConfig(selectedNode, firstAddresses, null, upstreamNode, exitAddresses);
+            var firstReport = await NodeEndpointResolver.ResolveDetailedAsync(firstHop.Server, firstHop.Port, strategy, token);
+            // In two-hop chain mode, host resolves exit hop candidates without connecting directly to the second hop.
+            var exitAddresses = upstreamNode is null
+                ? firstReport.Addresses
+                : (await NodeEndpointResolver.ResolveDetailedAsync(selectedNode.Server, 0, strategy, token)).Addresses;
+            var coreConfig = NetworkImport.CoreConfig(selectedNode, firstReport.Addresses, null, upstreamNode, exitAddresses);
 
             await using var runtime = await BootstrapCore.Start(probeOptions, coreConfig, token, progress);
             using var handler = new SocketsHttpHandler
@@ -277,7 +311,7 @@ public static class NodeExitProbe
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Claudome/0.4");
             client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
 
-            return await operation(client, runtime, firstAddresses);
+            return await operation(client, runtime, firstReport);
         }
         finally
         {
@@ -289,7 +323,8 @@ public static class NodeExitProbe
     }
 
     internal static async Task<NodeProbeResult> ProbeEndpoints(HttpClient client, IReadOnlyList<Uri> endpoints,
-        NodeProbeCooldown cooldown, CancellationToken token, BootstrapCore? runtime = null)
+        NodeProbeCooldown cooldown, CancellationToken token, BootstrapCore? runtime = null,
+        EndpointResolutionReport? resolutionReport = null, int firstHopPort = 443)
     {
         var limited = 0;
         var timeouts = 0;
@@ -298,6 +333,7 @@ public static class NodeExitProbe
         var invalid = 0;
         var nextRetry = TimeSpan.MaxValue;
         var transportHint = "";
+        var targetNotes = new List<string>();
         foreach (var endpoint in endpoints)
         {
             token.ThrowIfCancellationRequested();
@@ -306,6 +342,7 @@ public static class NodeExitProbe
             {
                 limited++;
                 nextRetry = remaining < nextRetry ? remaining : nextRetry;
+                targetNotes.Add($"{endpoint.Host}:冷却限流(HTTP 429)");
                 continue;
             }
 
@@ -323,11 +360,13 @@ public static class NodeExitProbe
                     remaining = cooldown.Remaining(endpoint, now);
                     limited++;
                     nextRetry = remaining < nextRetry ? remaining : nextRetry;
+                    targetNotes.Add($"{endpoint.Host}:HTTP 429");
                     continue;
                 }
                 if (!response.IsSuccessStatusCode)
                 {
                     httpFailures++;
+                    targetNotes.Add($"{endpoint.Host}:HTTP {(int)response.StatusCode}");
                     continue;
                 }
 
@@ -343,16 +382,22 @@ public static class NodeExitProbe
                 if (total is 0 or >= 16_384)
                 {
                     invalid++;
+                    targetNotes.Add($"{endpoint.Host}:响应内容无效");
                     continue;
                 }
 
                 try
                 {
-                    return ParseGeoJson(System.Text.Encoding.UTF8.GetString(buffer, 0, total), (int)stopwatch.ElapsedMilliseconds);
+                    var parsed = ParseGeoJson(System.Text.Encoding.UTF8.GetString(buffer, 0, total), (int)stopwatch.ElapsedMilliseconds);
+                    return parsed with
+                    {
+                        TargetSummary = $"{endpoint.Host} · {parsed.LatencyMs} ms · 出口 {parsed.ExitIp} ({parsed.CountryCode})"
+                    };
                 }
                 catch (Exception error) when (error is SetupException or JsonException)
                 {
                     invalid++;
+                    targetNotes.Add($"{endpoint.Host}:格式不符");
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
@@ -360,15 +405,28 @@ public static class NodeExitProbe
             {
                 timeouts++;
                 transportHint = runtime?.FailureHint ?? "";
+                targetNotes.Add($"{endpoint.Host}:请求超时");
             }
             catch (Exception error) when (error is HttpRequestException or IOException)
             {
                 transportFailures++;
                 transportHint = runtime?.FailureHint ?? "";
+                targetNotes.Add($"{endpoint.Host}:连接失败");
             }
         }
 
         var lines = new List<string> { "这次未识别出出口 IP、地区和时区。" };
+        if (resolutionReport is not null)
+        {
+            lines.Add($"1) 节点地址解析：{resolutionReport.Summary}");
+            var reach = resolutionReport.FirstHopReachability;
+            var tcpNote = reach is null ? "未单独测 TCP" :
+                reach.Reachable ? $"端点端口 :{firstHopPort} TCP 已连通（{reach.LatencyMs} ms · {reach.OutboundInterfaceLabel}）" :
+                $"候选端点 TCP 均不可达（{reach.OutboundInterfaceLabel}）";
+            lines.Add($"2) 节点连接／握手：{tcpNote}" + (transportHint.Length > 0 ? $" · {transportHint.Trim()}" : ""));
+            lines.Add($"3) 出口目标验证：{(targetNotes.Count > 0 ? string.Join("；", targetNotes) : "无可用目标响应")}");
+            lines.Add($"4) 宿主网络路径：{resolutionReport.HostNetwork.Summary}");
+        }
         if (limited > 0)
         {
             var retry = nextRetry > TimeSpan.FromHours(1) ? "请按检测服务的等待时间稍后再测。" :
@@ -379,7 +437,7 @@ public static class NodeExitProbe
         if (transportFailures > 0) lines.Add($"{transportFailures} 次检测请求连接失败。");
         if (httpFailures > 0) lines.Add($"{httpFailures} 个检测服务返回其他 HTTP 错误。");
         if (invalid > 0) lines.Add($"{invalid} 个检测服务的响应缺少有效出口资料。");
-        if (limited == 0 && httpFailures == 0 && invalid == 0 && transportHint.Length > 0)
+        if (resolutionReport is null && limited == 0 && httpFailures == 0 && invalid == 0 && transportHint.Length > 0)
             lines.Add(transportHint.Trim());
         lines.Add("如果已核实节点的实际地区和时区，可手动选择后继续原任务。部署会独立检查安装网络。");
         throw new NodeProbeException(string.Join("\n", lines));

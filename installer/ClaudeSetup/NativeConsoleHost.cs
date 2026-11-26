@@ -434,6 +434,7 @@ public sealed class NativeConsoleHost : HwndHost
         var x = desktopClip is { } frame ? (viewport.Width - (int)frame.Width) / 2 - (int)frame.X : (viewport.Width - width) / 2;
         var y = desktopClip is { } visible ? (viewport.Height - (int)visible.Height) / 2 - (int)visible.Y : (viewport.Height - height) / 2;
 
+        SetLong(child, StyleIndex, new IntPtr((GetLong(child, StyleIndex).ToInt64() & ~(0x80000000L | 0x00c00000L | 0x00040000L | 0x00080000L)) | 0x40000000L));
         if (position != new Rect(x, y, width, height))
         {
             SetWindowPos(child, IntPtr.Zero, x, y, width, height, 0x0014 | 0x0020);
