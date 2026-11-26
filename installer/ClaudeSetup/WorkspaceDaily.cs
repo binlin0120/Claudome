@@ -197,7 +197,9 @@ public sealed partial class Deployment
         var resolutionStrategy = ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default;
         var (addresses, finalAddresses, _) = await ResolveOrBindEndpointsAsync(
             first, node, upstream is not null, resolutionStrategy, pinnedEndpoints: null, token,
-            options: state.Options, upstreamNode: upstream);
+            options: state.Options, upstreamNode: upstream,
+            preferredCoreConfigSha256: state.CoreConfigSha256,
+            physicalInterfaceForConfigHash: state.Options.PlatformId == "virtualbox" ? null : "ClaudomeBridge");
         var config = NetworkImport.CoreConfig(node, addresses,
             state.Options.PlatformId == "virtualbox" ? null : "ClaudomeBridge", upstream, finalAddresses);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(config)));
@@ -225,7 +227,7 @@ public sealed partial class Deployment
                     await BusBoundary.Verify(backend, state, spec, ct);
                 }, token);
             }
-            await BoundaryRuntime.Replace(gateway, state.VmId, relay);
+            await BoundaryRuntime.Replace(gateway, state.VmId, relay, finalAddresses);
             gateway = null;
             relay = null;
             await StartOriginalDesktop(state, backend, token);

@@ -102,14 +102,18 @@ public static class BoundaryRuntime
     private static string currentVm = "";
     private static IAsyncDisposable? relay;
     private static IVmBackend? retainedBackend;
-    public static async Task Replace(ExternalGateway? gateway, string vmId, IAsyncDisposable? transport = null)
+    private static string[] currentExitAddresses = [];
+    public static async Task Replace(ExternalGateway? gateway, string vmId, IAsyncDisposable? transport = null, string[]? exitAddresses = null)
     {
-        var old = current; var oldRelay = relay; var oldBackend = retainedBackend; current = gateway; relay = transport; retainedBackend = null; currentVm = gateway is null ? "" : vmId;
+        var old = current; var oldRelay = relay; var oldBackend = retainedBackend;
+        current = gateway; relay = transport; retainedBackend = null; currentVm = gateway is null ? "" : vmId;
+        currentExitAddresses = gateway is null ? [] : [.. (exitAddresses ?? gateway.EndpointAddresses)];
         if (old is not null) await old.DisposeAsync();
         if (oldRelay is not null) await oldRelay.DisposeAsync();
         if (oldBackend is not null) await oldBackend.DisposeAsync();
     }
     internal static string[] EndpointsFor(SessionState state) => currentVm == state.VmId ? current?.EndpointAddresses ?? [] : [];
+    internal static string[] ExitAddressesFor(SessionState state) => currentVm == state.VmId ? [.. currentExitAddresses] : [];
     internal static int PortFor(SessionState state) => currentVm == state.VmId ? current?.EndpointPort ?? 0 : 0;
     public static Task StopFor(SessionState state) => currentVm == state.VmId ? Replace(null, "") : Task.CompletedTask;
     public static bool HasInstallationNetwork=>current?.IsAlive==true&&current.HasBootstrap;

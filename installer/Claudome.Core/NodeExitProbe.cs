@@ -25,7 +25,10 @@ public sealed record NodeProbeResult(
     string HostNetworkSummary = "",
     string[]? VerifiedFirstHopAddresses = null,
     string[]? VerifiedExitAddresses = null,
-    string? VerifiedConnectedEndpoint = null);
+    string? VerifiedConnectedEndpoint = null,
+    string? PreProbeEndpoint = null,
+    bool ExitVerified = true,
+    string? ExitPendingReason = null);
 
 public static class RegionCatalog
 {
@@ -112,6 +115,11 @@ public static class NodeExitProbe
         new("https://ipwho.is/"),
         new("https://ipinfo.io/json")
     ];
+    private static readonly Uri[] ProtocolProbeEndpoints =
+    [
+        new("https://cp.cloudflare.com/generate_204"),
+        new("https://www.gstatic.com/generate_204")
+    ];
 
     public static NodeProbeResult ParseGeoJson(string json, int latencyMs = 0)
     {
@@ -146,6 +154,38 @@ public static class NodeExitProbe
         var ianaZone = PickString("timezone", "time_zone");
         var windowsZone = RegionCatalog.ResolveWindowsTimeZone(ianaZone, country);
         return new(ip, country, ianaZone, windowsZone, Math.Max(1, latencyMs), RegionCatalog.IsSupported(country));
+    }
+
+    internal static EndpointCandidatePlan ExpandSingleEndpointPlan(
+        EndpointCandidatePlan plan,
+        Func<string, bool>? isPreferredSingleIp = null)
+    {
+        var singleEntries = new List<(bool Preferred, EndpointCandidateGroup Group)>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var group in plan.Groups)
+        {
+            var orderedIps = new List<string>(group.Addresses.Length);
+            var preProbeIp = group.Reachability?.ConnectedIp;
+            if (!string.IsNullOrEmpty(preProbeIp) && group.Addresses.Contains(preProbeIp, StringComparer.Ordinal))
+                orderedIps.Add(preProbeIp);
+            foreach (var ip in group.Addresses)
+            {
+                if (!orderedIps.Contains(ip, StringComparer.Ordinal))
+                    orderedIps.Add(ip);
+            }
+            foreach (var ip in orderedIps)
+            {
+                if (!seen.Add(ip)) continue;
+                var preferred = isPreferredSingleIp?.Invoke(ip) == true;
+                var sourceLabel = group.Addresses.Length > 1 ? $"{group.Source} · 单点 {ip}" : group.Source;
+                singleEntries.Add((preferred, new EndpointCandidateGroup(sourceLabel, [ip], group.Reachability)));
+            }
+        }
+        var ordered = singleEntries
+            .OrderByDescending(entry => entry.Preferred)
+            .Select(entry => entry.Group)
+            .ToArray();
+        return new EndpointCandidatePlan(ordered, plan.Attempts, plan.HostNetwork);
     }
 
     internal static async Task<T> ExecuteAcrossCandidatePlanAsync<T>(
@@ -183,27 +223,41 @@ public static class NodeExitProbe
 
     public static Task<NodeProbeResult> ProbeAsync(SetupOptions options, ProxyNode selectedNode, ProxyNode? upstreamNode,
         CancellationToken token, IProgress<DownloadProgress>? progress = null,
-        EndpointResolutionStrategy strategy = EndpointResolutionStrategy.Default) =>
+        EndpointResolutionStrategy strategy = EndpointResolutionStrategy.Default,
+        bool allowUnverifiedExit = false,
+        string? preferredCoreConfigSha256 = null,
+        string? physicalInterfaceForConfigHash = null) =>
         ProbeThroughCore(options, selectedNode, upstreamNode, strategy, token,
             async (client, runtime, report, exitAddresses) =>
             {
                 var first = upstreamNode ?? selectedNode;
                 var reach = report.FirstHopReachability;
-                var interfaceTask = reach?.Reachable == true
+                var preProbeEndpoint = reach is { Reachable: true, ConnectedIp: { Length: > 0 } preIp }
+                    ? $"{preIp}:{first.Port}"
+                    : null;
+                var singleBoundEndpoint = report.Addresses.Length == 1
+                    ? $"{report.Addresses[0]}:{first.Port}"
+                    : null;
+                var preProbeMatchesBound = reach?.Reachable == true && report.Addresses.Length == 1 &&
+                    string.Equals(reach.ConnectedIp, report.Addresses[0], StringComparison.Ordinal);
+                var interfaceTask = preProbeMatchesBound
                     ? Task.FromResult<(long ElapsedMs, string InterfaceLabel)?>(null)
                     : ProbeTcpInterface(report.Addresses, first.Port, token);
-                var geo = await ProbeEndpoints(client, GeoEndpoints, Cooldown, token, runtime, report, first.Port);
+                var geo = await ProbeEndpoints(client, GeoEndpoints, Cooldown, token, runtime, report, first.Port,
+                    allowUnverifiedExit, ProtocolProbeEndpoints);
                 var probe = await interfaceTask;
-                var ifaceLabel = reach?.Reachable == true
-                    ? reach.OutboundInterfaceLabel
-                    : probe?.InterfaceLabel ?? "宿主出站路径待核对";
-                var tcpLatency = reach?.Reachable == true ? reach.LatencyMs : (probe is { } h ? (int)Math.Max(1, h.ElapsedMs) : (int?)null);
+                var ifaceLabel = preProbeMatchesBound
+                    ? reach!.OutboundInterfaceLabel
+                    : probe?.InterfaceLabel ?? (reach?.Reachable == true ? $"预探测 {reach.OutboundInterfaceLabel}" : "宿主出站路径待核对");
+                var tcpLatency = preProbeMatchesBound ? reach!.LatencyMs : (probe is { } h ? (int)Math.Max(1, h.ElapsedMs) : (int?)null);
+                var boundNote = singleBoundEndpoint is not null
+                    ? $"单点绑定代理对端 {singleBoundEndpoint}"
+                    : preProbeEndpoint is not null
+                        ? $"TCP 预探测 {preProbeEndpoint}（多 IP 组未单点绑定）"
+                        : "多 IP 候选组";
                 var handshakeText = tcpLatency is { } ms
-                    ? $"{ifaceLabel} · TCP {ms} ms · 节点协议与 TLS 握手成功"
-                    : $"{ifaceLabel} · 节点协议与 TLS 握手成功";
-                var connectedEndpoint = reach is { Reachable: true, ConnectedIp: { Length: > 0 } ip }
-                    ? $"{ip}:{first.Port}"
-                    : null;
+                    ? $"{ifaceLabel} · TCP {ms} ms · {boundNote} · 节点协议与 TLS 握手成功"
+                    : $"{ifaceLabel} · {boundNote} · 节点协议与 TLS 握手成功";
                 return geo with
                 {
                     OutboundInterfaceSummary = ifaceLabel,
@@ -212,9 +266,10 @@ public static class NodeExitProbe
                     HostNetworkSummary = report.HostNetwork.Summary,
                     VerifiedFirstHopAddresses = [.. report.Addresses],
                     VerifiedExitAddresses = [.. exitAddresses],
-                    VerifiedConnectedEndpoint = connectedEndpoint
+                    VerifiedConnectedEndpoint = singleBoundEndpoint,
+                    PreProbeEndpoint = preProbeEndpoint
                 };
-            }, progress);
+            }, progress, preferredCoreConfigSha256, physicalInterfaceForConfigHash);
 
     internal static Task<string> MeasureAsync(SetupOptions options, ProxyNode selectedNode, ProxyNode? upstreamNode,
         CancellationToken token, EndpointResolutionStrategy strategy = EndpointResolutionStrategy.Default) =>
@@ -317,7 +372,9 @@ public static class NodeExitProbe
         EndpointResolutionStrategy strategy,
         CancellationToken token,
         Func<HttpClient, BootstrapCore, EndpointResolutionReport, string[], Task<T>> operation,
-        IProgress<DownloadProgress>? progress = null)
+        IProgress<DownloadProgress>? progress = null,
+        string? preferredCoreConfigSha256 = null,
+        string? physicalInterfaceForConfigHash = null)
     {
         Paths.ValidateRoot(options.Root);
         var workspaceInitialized = File.Exists(Paths.Under(options.Root, ".claude-setup-workspace.json"));
@@ -341,9 +398,33 @@ public static class NodeExitProbe
                 ? null
                 : (await NodeEndpointResolver.ResolveDetailedAsync(selectedNode.Server, 0, strategy, token)).Addresses;
 
+            if (strategy == EndpointResolutionStrategy.HyperVStandalone)
+            {
+                Func<string, bool>? matchesSavedConfig = null;
+                if (!string.IsNullOrWhiteSpace(preferredCoreConfigSha256))
+                {
+                    matchesSavedConfig = ip =>
+                    {
+                        try
+                        {
+                            var sameServer = upstreamNode is not null &&
+                                selectedNode.Server.Equals(upstreamNode.Server, StringComparison.OrdinalIgnoreCase);
+                            var exitForHash = sameServer ? [ip] : (secondHopAddresses ?? [ip]);
+                            var candidateConfig = NetworkImport.CoreConfig(selectedNode, [ip], physicalInterfaceForConfigHash, upstreamNode, exitForHash);
+                            var candidateHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(candidateConfig)));
+                            return candidateHash.Equals(preferredCoreConfigSha256, StringComparison.OrdinalIgnoreCase);
+                        }
+                        catch { return false; }
+                    };
+                }
+                candidatePlan = ExpandSingleEndpointPlan(candidatePlan, matchesSavedConfig);
+            }
+
             return await ExecuteAcrossCandidatePlanAsync(candidatePlan, async report =>
             {
-                var exitAddresses = secondHopAddresses ?? report.Addresses;
+                var sameServer = upstreamNode is not null &&
+                    selectedNode.Server.Equals(upstreamNode.Server, StringComparison.OrdinalIgnoreCase);
+                var exitAddresses = sameServer ? report.Addresses : (secondHopAddresses ?? report.Addresses);
                 var coreConfig = NetworkImport.CoreConfig(selectedNode, report.Addresses, null, upstreamNode, exitAddresses);
                 await using var runtime = await BootstrapCore.Start(probeOptions, coreConfig, token, progress);
                 using var handler = new SocketsHttpHandler
@@ -372,16 +453,21 @@ public static class NodeExitProbe
 
     internal static async Task<NodeProbeResult> ProbeEndpoints(HttpClient client, IReadOnlyList<Uri> endpoints,
         NodeProbeCooldown cooldown, CancellationToken token, BootstrapCore? runtime = null,
-        EndpointResolutionReport? resolutionReport = null, int firstHopPort = 443)
+        EndpointResolutionReport? resolutionReport = null, int firstHopPort = 443,
+        bool allowUnverifiedExit = false, IReadOnlyList<Uri>? protocolProbeEndpoints = null,
+        TimeSpan? requestTimeout = null)
     {
         var limited = 0;
         var timeouts = 0;
         var transportFailures = 0;
         var httpFailures = 0;
         var invalid = 0;
+        var liveHttpResponses = 0;
+        var liveHttpLatencyMs = 0;
         var nextRetry = TimeSpan.MaxValue;
         var transportHint = "";
         var targetNotes = new List<string>();
+        var perRequestTimeout = requestTimeout ?? TimeSpan.FromSeconds(10);
         foreach (var endpoint in endpoints)
         {
             token.ThrowIfCancellationRequested();
@@ -395,12 +481,14 @@ public static class NodeExitProbe
             }
 
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-            deadline.CancelAfter(TimeSpan.FromSeconds(10));
+            deadline.CancelAfter(perRequestTimeout);
             runtime?.BeginProbeStep(443);
             var stopwatch = Stopwatch.StartNew();
             try
             {
                 using var response = await client.GetAsync(endpoint, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+                liveHttpResponses++;
+                liveHttpLatencyMs = liveHttpLatencyMs == 0 ? (int)Math.Max(1, stopwatch.ElapsedMilliseconds) : liveHttpLatencyMs;
                 if (response.StatusCode == HttpStatusCode.TooManyRequests)
                 {
                     var now = DateTimeOffset.UtcNow;
@@ -439,7 +527,8 @@ public static class NodeExitProbe
                     var parsed = ParseGeoJson(System.Text.Encoding.UTF8.GetString(buffer, 0, total), (int)stopwatch.ElapsedMilliseconds);
                     return parsed with
                     {
-                        TargetSummary = $"{endpoint.Host} · {parsed.LatencyMs} ms · 出口 {parsed.ExitIp} ({parsed.CountryCode})"
+                        TargetSummary = $"{endpoint.Host} · {parsed.LatencyMs} ms · 出口 {parsed.ExitIp} ({parsed.CountryCode})",
+                        ExitVerified = true
                     };
                 }
                 catch (Exception error) when (error is SetupException or JsonException)
@@ -460,6 +549,61 @@ public static class NodeExitProbe
                 transportFailures++;
                 transportHint = runtime?.FailureHint ?? "";
                 targetNotes.Add($"{endpoint.Host}:连接失败");
+            }
+        }
+
+        // Separate proxy protocol reachability from 3rd-party geo API availability when caller permits
+        // unverified exit (deploy/resume/daily reconnect), while real node protocol failures still block.
+        var hasProxyFailure = !string.IsNullOrEmpty(runtime?.FailureCode);
+        if (allowUnverifiedExit && !hasProxyFailure)
+        {
+            var protocolReachable = liveHttpResponses > 0;
+            var protocolLatencyMs = liveHttpLatencyMs;
+            if (!protocolReachable && (limited > 0 || timeouts > 0) && protocolProbeEndpoints is { Count: > 0 })
+            {
+                var probeTimeout = requestTimeout ?? TimeSpan.FromSeconds(6);
+                foreach (var probeUri in protocolProbeEndpoints)
+                {
+                    token.ThrowIfCancellationRequested();
+                    using var probeDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    probeDeadline.CancelAfter(probeTimeout);
+                    runtime?.BeginProbeStep(probeUri.Port > 0 ? probeUri.Port : 443);
+                    var watch = Stopwatch.StartNew();
+                    try
+                    {
+                        using var probeResp = await client.GetAsync(probeUri, HttpCompletionOption.ResponseHeadersRead, probeDeadline.Token);
+                        if (string.IsNullOrEmpty(runtime?.FailureCode))
+                        {
+                            protocolReachable = true;
+                            protocolLatencyMs = (int)Math.Max(1, watch.ElapsedMilliseconds);
+                            break;
+                        }
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                    catch (OperationCanceledException) { }
+                    catch (Exception error) when (error is HttpRequestException or IOException) { }
+                }
+            }
+
+            if (protocolReachable && string.IsNullOrEmpty(runtime?.FailureCode))
+            {
+                var pendingReason = limited > 0
+                    ? "第三方地理接口限流（HTTP 429）"
+                    : timeouts > 0
+                        ? "第三方地理接口超时"
+                        : httpFailures > 0
+                            ? "第三方地理接口返回异常状态"
+                            : "第三方地理接口暂不可用";
+                return new NodeProbeResult(
+                    ExitIp: "",
+                    CountryCode: "",
+                    IanaTimeZone: "",
+                    WindowsTimeZoneId: null,
+                    LatencyMs: Math.Max(1, protocolLatencyMs),
+                    SupportedRegion: false,
+                    TargetSummary: $"出口待核验（{pendingReason}；节点协议连通性已确认，按现有边界与真实来宾证据核验）",
+                    ExitVerified: false,
+                    ExitPendingReason: pendingReason);
             }
         }
 

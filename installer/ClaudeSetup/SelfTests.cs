@@ -2125,6 +2125,183 @@ public static class SelfTests
             await hv.DisposeAsync();
             if (mainServerTask is not null) await mainServerTask.WaitAsync(TimeSpan.FromSeconds(3));
         });
+        await Check("hyperv-display-fit-cancel-clears-busy-and-preserves-generation-isolation", () => Task.Run(() => {
+            var tracker = new HyperVDisplayFitTracker();
+            var vp1 = new ConsolePixelSize(1280, 720);
+            var vp2 = new ConsolePixelSize(1440, 900);
+            var vp3 = new ConsolePixelSize(1600, 900);
+
+            // 1. Start fit G1 -> busy
+            Assert(tracker.TryBegin(vp1, CancellationToken.None, TimeSpan.FromSeconds(20), out var g1) &&
+                   tracker.IsBusy && tracker.IsCurrent(g1.Generation),
+                "Initial display fit did not become busy");
+
+            // 2. Pause while G1 is still running -> IsBusy MUST clear immediately so resize timer is not stuck
+            tracker.Cancel(resetViewport: true);
+            Assert(!tracker.IsBusy && !tracker.IsCurrent(g1.Generation) && g1.Token.IsCancellationRequested && tracker.LastSyncedViewport is null,
+                "CancelPendingHyperVDisplayFit left fittingHyperVDisplay stuck true");
+
+            // 3. Resume & resize window -> G2 starts cleanly
+            Assert(tracker.TryBegin(vp2, CancellationToken.None, TimeSpan.FromSeconds(20), out var g2) &&
+                   tracker.IsBusy && tracker.IsCurrent(g2.Generation) && g2.Generation > g1.Generation,
+                "Post-pause resize could not start a new display fit");
+
+            // 4. Late finally/completion of G1 MUST NOT clear G2's busy state or overwrite viewport
+            tracker.RecordSyncedViewport(g1.Generation, vp1);
+            var g1Cleared = tracker.Complete(g1);
+            Assert(!g1Cleared && tracker.IsBusy && tracker.IsCurrent(g2.Generation) && tracker.LastSyncedViewport is null,
+                "Late completion of superseded fit request cleared or corrupted active request G2");
+
+            // 5. G2 records viewport and completes cleanly
+            tracker.RecordSyncedViewport(g2.Generation, vp2);
+            var g2Cleared = tracker.Complete(g2);
+            Assert(g2Cleared && !tracker.IsBusy && tracker.LastSyncedViewport == vp2,
+                "Active fit request G2 did not clear busy state on completion");
+
+            // 6. Switch to standalone window & return, and task switch: cancel clears busy and resets viewport for re-fit
+            Assert(tracker.TryBegin(vp3, CancellationToken.None, TimeSpan.FromSeconds(20), out var g3) && tracker.IsBusy,
+                "Standalone/task-switch pre-fit failed to start");
+            tracker.Cancel(resetViewport: true);
+            Assert(!tracker.IsBusy && tracker.LastSyncedViewport is null,
+                "Standalone/task-switch cancel did not clear busy state");
+            Assert(tracker.TryBegin(vp3, CancellationToken.None, TimeSpan.FromSeconds(20), out var g4) && tracker.IsBusy,
+                "Returning from standalone or switching task failed to re-fit");
+            Assert(!tracker.Complete(g3) && tracker.IsBusy, "Late g3 completion cleared g4");
+            Assert(tracker.Complete(g4) && !tracker.IsBusy, "g4 completion failed to clear busy");
+        }));
+        await Check("hyperv-display-cold-start-launch-verifier-cancel-and-no-reply-timeout", async () => {
+            var coldRoot = Path.Combine(root, "hv-cold-start"); Directory.CreateDirectory(coldRoot);
+            var st = new SessionState { VmId = Guid.NewGuid().ToString("D"), Options = new() { Root = coldRoot, PlatformId = "hyperv", VmName = "HV-ColdStart" } };
+            var sec = new Secrets { VmPassword = "ValidPassword!123" };
+
+            // Subcase A: Caller cancels during slow launch-verifier cold start -> display returns immediately,
+            // main management pipe is NOT aborted and stays on ConnectionSequence == 1.
+            var launchEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLaunchReply = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var mainRunningReplies = 0;
+            Task? mainServerA = null;
+            var hvA = new HyperV(
+                connectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeColdCancelMain-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    mainServerA = Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"running\""))
+                                    {
+                                        mainRunningReplies++;
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"True\",\"code\":\"OK\"}");
+                                    }
+                                    else if (line.Contains("\"launch-verifier\""))
+                                    {
+                                        launchEntered.TrySetResult();
+                                        await releaseLaunchReply.Task;
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"999999\",\"code\":\"OK\"}");
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    });
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayConnectFixture: (_, _) => Task.FromException<Stream>(new InvalidOperationException("Cancelled cold start should not connect display pipe")),
+                displayColdStartViaLauncher: true);
+            hvA.LaunchVerifierTimeout = TimeSpan.FromSeconds(4);
+
+            Assert(await hvA.IsRunning(st, CancellationToken.None) && hvA.HasManagementConnection && hvA.ConnectionSequence == 1,
+                "Cold-start subcase A failed initial connect");
+            using var cancelCts = new CancellationTokenSource();
+            var coldSyncTask = hvA.SyncGuestDisplayMode(st, sec, 1280, 720, cancelCts.Token);
+            await launchEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var swCancel = System.Diagnostics.Stopwatch.StartNew();
+            cancelCts.Cancel();
+            var cancelledFast = false;
+            try { await coldSyncTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch (OperationCanceledException) { cancelledFast = true; }
+            swCancel.Stop();
+            releaseLaunchReply.TrySetResult();
+            var mainAfterCancel = await hvA.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+            Assert(cancelledFast && swCancel.ElapsedMilliseconds < 1000 &&
+                   mainAfterCancel && hvA.HasManagementConnection && hvA.ConnectionSequence == 1 && mainRunningReplies == 2,
+                "Cancelling display cold-start launch-verifier aborted or disrupted healthy main management pipe");
+            await hvA.DisposeAsync();
+            if (mainServerA is not null) await mainServerA.WaitAsync(TimeSpan.FromSeconds(3));
+
+            // Subcase B: launch-verifier hangs with NO reply -> bounded LaunchVerifierTimeout unblocks display and
+            // releases main serial lock so subsequent management requests recover cleanly instead of deadlocking.
+            var hungEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hungRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var connectCount = 0;
+            var serverTasksB = new List<Task>();
+            var hvB = new HyperV(
+                connectFixture: async (_, ct) => {
+                    var seq = Interlocked.Increment(ref connectCount);
+                    var pipeName = "ClaudomeColdHangMain-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    serverTasksB.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"running\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"True\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"launch-verifier\"") && seq == 1)
+                                    {
+                                        hungEntered.TrySetResult();
+                                        await hungRelease.Task; // Never replies during timeout window
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayConnectFixture: (_, _) => Task.FromException<Stream>(new InvalidOperationException("Hung launch-verifier should not reach display pipe")),
+                displayColdStartViaLauncher: true);
+            hvB.LaunchVerifierTimeout = TimeSpan.FromMilliseconds(350);
+
+            Assert(await hvB.IsRunning(st, CancellationToken.None) && hvB.ConnectionSequence == 1,
+                "Cold-start subcase B failed initial connect");
+            var swHang = System.Diagnostics.Stopwatch.StartNew();
+            var timedOut = false;
+            try { await hvB.SyncGuestDisplayMode(st, sec, 1280, 720, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (SetupException ex) when (ex.Message.Contains("超时")) { timedOut = true; }
+            swHang.Stop();
+            var mainRecovered = await hvB.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+            hungRelease.TrySetResult();
+            Assert(timedOut && swHang.ElapsedMilliseconds < 2000 && mainRecovered && hvB.HasManagementConnection,
+                "Hung launch-verifier cold start failed to bound timeout or wedged main management calls");
+            await hvB.DisposeAsync();
+            await Task.WhenAll(serverTasksB).WaitAsync(TimeSpan.FromSeconds(3));
+        });
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));

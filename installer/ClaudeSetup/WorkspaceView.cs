@@ -9,6 +9,93 @@ using System.Windows.Threading;
 
 namespace ClaudeSetup;
 
+internal sealed class HyperVDisplayFitTracker
+{
+    internal sealed class Request
+    {
+        public long Generation { get; }
+        public CancellationTokenSource Cts { get; }
+        public CancellationToken Token => Cts.Token;
+        public Request(long generation, CancellationTokenSource cts) { Generation = generation; Cts = cts; }
+    }
+
+    private readonly object gate = new();
+    private long nextGeneration;
+    private long activeGeneration;
+    private CancellationTokenSource? activeCts;
+    private ConsolePixelSize? lastSyncedViewport;
+
+    public bool IsBusy => Volatile.Read(ref activeGeneration) != 0;
+    public long ActiveGeneration => Volatile.Read(ref activeGeneration);
+    public ConsolePixelSize? LastSyncedViewport
+    {
+        get { lock (gate) return lastSyncedViewport; }
+    }
+
+    public bool IsCurrent(long generation) => generation != 0 && Volatile.Read(ref activeGeneration) == generation;
+
+    public bool TryBegin(ConsolePixelSize viewport, CancellationToken lifetime, TimeSpan timeout, out Request request)
+    {
+        CancellationTokenSource? previousCts;
+        lock (gate)
+        {
+            if (activeGeneration != 0 && lastSyncedViewport == viewport)
+            {
+                request = null!;
+                return false;
+            }
+            var generation = ++nextGeneration;
+            previousCts = activeCts;
+            var localCts = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+            localCts.CancelAfter(timeout);
+            activeCts = localCts;
+            Volatile.Write(ref activeGeneration, generation);
+            request = new Request(generation, localCts);
+        }
+        try { previousCts?.Cancel(); } catch { }
+        return true;
+    }
+
+    public void RecordSyncedViewport(long generation, ConsolePixelSize viewport)
+    {
+        lock (gate)
+        {
+            if (activeGeneration == generation)
+                lastSyncedViewport = viewport;
+        }
+    }
+
+    public void Cancel(bool resetViewport = false)
+    {
+        CancellationTokenSource? previousCts;
+        lock (gate)
+        {
+            nextGeneration++;
+            Volatile.Write(ref activeGeneration, 0);
+            previousCts = activeCts;
+            activeCts = null;
+            if (resetViewport) lastSyncedViewport = null;
+        }
+        try { previousCts?.Cancel(); } catch { }
+    }
+
+    public bool Complete(Request request)
+    {
+        var clearedActive = false;
+        lock (gate)
+        {
+            if (activeGeneration == request.Generation)
+            {
+                Volatile.Write(ref activeGeneration, 0);
+                if (ReferenceEquals(activeCts, request.Cts)) activeCts = null;
+                clearedActive = true;
+            }
+        }
+        try { request.Cts.Dispose(); } catch { }
+        return clearedActive;
+    }
+}
+
 public sealed partial class SetupWindow
 {
     private Grid? desktopView;
@@ -35,10 +122,9 @@ public sealed partial class SetupWindow
     private string latestTaskActivity="",latestTaskDownload="";
     private bool taskFaulted, installationNetworkFailed;
     private NativeConsoleHost? consoleHost;
-    private bool fittingVBoxDisplay, fittingHyperVDisplay;
-    private ConsolePixelSize? lastHyperVSyncedViewport;
-    private long hyperVFitGeneration;
-    private CancellationTokenSource? hyperVFitCts;
+    private bool fittingVBoxDisplay;
+    private readonly HyperVDisplayFitTracker hyperVDisplayFit = new();
+    private bool fittingHyperVDisplay => hyperVDisplayFit.IsBusy;
     private Button? openStandaloneHyperV, topStandaloneHyperV;
     private bool waitingForGuestFrame;
     private DateTime? waitingForGuestFrameSinceUtc;
@@ -583,40 +669,31 @@ public sealed partial class SetupWindow
     }
     private void CancelPendingHyperVDisplayFit(bool resetViewport = false)
     {
-        Interlocked.Increment(ref hyperVFitGeneration);
-        try { hyperVFitCts?.Cancel(); } catch { }
-        hyperVFitCts?.Dispose();
-        hyperVFitCts = null;
-        if (resetViewport) lastHyperVSyncedViewport = null;
+        hyperVDisplayFit.Cancel(resetViewport);
+        UpdateDesktopActivity();
     }
 
     private async Task FitHyperVConsole(NativeConsoleHost host)
     {
         if (lastConsoleWindow is not { } window || host.GuestWindow != window.Handle) return;
         var contentArea = host.GetVmConnectContentViewport();
-        if (fittingHyperVDisplay && lastHyperVSyncedViewport == contentArea) return;
         var vmId = state.VmId;
-        var generation = Interlocked.Increment(ref hyperVFitGeneration);
-        try { hyperVFitCts?.Cancel(); } catch { }
-        hyperVFitCts?.Dispose();
         var lifetime = desktopConnectionCancellation?.Token ?? CancellationToken.None;
-        var localCts = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
-        localCts.CancelAfter(TimeSpan.FromSeconds(20));
-        hyperVFitCts = localCts;
-        var token = localCts.Token;
-        fittingHyperVDisplay = true;
+        if (!hyperVDisplayFit.TryBegin(contentArea, lifetime, TimeSpan.FromSeconds(20), out var fitRequest)) return;
+        var generation = fitRequest.Generation;
+        var token = fitRequest.Token;
         UpdateDesktopActivity();
         try
         {
             var isStale = () => token.IsCancellationRequested || lifetime.IsCancellationRequested ||
-                Volatile.Read(ref hyperVFitGeneration) != generation ||
+                !hyperVDisplayFit.IsCurrent(generation) ||
                 section != 7 || state.VmId != vmId || host != consoleHost ||
                 !host.IsAttached || host.GuestWindow != window.Handle ||
                 state.Status.Contains("暂停");
 
             HyperVDisplaySyncResult? synced = null;
             if (!isStale() && state.Completed.Contains("guest-ready") &&
-                lastHyperVSyncedViewport != contentArea &&
+                hyperVDisplayFit.LastSyncedViewport != contentArea &&
                 BoundaryRuntime.BackendFor(state) is HyperV activeHv &&
                 activeHv.HasManagementConnection)
             {
@@ -627,7 +704,7 @@ public sealed partial class SetupWindow
                     {
                         synced = await activeHv.SyncGuestDisplayMode(state, login, contentArea.Width, contentArea.Height, token);
                         if (!isStale() && synced is not null)
-                            lastHyperVSyncedViewport = contentArea;
+                            hyperVDisplayFit.RecordSyncedViewport(generation, contentArea);
                     }
                     catch (OperationCanceledException) when (isStale()) { return; }
                     catch { }
@@ -679,19 +756,14 @@ public sealed partial class SetupWindow
         }
         catch (OperationCanceledException)
         {
-            if (!lifetime.IsCancellationRequested && Volatile.Read(ref hyperVFitGeneration) == generation &&
+            if (!lifetime.IsCancellationRequested && hyperVDisplayFit.IsCurrent(generation) &&
                 section == 7 && state.VmId == vmId && host.IsAttached && host.GuestWindow == window.Handle)
                 SetDesktopConnectionStatus(HyperVZoomFallbackMessage(false));
         }
         finally
         {
-            if (Volatile.Read(ref hyperVFitGeneration) == generation)
-            {
-                fittingHyperVDisplay = false;
-                if (ReferenceEquals(hyperVFitCts, localCts)) hyperVFitCts = null;
-                localCts.Dispose();
+            if (hyperVDisplayFit.Complete(fitRequest))
                 UpdateDesktopActivity();
-            }
         }
     }
 

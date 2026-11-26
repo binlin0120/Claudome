@@ -186,28 +186,29 @@ public static class ResolverTests
                         throw new NodeProbeException("TCP 已通，但协议握手失败（PROXY_TLS_HANDSHAKE）");
                     return Task.FromResult(new NodeProbeResult("203.0.113.10", "KR", "Asia/Seoul", "Korea Standard Time", 88, true,
                         "物理网卡 WLAN", report.Summary, "TCP 21 ms · 协议握手成功", "api.ip.sb · 88 ms", report.HostNetwork.Summary,
-                        report.Addresses, report.Addresses, "8.8.8.8:443"));
+                        report.Addresses, report.Addresses, VerifiedConnectedEndpoint: null, PreProbeEndpoint: "8.8.8.8:443"));
                 }, ct));
             Assert(tried.Count == 2 &&
                 bound.FirstHopAddresses.SequenceEqual(["8.8.4.4", "8.8.8.8"]) &&
                 bound.ExitAddresses.SequenceEqual(["8.8.4.4", "8.8.8.8"]) &&
                 bound.Summary.Contains("候选组 2 个") &&
-                bound.Summary.Contains("实连端点 8.8.8.8:443") &&
+                bound.Summary.Contains("TCP 预探测 8.8.8.8:443") &&
+                !bound.Summary.Contains("实连端点 8.8.8.8:443") &&
                 bound.Summary.Contains("203.0.113.10/KR") &&
                 bound.Summary.Contains("协议/出口失败"),
-                "HyperV deploy/resume/daily entry failed to advance candidate group or report connected endpoint distinctly");
+                "HyperV deploy/resume/daily entry failed to advance candidate group or separate pre-probe IP from actual proxy peer");
 
-            // Double-hop preserves separate validated public first-hop and exit candidate groups
+            // Double-hop with single-IP bound first hop reports bound connected endpoint accurately
             var doubleHop = await Deployment.ResolveOrBindEndpointsAsync(
                 upstreamProxy, finalProxy, hasUpstream: true,
                 EndpointResolutionStrategy.HyperVStandalone, pinnedEndpoints: null, CancellationToken.None,
                 options: opts, upstreamNode: upstreamProxy,
                 candidateVerifier: (_, _, _, _, _) => Task.FromResult(new NodeProbeResult("203.0.113.20", "JP", "Asia/Tokyo", "Tokyo Standard Time", 95, true,
                     "物理网卡 WLAN", "采用 直连 DoH (AliDNS)", "TCP 20 ms · 握手成功", "api.ip.sb · 95 ms", plan.HostNetwork.Summary,
-                    ["8.8.8.8"], ["9.9.9.9"], "8.8.8.8:443")));
+                    ["8.8.8.8"], ["9.9.9.9"], VerifiedConnectedEndpoint: "8.8.8.8:443", PreProbeEndpoint: "8.8.8.8:443")));
             Assert(doubleHop.FirstHopAddresses.SequenceEqual(["8.8.8.8"]) &&
                 doubleHop.ExitAddresses.SequenceEqual(["9.9.9.9"]) &&
-                doubleHop.Summary.Contains("实连端点 8.8.8.8:443"),
+                doubleHop.Summary.Contains("已绑定实连端点 8.8.8.8:443"),
                 "HyperV double-hop failed to preserve distinct first-hop and exit endpoint groups");
 
             // Private/non-public endpoint returned by candidate verifier must still be rejected by IsolationPolicy
@@ -242,5 +243,146 @@ public static class ResolverTests
             Assert(defaultResolverCalls == 1 && defaultVerifierCalls == 0 && defaultBound.FirstHopAddresses.SequenceEqual(["9.9.9.9"]),
                 "Default strategy unexpectedly entered HyperVStandalone candidate verification");
         });
+        await check("hyperv-single-endpoint-binding-distinguishes-preprobe-from-actual-proxy-peer", async () => {
+            // Same candidate group contains two IPs [1.1.1.1, 1.0.0.1]; TCP pre-probe hit 1.1.1.1,
+            // but proxy protocol handshake fails on 1.1.1.1 and succeeds ONLY on 1.0.0.1.
+            var hostNet = new HostNetworkContext(true, false, ["Meta"], "检测到宿主 TUN（Meta）");
+            var sameGroupPlan = new EndpointCandidatePlan(
+                [new("宿主机系统 DNS", ["1.1.1.1", "1.0.0.1"], new TcpReachabilityResult(true, "1.1.1.1", 10, "虚拟 TUN/代理接口 Meta"))],
+                [],
+                hostNet);
+            var expanded = NodeExitProbe.ExpandSingleEndpointPlan(sameGroupPlan);
+            Assert(expanded.Groups.Length == 2 &&
+                expanded.Groups[0].Addresses.SequenceEqual(["1.1.1.1"]) &&
+                expanded.Groups[1].Addresses.SequenceEqual(["1.0.0.1"]),
+                "ExpandSingleEndpointPlan did not split same-group IPs into single-IP bound candidates in pre-probe-first order");
+
+            var triedSingleIps = new List<string>();
+            var proxy = new ProxyNode("SameGroup", "trojan", "node.example", 443, "{}");
+            var opts = new SetupOptions { PlatformId = "hyperv", Root = System.IO.Path.GetTempPath() };
+            var bound = await Deployment.ResolveOrBindEndpointsAsync(
+                proxy, proxy, hasUpstream: false,
+                EndpointResolutionStrategy.HyperVStandalone, pinnedEndpoints: null, CancellationToken.None,
+                options: opts, upstreamNode: null,
+                candidateVerifier: (_, _, _, _, ct) => NodeExitProbe.ExecuteAcrossCandidatePlanAsync(expanded, report => {
+                    Assert(report.Addresses.Length == 1, "Single-IP expanded candidate must bind exactly one IP");
+                    var boundIp = report.Addresses[0];
+                    triedSingleIps.Add(boundIp);
+                    if (boundIp == "1.1.1.1")
+                        throw new NodeProbeException("TCP 预探测命中 1.1.1.1，但代理协议握手失败");
+                    return Task.FromResult(new NodeProbeResult("203.0.113.55", "SG", "Asia/Singapore", "Singapore Standard Time", 66, true,
+                        "物理网卡 WLAN", report.Summary, $"单点绑定代理对端 {boundIp}:443", "api.ip.sb · 66 ms", hostNet.Summary,
+                        report.Addresses, report.Addresses,
+                        VerifiedConnectedEndpoint: $"{boundIp}:443",
+                        PreProbeEndpoint: $"{report.FirstHopReachability!.ConnectedIp}:443"));
+                }, ct));
+            Assert(triedSingleIps.SequenceEqual(["1.1.1.1", "1.0.0.1"]) &&
+                bound.FirstHopAddresses.SequenceEqual(["1.0.0.1"]) &&
+                bound.Summary.Contains("已绑定实连端点 1.0.0.1:443") &&
+                bound.Summary.Contains("TCP 预探测 1.1.1.1:443") &&
+                !bound.Summary.Contains("已绑定实连端点 1.1.1.1:443"),
+                "Same-group two-IP sample misattributed TCP pre-probe IP 1.1.1.1 as the actual proxy connected endpoint");
+
+            // Even if a multi-IP PinnedRouteEndpoints passes a pre-probe ConnectedEndpoint, it MUST NOT be labeled as bound proxy peer.
+            var multiPinned = new Deployment.PinnedRouteEndpoints(["1.1.1.1", "1.0.0.1"], ["1.1.1.1", "1.0.0.1"], "多IP样本",
+                ConnectedEndpoint: "1.1.1.1:443", PreProbeEndpoint: "1.1.1.1:443");
+            var multiBound = await Deployment.ResolveOrBindEndpointsAsync(
+                proxy, proxy, hasUpstream: false,
+                EndpointResolutionStrategy.HyperVStandalone, multiPinned, CancellationToken.None);
+            Assert(!multiBound.Summary.Contains("已绑定实连端点") && multiBound.Summary.Contains("TCP 预探测 1.1.1.1:443"),
+                "Multi-IP pinned group falsely labeled pre-probe IP as bound connected endpoint");
+        });
+        await check("hyperv-geo-api-429-timeout-degrades-to-pending-while-real-protocol-failure-blocks-and-active-binding-reused", async () => {
+            Uri[] geoUrls = [new("https://geo-a.example/ip"), new("https://geo-b.example/ip"), new("https://geo-c.example/ip")];
+            Uri[] protoUrls = [new("https://proto.example/generate_204")];
+
+            // Case 1: All 3rd-party geo endpoints return HTTP 429 -> allowUnverifiedExit=true succeeds as ExitPendingVerification
+            // while allowUnverifiedExit=false (interactive UI lookup) still throws NodeProbeException.
+            using var client429 = new HttpClient(new StubHandler(req => Task.FromResult(
+                new HttpResponseMessage(req.RequestUri!.Host == "proto.example" ? HttpStatusCode.NoContent : HttpStatusCode.TooManyRequests))));
+            var res429 = await NodeExitProbe.ProbeEndpoints(client429, geoUrls, new NodeProbeCooldown(), CancellationToken.None,
+                allowUnverifiedExit: true, protocolProbeEndpoints: protoUrls, requestTimeout: TimeSpan.FromSeconds(2));
+            Assert(!res429.ExitVerified && res429.ExitIp == "" &&
+                res429.TargetSummary.Contains("出口待核验") && (res429.ExitPendingReason?.Contains("429") == true),
+                "All-429 geo API failure blocked recovery instead of degrading to pending exit verification");
+            var strict429Threw = false;
+            try
+            {
+                await NodeExitProbe.ProbeEndpoints(client429, geoUrls, new NodeProbeCooldown(), CancellationToken.None,
+                    allowUnverifiedExit: false, protocolProbeEndpoints: protoUrls, requestTimeout: TimeSpan.FromSeconds(2));
+            }
+            catch (NodeProbeException) { strict429Threw = true; }
+            Assert(strict429Threw, "Interactive strict geo probe should still throw NodeProbeException on all-429");
+
+            // Case 2: All 3rd-party geo endpoints time out, but non-geo protocol probe succeeds -> degrades to ExitPendingVerification
+            // and ResolveOrBindEndpointsAsync preserves validated public IP + reports 出口待核验.
+            using var clientGeoTimeout = new HttpClient(new StubHandler(async (req, ct) => {
+                if (req.RequestUri!.Host == "proto.example")
+                    return new HttpResponseMessage(HttpStatusCode.NoContent);
+                await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                return new HttpResponseMessage(HttpStatusCode.OK);
+            }));
+            var resTimeout = await NodeExitProbe.ProbeEndpoints(clientGeoTimeout, geoUrls, new NodeProbeCooldown(), CancellationToken.None,
+                allowUnverifiedExit: true, protocolProbeEndpoints: protoUrls, requestTimeout: TimeSpan.FromMilliseconds(100));
+            Assert(!resTimeout.ExitVerified && resTimeout.TargetSummary.Contains("出口待核验") &&
+                (resTimeout.ExitPendingReason?.Contains("超时") == true),
+                "Geo target timeout with healthy proxy protocol failed to degrade to pending exit verification");
+
+            var proxyNode = NetworkImport.Parse("socks5://node.example:1080#NodeA").Nodes.Single();
+            var opts = new SetupOptions { PlatformId = "hyperv", Root = System.IO.Path.GetTempPath() };
+            var boundPending = await Deployment.ResolveOrBindEndpointsAsync(
+                proxyNode, proxyNode, hasUpstream: false,
+                EndpointResolutionStrategy.HyperVStandalone, pinnedEndpoints: null, CancellationToken.None,
+                options: opts, upstreamNode: null,
+                candidateVerifier: (_, _, _, _, _) => Task.FromResult(resTimeout with
+                {
+                    ResolutionSummary = "候选组 1/1（直连 DoH · 1 个公网 IPv4）",
+                    HostNetworkSummary = "未检测到宿主 TUN",
+                    VerifiedFirstHopAddresses = ["8.8.8.8"],
+                    VerifiedExitAddresses = ["8.8.8.8"],
+                    VerifiedConnectedEndpoint = "8.8.8.8:1080",
+                    PreProbeEndpoint = "8.8.8.8:1080"
+                }));
+            Assert(boundPending.FirstHopAddresses.SequenceEqual(["8.8.8.8"]) &&
+                boundPending.Summary.Contains("已绑定实连端点 8.8.8.8:1080") &&
+                boundPending.Summary.Contains("出口待核验"),
+                "ResolveOrBindEndpointsAsync did not preserve bound endpoint and pending-exit label when geo APIs unavailable");
+
+            // Case 3: Real node protocol failure (both geo and protocol probe fail transport/timeout) MUST still block!
+            using var clientProtoFail = new HttpClient(new StubHandler(_ => Task.FromException<HttpResponseMessage>(
+                new HttpRequestException("proxy TLS handshake failed"))));
+            var realFailureBlocked = false;
+            try
+            {
+                await NodeExitProbe.ProbeEndpoints(clientProtoFail, geoUrls, new NodeProbeCooldown(), CancellationToken.None,
+                    allowUnverifiedExit: true, protocolProbeEndpoints: protoUrls, requestTimeout: TimeSpan.FromMilliseconds(200));
+            }
+            catch (NodeProbeException) { realFailureBlocked = true; }
+            Assert(realFailureBlocked, "Real node protocol failure was not blocked when allowUnverifiedExit=true");
+
+            // Case 4: Existing task with active trusted binding matching saved CoreConfigSha256 reuses it directly
+            // without calling external geo APIs, while route change returns null and private IP still blocks.
+            var activeConfig = NetworkImport.CoreConfig(proxyNode, ["8.8.8.8"], "ClaudomeBridge", null, ["8.8.8.8"]);
+            var activeHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(activeConfig))).ToLowerInvariant();
+            var st = new SessionState { VmId = Guid.NewGuid().ToString("D"), CoreConfigSha256 = activeHash, Options = opts };
+            var reused = Deployment.TryReuseActiveTrustedBinding(st, proxyNode, null, ["8.8.8.8"], ["8.8.8.8"]);
+            Assert(reused is { } hit && hit.FirstHopAddresses.SequenceEqual(["8.8.8.8"]) && hit.Summary.Contains("优先复核当前受控连接"),
+                "Existing task did not reuse matching active trusted binding");
+            var otherNode = NetworkImport.Parse("socks5://other.example:1080#NodeB").Nodes.Single();
+            Assert(Deployment.TryReuseActiveTrustedBinding(st, otherNode, null, ["8.8.8.8"], ["8.8.8.8"]) is null,
+                "Changed route unexpectedly reused previous task's active binding");
+            var privateBlocked = false;
+            try { _ = Deployment.TryReuseActiveTrustedBinding(st, proxyNode, null, ["127.0.0.1"], ["127.0.0.1"]); }
+            catch (SetupException) { privateBlocked = true; }
+            Assert(privateBlocked, "Private IP in active binding bypassed IsolationPolicy");
+        });
+    }
+
+    private sealed class StubHandler : HttpMessageHandler
+    {
+        private readonly Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> callback;
+        public StubHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> callback) => this.callback = (r, _) => callback(r);
+        public StubHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> callback) => this.callback = callback;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => callback(request, cancellationToken);
     }
 }

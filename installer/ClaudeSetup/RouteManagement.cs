@@ -530,7 +530,8 @@ public sealed partial class SetupWindow
                 result.VerifiedFirstHopAddresses,
                 result.VerifiedExitAddresses is { Length: > 0 } ? result.VerifiedExitAddresses : result.VerifiedFirstHopAddresses,
                 string.IsNullOrWhiteSpace(result.ResolutionSummary) ? "候选测速已核验" : result.ResolutionSummary,
-                result.VerifiedConnectedEndpoint)
+                result.VerifiedConnectedEndpoint,
+                result.PreProbeEndpoint)
             : null;
         candidate.BackupRoutes = [.. (pendingBackupRoutes ??
             (restoreDraft ? candidate.BackupRoutes : previous.BackupRoutes))];

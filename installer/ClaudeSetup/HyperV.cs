@@ -40,19 +40,28 @@ public sealed class HyperV : IVmBackend
     private readonly bool displayOnly;
     private readonly Func<SetupOptions, CancellationToken, Task<Stream>>? connectFixture;
     private readonly Func<SetupOptions, CancellationToken, Task<Stream>>? displayConnectFixture;
+    private readonly bool displayColdStartViaLauncher;
     private HyperV? verifier;
     private HyperV? displayHelper;
     private readonly IProgress<InstallationProgress>? progress;
+    internal TimeSpan LaunchVerifierTimeout { get; set; } = TimeSpan.FromSeconds(8);
     public HyperV(IProgress<InstallationProgress>? progress = null) { this.progress = progress; }
     internal HyperV(Func<SetupOptions, CancellationToken, Task<Stream>> connectFixture, IProgress<InstallationProgress>? progress = null,
-        Func<SetupOptions, CancellationToken, Task<Stream>>? displayConnectFixture = null, bool displayOnly = false)
+        Func<SetupOptions, CancellationToken, Task<Stream>>? displayConnectFixture = null, bool displayOnly = false,
+        bool displayColdStartViaLauncher = false)
     {
         this.connectFixture = connectFixture;
         this.displayConnectFixture = displayConnectFixture;
         this.displayOnly = displayOnly;
+        this.displayColdStartViaLauncher = displayColdStartViaLauncher;
         this.progress = progress;
     }
-    private HyperV(HyperV launcher, bool displayOnly = false) { this.launcher = launcher; this.displayOnly = displayOnly; }
+    private HyperV(HyperV launcher, bool displayOnly = false, Func<SetupOptions, CancellationToken, Task<Stream>>? connectFixture = null)
+    {
+        this.launcher = launcher;
+        this.displayOnly = displayOnly;
+        this.connectFixture = connectFixture;
+    }
     private Stream? pipe;
     private StreamReader? reader;
     private StreamWriter? writer;
@@ -70,11 +79,12 @@ public sealed class HyperV : IVmBackend
         "ready" or "running" or "windows-install-state" or "windows-install-diagnose" or
         "clipboard-status" or "boundary-verify" or "ensure-checkpoint-policy" or "sync-display";
 
-    private static TimeSpan? TimeoutForOperation(string operation) => operation switch
+    private TimeSpan? TimeoutForOperation(string operation) => operation switch
     {
         "ready" => TimeSpan.FromSeconds(30),
         "repair-guest-session" => TimeSpan.FromSeconds(90),
         "sync-display" => TimeSpan.FromSeconds(15),
+        "launch-verifier" => LaunchVerifierTimeout,
         _ when IsCancellableReadOperation(operation) => TimeSpan.FromSeconds(30),
         _ => null
     };
@@ -109,6 +119,12 @@ public sealed class HyperV : IVmBackend
 
         if (connectFixture is not null)
         {
+            if (launcher is not null)
+            {
+                var fixturePipe = "ClaudeSetup-" + Guid.NewGuid().ToString("N");
+                var fixtureScript = Paths.Under(o.Private, "HyperVWorker-fixture.ps1");
+                _ = await launcher.LaunchChildWorkerAsync(o, fixturePipe, fixtureScript, token);
+            }
             pipe = await connectFixture(o, token);
             reader = new(pipe, Encoding.UTF8, false, 4096, true);
             writer = new(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
@@ -131,16 +147,98 @@ public sealed class HyperV : IVmBackend
         workerFile = new PrivateFile(o.Private, Catalog.EmbeddedText("HyperVWorker.ps1"), ".ps1");
         var start = new ProcessStartInfo(Path.Combine(runtime, "pwsh.exe")) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
         foreach (var arg in new[] { "-NoLogo", "-NoProfile", "-File", workerFile.FileName, "-PipeName", name }) start.ArgumentList.Add(arg);
-        if(launcher is null) worker = Process.Start(start) ?? throw new SetupException("未启动 Hyper-V 管理组件，请确认管理员提示。");
-        else {
-            var id=await launcher.Call(o,"launch-verifier",new {pipeName=name,scriptPath=workerFile.FileName},token);
-            worker=Process.GetProcessById(int.Parse(id));
+        if (launcher is null) worker = Process.Start(start) ?? throw new SetupException("未启动 Hyper-V 管理组件，请确认管理员提示。");
+        else
+        {
+            var id = await launcher.LaunchChildWorkerAsync(o, name, workerFile.FileName, token);
+            worker = Process.GetProcessById(int.Parse(id));
         }
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromMinutes(3));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(displayOnly ? TimeSpan.FromSeconds(15) : TimeSpan.FromMinutes(3));
         await serverPipe.WaitForConnectionAsync(timeout.Token);
         reader = new(pipe, Encoding.UTF8, false, 4096, true); writer = new(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
         ConnectionSequence++;
         await CallLocked(o, "init", new { options = o, verificationOnly = launcher is not null && !displayOnly, displayOnly }, token);
+    }
+
+    internal async Task<string> LaunchChildWorkerAsync(SetupOptions options, string pipeName, string scriptPath, CancellationToken callerToken)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+        waitCts.CancelAfter(LaunchVerifierTimeout);
+        try
+        {
+            await serial.WaitAsync(waitCts.Token);
+        }
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("已取消 Hyper-V 子通道启动，主管理通道保持可用。", callerToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new SetupException("等待主管理通道启动显示子通道超时，主管理通道保持未中断。");
+        }
+
+        // Once the main pipe lock is acquired, do NOT bind callerToken to abort the main pipe on cancel.
+        // The RPC itself is bounded by LaunchVerifierTimeout so a hung worker cannot wedge main management calls forever,
+        // while a caller cancel returns immediately without tearing down a healthy main management pipe.
+        var rpcTask = RunLaunchVerifierLockedAsync(options, pipeName, scriptPath);
+        try
+        {
+            return await rpcTask.WaitAsync(waitCts.Token);
+        }
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested)
+        {
+            _ = CleanupLateLaunchedChildAsync(rpcTask);
+            throw new OperationCanceledException("已取消 Hyper-V 子通道启动，主管理通道保持可用。", callerToken);
+        }
+        catch (OperationCanceledException)
+        {
+            _ = CleanupLateLaunchedChildAsync(rpcTask);
+            throw new SetupException("启动 Hyper-V 显示子通道超时，已放弃本次冷启动。");
+        }
+        catch (TimeoutException)
+        {
+            _ = CleanupLateLaunchedChildAsync(rpcTask);
+            throw new SetupException("启动 Hyper-V 显示子通道超时，已放弃本次冷启动。");
+        }
+    }
+
+    private async Task<string> RunLaunchVerifierLockedAsync(SetupOptions options, string pipeName, string scriptPath)
+    {
+        try
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+            if (pipe is null || faultedOrAborted)
+            {
+                using var connectCts = new CancellationTokenSource(LaunchVerifierTimeout);
+                await Connect(options, connectCts.Token);
+            }
+            return await CallLocked(options, "launch-verifier", new { pipeName, scriptPath }, CancellationToken.None);
+        }
+        finally
+        {
+            try { if (Volatile.Read(ref disposed) == 0) serial.Release(); }
+            catch (ObjectDisposedException) { }
+        }
+    }
+
+    private static async Task CleanupLateLaunchedChildAsync(Task<string> rpcTask)
+    {
+        try
+        {
+            var idText = await rpcTask;
+            if (int.TryParse(idText, out var pid) && pid > 0)
+            {
+                try
+                {
+                    using var proc = Process.GetProcessById(pid);
+                    if (!proc.HasExited) proc.Kill(entireProcessTree: true);
+                }
+                catch { }
+            }
+        }
+        catch { }
     }
     private async Task<string> Call(SetupOptions options, string operation, object? data, CancellationToken token)
     {
@@ -201,6 +299,8 @@ public sealed class HyperV : IVmBackend
             catch (OperationCanceledException) when (timeoutCts?.IsCancellationRequested == true)
             {
                 AbortPipeUnsafely();
+                if (operation == "launch-verifier")
+                    throw new SetupException("启动 Hyper-V 显示子通道超时，已放弃本次冷启动。");
                 if (operation is "ready" or "repair-guest-session")
                     throw new HandoffException(new("Hyper-V 来宾初始化检查超时",
                         [operation == "ready" ? "来宾 PowerShell Direct 未在 30 秒内返回状态。" : "来宾会话修复未在 90 秒内返回结果。",
@@ -520,7 +620,9 @@ public sealed class HyperV : IVmBackend
         // Always isolate display sync onto a dedicated display-only pipe so a timeout or user cancel
         // can NEVER abort or disrupt the shared main management connection.
         var helper = displayHelper ??= (displayConnectFixture is not null
-            ? new HyperV(displayConnectFixture, displayOnly: true)
+            ? (displayColdStartViaLauncher
+                ? new HyperV(this, displayOnly: true, connectFixture: displayConnectFixture)
+                : new HyperV(displayConnectFixture, displayOnly: true))
             : new HyperV(this, displayOnly: true));
         try
         {

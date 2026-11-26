@@ -254,7 +254,48 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             await downloader.Get(resource, o.Cache, downloads, token);
         }
     }
-    public sealed record PinnedRouteEndpoints(string[] FirstHopAddresses, string[] ExitAddresses, string SourceSummary, string? ConnectedEndpoint = null);
+    public sealed record PinnedRouteEndpoints(
+        string[] FirstHopAddresses,
+        string[] ExitAddresses,
+        string SourceSummary,
+        string? ConnectedEndpoint = null,
+        string? PreProbeEndpoint = null);
+
+    internal static string? ValidatedSingleBoundEndpoint(string[] firstHopAddresses, string? claimedConnectedEndpoint) =>
+        firstHopAddresses.Length == 1 &&
+        !string.IsNullOrWhiteSpace(claimedConnectedEndpoint) &&
+        claimedConnectedEndpoint.StartsWith(firstHopAddresses[0] + ":", StringComparison.Ordinal)
+            ? claimedConnectedEndpoint
+            : null;
+
+    internal static (string[] FirstHopAddresses, string[] ExitAddresses, string Summary)? TryReuseActiveTrustedBinding(
+        SessionState state,
+        ProxyNode finalNode,
+        ProxyNode? upstreamNode,
+        string[] activeFirstHopAddresses,
+        string[] activeExitAddresses)
+    {
+        if (activeFirstHopAddresses.Length == 0 || string.IsNullOrWhiteSpace(state.CoreConfigSha256))
+            return null;
+        var first = IsolationPolicy.ValidateEndpoints(activeFirstHopAddresses).Order(StringComparer.Ordinal).ToArray();
+        var exit = upstreamNode is not null
+            ? IsolationPolicy.ValidateEndpoints(activeExitAddresses.Length > 0 ? activeExitAddresses : first).Order(StringComparer.Ordinal).ToArray()
+            : first;
+        try
+        {
+            var config = NetworkImport.CoreConfig(finalNode, first,
+                state.Options.PlatformId == "virtualbox" ? null : "ClaudomeBridge", upstreamNode, exit);
+            var configHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(config)));
+            if (!configHash.Equals(state.CoreConfigSha256, StringComparison.OrdinalIgnoreCase))
+                return null;
+            var bindingLabel = first.Length == 1 ? $"单点可信绑定 {first[0]}" : $"当前可信绑定 {first.Length} 个公网 IPv4";
+            return (first, exit, $"优先复核当前受控连接（{bindingLabel}，出口沿用边界与来宾实测核验）");
+        }
+        catch (SetupException)
+        {
+            return null;
+        }
+    }
 
     internal static async Task<(string[] FirstHopAddresses, string[] ExitAddresses, string Summary)> ResolveOrBindEndpointsAsync(
         ProxyNode firstHop,
@@ -266,7 +307,9 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         SetupOptions? options = null,
         ProxyNode? upstreamNode = null,
         Func<string, int, EndpointResolutionStrategy, CancellationToken, Task<EndpointResolutionReport>>? resolver = null,
-        Func<SetupOptions, ProxyNode, ProxyNode?, EndpointResolutionStrategy, CancellationToken, Task<NodeProbeResult>>? candidateVerifier = null)
+        Func<SetupOptions, ProxyNode, ProxyNode?, EndpointResolutionStrategy, CancellationToken, Task<NodeProbeResult>>? candidateVerifier = null,
+        string? preferredCoreConfigSha256 = null,
+        string? physicalInterfaceForConfigHash = null)
     {
         if (pinnedEndpoints is not null)
         {
@@ -274,12 +317,21 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             var exitPinned = hasUpstream
                 ? IsolationPolicy.ValidateEndpoints(pinnedEndpoints.ExitAddresses).Order(StringComparer.Ordinal).ToArray()
                 : firstPinned;
-            var connectedNote = string.IsNullOrEmpty(pinnedEndpoints.ConnectedEndpoint) ? "" : $" · 实连端点 {pinnedEndpoints.ConnectedEndpoint}";
-            return (firstPinned, exitPinned, $"沿用刚核验通过的端点（候选组 {firstPinned.Length} 个{connectedNote}；{pinnedEndpoints.SourceSummary}）");
+            var boundEndpoint = ValidatedSingleBoundEndpoint(firstPinned, pinnedEndpoints.ConnectedEndpoint);
+            var preProbe = string.IsNullOrWhiteSpace(pinnedEndpoints.PreProbeEndpoint) ? null : pinnedEndpoints.PreProbeEndpoint;
+            var endpointNote = boundEndpoint is not null
+                ? $" · 已绑定实连端点 {boundEndpoint}" + (preProbe is not null && preProbe != boundEndpoint ? $"（TCP 预探测 {preProbe}）" : "")
+                : preProbe is not null
+                    ? $" · TCP 预探测 {preProbe}（未单点绑定代理对端）"
+                    : "";
+            return (firstPinned, exitPinned, $"沿用刚核验通过的端点（候选组 {firstPinned.Length} 个{endpointNote}；{pinnedEndpoints.SourceSummary}）");
         }
         if (strategy == EndpointResolutionStrategy.HyperVStandalone && options is not null)
         {
-            var verify = candidateVerifier ?? ((o, sel, up, st, ct) => NodeExitProbe.ProbeAsync(o, sel, up, ct, strategy: st));
+            var verify = candidateVerifier ?? ((o, sel, up, st, ct) => NodeExitProbe.ProbeAsync(
+                o, sel, up, ct, strategy: st, allowUnverifiedExit: true,
+                preferredCoreConfigSha256: preferredCoreConfigSha256,
+                physicalInterfaceForConfigHash: physicalInterfaceForConfigHash));
             var verified = await verify(options, finalNode, upstreamNode, strategy, token);
             if (verified.VerifiedFirstHopAddresses is not { Length: > 0 })
                 throw new SetupException("节点候选组未返回已核验的公网 IPv4 端点。");
@@ -287,9 +339,18 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             var exitVerified = hasUpstream
                 ? IsolationPolicy.ValidateEndpoints(verified.VerifiedExitAddresses ?? []).Order(StringComparer.Ordinal).ToArray()
                 : firstVerified;
-            var connectedNote = string.IsNullOrEmpty(verified.VerifiedConnectedEndpoint) ? "" : $" · 实连端点 {verified.VerifiedConnectedEndpoint}";
+            var boundEndpoint = ValidatedSingleBoundEndpoint(firstVerified, verified.VerifiedConnectedEndpoint);
+            var preProbe = string.IsNullOrWhiteSpace(verified.PreProbeEndpoint) ? null : verified.PreProbeEndpoint;
+            var endpointNote = boundEndpoint is not null
+                ? $" · 已绑定实连端点 {boundEndpoint}" + (preProbe is not null && preProbe != boundEndpoint ? $"（TCP 预探测 {preProbe}）" : "")
+                : preProbe is not null
+                    ? $" · TCP 预探测 {preProbe}（未单点绑定代理对端）"
+                    : "";
+            var exitNote = verified.ExitVerified && !string.IsNullOrWhiteSpace(verified.ExitIp)
+                ? $" · 出口 {verified.ExitIp}/{verified.CountryCode}"
+                : $" · 出口待核验（{verified.ExitPendingReason ?? "第三方地理接口暂不可用"}，按边界与来宾实测核验）";
             return (firstVerified, exitVerified,
-                $"{verified.ResolutionSummary}（候选组 {firstVerified.Length} 个{connectedNote} · 出口 {verified.ExitIp}/{verified.CountryCode}）；{verified.HostNetworkSummary}");
+                $"{verified.ResolutionSummary}（候选组 {firstVerified.Length} 个{endpointNote}{exitNote}）；{verified.HostNetworkSummary}");
         }
         var resolve = resolver ?? ((s, p, st, ct) => NodeEndpointResolver.ResolveDetailedAsync(s, p, st, ct));
         var firstResolution = await resolve(firstHop.Server, firstHop.Port, strategy, token);
@@ -307,6 +368,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         try { IsolationPolicy.RequireSupportedPlatform(state); }
         catch (HandoffException handoff) { Paths.EnsureWorkspace(o.Root); using var handoffLock = WorkspaceLock.Acquire(state); state.PendingActions = [handoff.Action]; state.Status = "所选平台尚不支持受控通道"; state.Save(); throw; }
         var previousBackend=BoundaryRuntime.BackendFor(state);
+        var preservePreviousControlledConnection = previousBackend is not null;
         var box = previousBackend ?? Backends.Create(o.PlatformId, installation); var retained = previousBackend is not null; BridgeSpec? bridge = null; BusPacketRelay? relay = null;
         var plan=ResumePlan.For(state);
         var initialInstallWindows = plan.InstallWindows;
@@ -379,11 +441,19 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 messages.Report("恢复检查：解析所选节点地址，准备专用网络。");
                 port = firstHop.Port;
                 var resolutionStrategy = ProductProfile.IsHyperVStandalone ? EndpointResolutionStrategy.HyperVStandalone : EndpointResolutionStrategy.Default;
-                var (resolvedFirst, exitAddresses, resolutionSummary) = await ResolveOrBindEndpointsAsync(
-                    firstHop, node, upstream is not null, resolutionStrategy, pinnedEndpoints, token,
-                    options: o, upstreamNode: upstream);
+                var activeReuse = previousBackend is not null && pinnedEndpoints is null
+                    ? TryReuseActiveTrustedBinding(state, node, upstream, BoundaryRuntime.EndpointsFor(state), BoundaryRuntime.ExitAddressesFor(state))
+                    : null;
+                var (resolvedFirst, exitAddresses, resolutionSummary) = activeReuse is { } reused
+                    ? reused
+                    : await ResolveOrBindEndpointsAsync(
+                        firstHop, node, upstream is not null, resolutionStrategy, pinnedEndpoints, token,
+                        options: o, upstreamNode: upstream,
+                        preferredCoreConfigSha256: state.CoreConfigSha256,
+                        physicalInterfaceForConfigHash: o.PlatformId == "virtualbox" ? null : "ClaudomeBridge");
                 addresses = resolvedFirst;
                 messages.Report($"节点解析：{resolutionSummary}。");
+                preservePreviousControlledConnection = false;
                 config = NetworkImport.CoreConfig(node, addresses, o.PlatformId == "virtualbox" ? null : "ClaudomeBridge", upstream, exitAddresses);
                 var configHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(config))).ToLowerInvariant();
                 var reuseGateway=previousBackend is not null && state.CoreConfigSha256==configHash;
@@ -405,7 +475,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                     await BoundaryRuntime.Replace(null, "");
                     messages.Report(state.Completed.Contains("guest-ready")?"正在连接原虚拟机网络。":"正在自动连接 Windows 安装网络，经所选节点核验 Internet。");
                     var gateway = await VirtualBoxBoundary.Connect(vbox, state, binding, addresses, port, firstHop.Server, token,state.Completed.Contains("guest-ready")?null:config,downloads,messages);
-                    await BoundaryRuntime.Replace(gateway, state.VmId);
+                    await BoundaryRuntime.Replace(gateway, state.VmId, null, exitAddresses);
                 } else {
                     bridge = BusBoundary.Configuration(state, binding); await BusBoundary.Prepare(box, state, bridge, token);
                     relay = new BusPacketRelay(bridge, binding); var channel = relay; var identity = bridge;
@@ -414,7 +484,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                             if (!channel.IsAlive) throw new SetupException("虚拟机总线通道已停止。");
                             await BusBoundary.Verify(box, state, identity, ct);
                         }, token);
-                        await BoundaryRuntime.Replace(gateway, state.VmId, relay);
+                        await BoundaryRuntime.Replace(gateway, state.VmId, relay, exitAddresses);
                     } catch { await relay.DisposeAsync(); relay = null; throw; }
                 }
             }
@@ -799,7 +869,12 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         catch (Exception ex)
         {
             state.AwaitingGuestTools = false;
-            if (CanHoldInstallationNetworkForWindowsSignIn(state, ex, token.IsCancellationRequested) &&
+            if (preservePreviousControlledConnection && ex is NodeProbeException && BoundaryRuntime.BackendFor(state) is not null)
+            {
+                retained = true;
+                messages.Report("候选节点预核验未通过，当前原受控连接保持完好。");
+            }
+            else if (CanHoldInstallationNetworkForWindowsSignIn(state, ex, token.IsCancellationRequested) &&
                 BoundaryRuntime.TryHoldForWindowsSignIn(state, box))
             {
                 retained = true;
