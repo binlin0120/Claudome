@@ -51,11 +51,26 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         return (path, computedHash);
     }
 
+    internal static Resource[] RequiredHostPackages(SetupOptions o) =>
+        Catalog.Resources.Where(r =>
+            (r.Id == "pwsh" && o.PlatformId == "hyperv") ||
+            (r.Id == "vcredist" && o.PlatformId != "hyperv" && !Machine.VcRuntimeInstalled()) ||
+            (r.Id == "vbox" && o.PlatformId == "virtualbox" && Machine.VBoxPath() is null)).ToArray();
+
+    private async Task EnsureHyperVPwshReadyAsync(SetupOptions o, CancellationToken token)
+    {
+        var pwsh = Catalog.Resources.Single(r => r.Id == "pwsh");
+        messages.Report("准备并核验：" + pwsh.Name);
+        using var downloader = new Downloader();
+        await downloader.Get(pwsh, o.Cache, downloads, token);
+    }
+
     public async Task EnableHyperVFeatureAsync(SessionState state, CancellationToken token)
     {
         Machine.RequireHyperVStandaloneHostEligible();
         Paths.EnsureWorkspace(state.Options.Root);
         using var taskLock = WorkspaceLock.Acquire(state);
+        await EnsureHyperVPwshReadyAsync(state.Options, token);
         await using var hv = new HyperV(installation);
         try
         {
@@ -136,9 +151,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             if (plan.InstallWindows && string.IsNullOrEmpty(o.IsoSha256)) { o.IsoSha256 = await Downloader.Hash(o.IsoPath, token); state.Save(); }
             if(plan.InstallWindows) WindowsMedia.RequireSelected(o,o.IsoSha256);
             var resourceStamp=ResumePlan.ResourceStamp();
-            var hostPackages = Catalog.Resources.Where(r =>
-                (r.Id == "vcredist" && o.PlatformId != "hyperv" && !Machine.VcRuntimeInstalled()) ||
-                (r.Id == "vbox" && o.PlatformId == "virtualbox" && Machine.VBoxPath() is null)).ToArray();
+            var hostPackages = RequiredHostPackages(o);
             if (hostPackages.Length > 0)
             {
                 Stage(state, "2 / 7  准备缺失的主机组件");

@@ -403,8 +403,10 @@ public sealed partial class SetupWindow : Window
 
     private async Task EnableHyperVHostFeatureAsync()
     {
-        await Perform(async (_, token) =>
+        await Perform(async (o, token) =>
         {
+            if (string.IsNullOrEmpty(state.VmId))
+                state.Options = o;
             await Engine().EnableHyperVFeatureAsync(state, token);
             RefreshHost();
             Notice("Hyper-V 功能与虚拟机管理服务（vmms）均已就绪，可以继续下一步配置。");

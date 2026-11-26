@@ -507,6 +507,11 @@ public static class SelfTests
             Assert(reloaded.PendingActions.Any(a => a.Id == "hyperv-restart") && reloaded.Stage.Contains("重启"),
                 "Hyper-V restart checkpoint was not persisted");
         }));
+        await Check("hyperv-required-host-packages-includes-pwsh-and-skips-vcredist", () => Sync(() => {
+            var packages = Deployment.RequiredHostPackages(new() { PlatformId = "hyperv" });
+            Assert(packages.Any(p => p.Id == "pwsh") && packages.All(p => p.Id != "vcredist" && p.Id != "vbox"),
+                "Hyper-V host package set should include pwsh and skip vcredist/vbox");
+        }));
         await Check("downloader-16-thread-parallel-range-and-part-quarantine", async () => {
             var dlDir = Path.Combine(root, "parallel-16-dl");
             Directory.CreateDirectory(dlDir);
