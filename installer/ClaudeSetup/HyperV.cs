@@ -43,16 +43,20 @@ public sealed class HyperV : IVmBackend
     private readonly Func<SetupOptions, CancellationToken, Task<Stream>>? displayConnectFixture;
     private readonly Func<SetupOptions, CancellationToken, Task<Stream>>? spawnerConnectFixture;
     private readonly bool displayColdStartViaLauncher;
+    private readonly bool skipInitialSpawnerAttach;
+    private readonly SemaphoreSlim spawnerRecoveryGate = new(1, 1);
     private HyperV? verifier;
     private HyperV? displayHelper;
     private HyperV? displaySpawner;
     private readonly IProgress<InstallationProgress>? progress;
     internal TimeSpan LaunchVerifierTimeout { get; set; } = TimeSpan.FromSeconds(8);
+    internal TimeSpan? OuterLaunchWaitOverride { get; set; }
     public HyperV(IProgress<InstallationProgress>? progress = null) { this.progress = progress; }
     internal HyperV(Func<SetupOptions, CancellationToken, Task<Stream>> connectFixture, IProgress<InstallationProgress>? progress = null,
         Func<SetupOptions, CancellationToken, Task<Stream>>? displayConnectFixture = null, bool displayOnly = false,
         bool displayColdStartViaLauncher = false,
-        Func<SetupOptions, CancellationToken, Task<Stream>>? spawnerConnectFixture = null, bool spawnerOnly = false)
+        Func<SetupOptions, CancellationToken, Task<Stream>>? spawnerConnectFixture = null, bool spawnerOnly = false,
+        bool skipInitialSpawnerAttach = false)
     {
         this.connectFixture = connectFixture;
         this.displayConnectFixture = displayConnectFixture;
@@ -60,6 +64,7 @@ public sealed class HyperV : IVmBackend
         this.displayOnly = displayOnly;
         this.spawnerOnly = spawnerOnly;
         this.displayColdStartViaLauncher = displayColdStartViaLauncher;
+        this.skipInitialSpawnerAttach = skipInitialSpawnerAttach;
         this.progress = progress;
     }
     private HyperV(HyperV launcher, bool displayOnly = false, Func<SetupOptions, CancellationToken, Task<Stream>>? connectFixture = null)
@@ -69,10 +74,12 @@ public sealed class HyperV : IVmBackend
         this.connectFixture = connectFixture;
     }
     private HyperV(bool displayOnly) { this.displayOnly = displayOnly; }
-    private HyperV(Stream connectedPipe, bool spawnerOnly)
+    private HyperV(Stream connectedPipe, bool spawnerOnly, Process? workerProcess = null, PrivateFile? ownedWorkerFile = null)
     {
         this.spawnerOnly = spawnerOnly;
         pipe = connectedPipe;
+        worker = workerProcess;
+        workerFile = ownedWorkerFile;
         reader = new(pipe, Encoding.UTF8, false, 4096, true);
         writer = new(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
         ConnectionSequence = 1;
@@ -90,6 +97,7 @@ public sealed class HyperV : IVmBackend
     internal int ConnectionSequence { get; private set; }
     internal int ManagementWorkerLaunchCount { get; private set; }
     internal int ElevatedPromptCount { get; private set; }
+    internal int SpawnerRecoveryCount { get; private set; }
     internal bool HasManagementConnection => Volatile.Read(ref disposed) == 0 && !faultedOrAborted && pipe is { CanRead: true, CanWrite: true } && (pipe is not NamedPipeServerStream nps || nps.IsConnected) && writer is not null;
 
     internal static bool IsCurrentProcessElevated()
@@ -159,13 +167,20 @@ public sealed class HyperV : IVmBackend
             ConnectionSequence++;
             ManagementWorkerLaunchCount++;
             await CallLocked(o, "init", new { options = o, verificationOnly = launcher is not null && !displayOnly && !spawnerOnly, displayOnly, spawnerOnly }, token);
-            if (launcher is null && !displayOnly && !spawnerOnly && spawnerConnectFixture is not null)
+            if (launcher is null && !displayOnly && !spawnerOnly && spawnerConnectFixture is not null && !skipInitialSpawnerAttach)
             {
                 if (displaySpawner is not null) { try { await displaySpawner.DisposeAsync(); } catch { } displaySpawner = null; }
-                displaySpawner = new HyperV(spawnerConnectFixture, spawnerOnly: true) { LaunchVerifierTimeout = LaunchVerifierTimeout };
+                displaySpawner = new HyperV(spawnerConnectFixture, spawnerOnly: true)
+                {
+                    LaunchVerifierTimeout = LaunchVerifierTimeout,
+                    OuterLaunchWaitOverride = OuterLaunchWaitOverride
+                };
             }
             return;
         }
+
+        if (spawnerOnly)
+            throw new SetupException("显示子通道启动器已失效，将通过现有主管理通道无弹窗重建。");
 
         var resource = Catalog.Resources.Single(r => r.Id == "pwsh");
         var archive = Paths.Under(o.Cache, resource.FileName);
@@ -244,11 +259,12 @@ public sealed class HyperV : IVmBackend
         }
     }
 
-    internal async Task<string> LaunchChildWorkerAsync(SetupOptions options, string pipeName, string scriptPath, CancellationToken callerToken)
+    internal async Task<string> LaunchChildWorkerAsync(SetupOptions options, string pipeName, string scriptPath, CancellationToken callerToken, bool spawnAsSpawner = false)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        var outerWait = OuterLaunchWaitOverride ?? LaunchVerifierTimeout;
         using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
-        waitCts.CancelAfter(LaunchVerifierTimeout);
+        waitCts.CancelAfter(outerWait);
         try
         {
             await serial.WaitAsync(waitCts.Token);
@@ -259,13 +275,14 @@ public sealed class HyperV : IVmBackend
         }
         catch (OperationCanceledException)
         {
-            throw new SetupException("等待主管理通道启动显示子通道超时，主管理通道保持未中断。");
+            if (spawnerOnly) AbortPipeUnsafely();
+            throw new SetupException("等待 Hyper-V 显示子通道启动器超时，主管理通道保持未中断。");
         }
 
-        // Once the main pipe lock is acquired, do NOT bind callerToken to abort the main pipe on cancel.
-        // The RPC itself is bounded by LaunchVerifierTimeout so a hung worker cannot wedge main management calls forever,
-        // while a caller cancel returns immediately without tearing down a healthy main management pipe.
-        var rpcTask = RunLaunchVerifierLockedAsync(options, pipeName, scriptPath);
+        // Once the pipe lock is acquired, do NOT bind callerToken to abort the main pipe on cancel.
+        // If this instance is an isolated spawnerOnly channel and the outer timeout fires BEFORE the inner RPC
+        // timeout, immediately retire this spawner pipe (NEVER touching the main pipe) so it is never reused.
+        var rpcTask = RunLaunchVerifierLockedAsync(options, pipeName, scriptPath, spawnAsSpawner);
         try
         {
             return await rpcTask.WaitAsync(waitCts.Token);
@@ -277,32 +294,130 @@ public sealed class HyperV : IVmBackend
         }
         catch (OperationCanceledException)
         {
+            if (spawnerOnly) AbortPipeUnsafely();
             _ = CleanupLateLaunchedChildAsync(rpcTask);
             throw new SetupException("启动 Hyper-V 显示子通道超时，已放弃本次冷启动。");
         }
         catch (TimeoutException)
         {
+            if (spawnerOnly) AbortPipeUnsafely();
             _ = CleanupLateLaunchedChildAsync(rpcTask);
             throw new SetupException("启动 Hyper-V 显示子通道超时，已放弃本次冷启动。");
         }
     }
 
-    private async Task<string> RunLaunchVerifierLockedAsync(SetupOptions options, string pipeName, string scriptPath)
+    private async Task<string> RunLaunchVerifierLockedAsync(SetupOptions options, string pipeName, string scriptPath, bool spawnAsSpawner)
     {
         try
         {
             ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
             if (pipe is null || faultedOrAborted)
             {
+                if (spawnerOnly && connectFixture is null)
+                    throw new SetupException("显示子通道启动器已失效，需要经现有主管理通道重建。");
                 using var connectCts = new CancellationTokenSource(LaunchVerifierTimeout);
                 await Connect(options, connectCts.Token);
             }
-            return await CallLocked(options, "launch-verifier", new { pipeName, scriptPath }, CancellationToken.None);
+            return await CallLocked(options, "launch-verifier", new { pipeName, scriptPath, spawnerOnly = spawnAsSpawner }, CancellationToken.None);
         }
         finally
         {
             try { if (Volatile.Read(ref disposed) == 0) serial.Release(); }
             catch (ObjectDisposedException) { }
+        }
+    }
+
+    private async Task<HyperV> EnsureDisplaySpawnerAsync(SetupOptions o, CancellationToken token)
+    {
+        if (displaySpawner is { faultedOrAborted: false } current &&
+            (current.HasManagementConnection || current.connectFixture is not null))
+        {
+            current.LaunchVerifierTimeout = LaunchVerifierTimeout;
+            current.OuterLaunchWaitOverride = OuterLaunchWaitOverride;
+            return current;
+        }
+
+        await spawnerRecoveryGate.WaitAsync(token);
+        try
+        {
+            if (displaySpawner is { faultedOrAborted: false } raced &&
+                (raced.HasManagementConnection || raced.connectFixture is not null))
+            {
+                raced.LaunchVerifierTimeout = LaunchVerifierTimeout;
+                raced.OuterLaunchWaitOverride = OuterLaunchWaitOverride;
+                return raced;
+            }
+
+            if (displaySpawner is { } stale)
+            {
+                displaySpawner = null;
+                try { await stale.DisposeAsync(); } catch { }
+            }
+
+            if (!HasManagementConnection)
+                throw new SetupException("Hyper-V 主管理连接尚未就绪，暂无法重建显示子通道启动器。");
+
+            if (spawnerConnectFixture is not null)
+            {
+                var fixturePipe = "ClaudeSetup-" + Guid.NewGuid().ToString("N");
+                var fixtureScript = Paths.Under(o.Private, "HyperVWorker-spawner-fixture.ps1");
+                _ = await LaunchChildWorkerAsync(o, fixturePipe, fixtureScript, token, spawnAsSpawner: true);
+                var recovered = new HyperV(spawnerConnectFixture, spawnerOnly: true)
+                {
+                    LaunchVerifierTimeout = LaunchVerifierTimeout,
+                    OuterLaunchWaitOverride = OuterLaunchWaitOverride
+                };
+                SpawnerRecoveryCount++;
+                displaySpawner = recovered;
+                return recovered;
+            }
+
+            var spawnerPipeName = "ClaudeSetup-" + Guid.NewGuid().ToString("N");
+            var spawnerPipe = new NamedPipeServerStream(spawnerPipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            PrivateFile? ownedScript = null;
+            Process? spawnerProc = null;
+            try
+            {
+                string scriptPath;
+                if (workerFile is not null && File.Exists(workerFile.FileName))
+                    scriptPath = workerFile.FileName;
+                else
+                {
+                    ownedScript = new PrivateFile(o.Private, Catalog.EmbeddedText("HyperVWorker.ps1"), ".ps1");
+                    scriptPath = ownedScript.FileName;
+                }
+                var id = await LaunchChildWorkerAsync(o, spawnerPipeName, scriptPath, token, spawnAsSpawner: true);
+                if (int.TryParse(id, out var pid) && pid > 0)
+                {
+                    try { spawnerProc = Process.GetProcessById(pid); } catch { }
+                }
+                using var attachCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                attachCts.CancelAfter(TimeSpan.FromSeconds(6));
+                await spawnerPipe.WaitForConnectionAsync(attachCts.Token);
+                var recovered = new HyperV(spawnerPipe, spawnerOnly: true, workerProcess: spawnerProc, ownedWorkerFile: ownedScript)
+                {
+                    LaunchVerifierTimeout = LaunchVerifierTimeout,
+                    OuterLaunchWaitOverride = OuterLaunchWaitOverride
+                };
+                spawnerPipe = null;
+                spawnerProc = null;
+                ownedScript = null;
+                await recovered.CallLocked(o, "init", new { options = o, verificationOnly = false, displayOnly = false, spawnerOnly = true }, attachCts.Token);
+                SpawnerRecoveryCount++;
+                displaySpawner = recovered;
+                return recovered;
+            }
+            catch
+            {
+                if (spawnerProc is not null) { try { if (!spawnerProc.HasExited) spawnerProc.Kill(entireProcessTree: true); spawnerProc.Dispose(); } catch { } }
+                if (spawnerPipe is not null) { try { spawnerPipe.Dispose(); } catch { } }
+                ownedScript?.Dispose();
+                throw;
+            }
+        }
+        finally
+        {
+            spawnerRecoveryGate.Release();
         }
     }
 
@@ -705,6 +820,7 @@ public sealed class HyperV : IVmBackend
         // In non-elevated mode, displayHelper spawns via the dedicated displaySpawner sidecar pipe created at main boot,
         // so even a completely hung cold-start launch-verifier NEVER aborts, blocks, or replaces the main management worker.
         HyperV helper;
+        HyperV? usedSpawner = null;
         if (displayHelper is not null)
         {
             helper = displayHelper;
@@ -713,9 +829,8 @@ public sealed class HyperV : IVmBackend
         {
             if (displayColdStartViaLauncher)
             {
-                var spawner = displaySpawner ?? throw new SetupException("Hyper-V 显示子通道启动器不可用，主管理连接保持完好。");
-                spawner.LaunchVerifierTimeout = LaunchVerifierTimeout;
-                helper = new HyperV(spawner, displayOnly: true, connectFixture: displayConnectFixture);
+                usedSpawner = await EnsureDisplaySpawnerAsync(s.Options, token);
+                helper = new HyperV(usedSpawner, displayOnly: true, connectFixture: displayConnectFixture);
             }
             else
             {
@@ -730,9 +845,8 @@ public sealed class HyperV : IVmBackend
         }
         else
         {
-            var spawner = displaySpawner ?? throw new SetupException("Hyper-V 显示子通道启动器不可用，主管理连接保持完好，请使用「独立窗口查看」。");
-            spawner.LaunchVerifierTimeout = LaunchVerifierTimeout;
-            helper = new HyperV(spawner, displayOnly: true);
+            usedSpawner = await EnsureDisplaySpawnerAsync(s.Options, token);
+            helper = new HyperV(usedSpawner, displayOnly: true);
             displayHelper = helper;
         }
 
@@ -741,14 +855,17 @@ public sealed class HyperV : IVmBackend
             var raw = await helper.Call(s.Options, "sync-display", new { vmId = s.VmId, password = secrets.VmPassword, width = targetWidth, height = targetHeight }, token);
             return JsonSerializer.Deserialize<HyperVDisplaySyncResult>(raw, JsonFile.Format);
         }
-        catch
+        catch (Exception ex)
         {
             if (ReferenceEquals(displayHelper, helper)) displayHelper = null;
             try { await helper.DisposeAsync(); } catch { }
-            if (displaySpawner is { } spawner && spawner.faultedOrAborted)
+            // Retire a failed/timed-out spawner immediately (even if outer wait fired before inner RPC timeout)
+            // so the next display sync rebuilds a clean spawner via the live main worker with zero UAC.
+            if (usedSpawner is not null &&
+                (usedSpawner.faultedOrAborted || ex is not OperationCanceledException || !token.IsCancellationRequested))
             {
-                displaySpawner = null;
-                try { await spawner.DisposeAsync(); } catch { }
+                if (ReferenceEquals(displaySpawner, usedSpawner)) displaySpawner = null;
+                try { await usedSpawner.DisposeAsync(); } catch { }
             }
             throw;
         }

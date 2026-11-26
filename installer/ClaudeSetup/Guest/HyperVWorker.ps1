@@ -966,8 +966,11 @@ try {
                             if(([string]$d.pipeName) -notmatch '^ClaudeSetup-[a-f0-9]{32}$'){throw 'VM_SCOPE'}
                             $scriptFile=Assert-LocalPath ([string]$d.scriptPath) (Join-Path $o.Root 'private')
                             if((Get-FileHash -LiteralPath $scriptFile -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash){throw 'VM_SCOPE'}
+                            $launchAsSpawner=(-not $spawnerOnly) -and [bool]$d.spawnerOnly
                             $start=[Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'));$start.UseShellExecute=$false;$start.CreateNoWindow=$true
-                            foreach($a in @('-NoLogo','-NoProfile','-File',$scriptFile,'-PipeName',[string]$d.pipeName)){$start.ArgumentList.Add($a)}
+                            $childArgs=@('-NoLogo','-NoProfile','-File',$scriptFile,'-PipeName',[string]$d.pipeName)
+                            if($launchAsSpawner){$childArgs+='-SpawnerOnly'}
+                            foreach($a in $childArgs){$start.ArgumentList.Add($a)}
                             $process=[Diagnostics.Process]::Start($start);if($process){$script:supervisedChildPids.Add($process.Id)};$value=[string]$process.Id
                         }
                         'boundary-prepare' {

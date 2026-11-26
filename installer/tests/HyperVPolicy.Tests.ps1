@@ -657,12 +657,45 @@ Check 'hyperv-worker-spawner-only-live-process-isolation' {
         $dispRejected = ($dispR.ReadLine() | ConvertFrom-Json)
         Assert-Case (-not $dispRejected.ok -and $dispRejected.code -eq 'UNSUPPORTED_OPERATION')
 
-        # Even if spawner & display pipes are closed abruptly, main pipe remains alive and responsive
+        # Even if spawner & display pipes are closed abruptly, main pipe remains alive and can rebuild a fresh
+        # -SpawnerOnly child via launch-verifier (spawnerOnly:true) without replacing main worker or prompting UAC
         $dispW.Dispose(); $dispR.Dispose(); $displayPipe.Dispose(); $displayPipe = $null
         $spW.Dispose(); $spR.Dispose(); $spawnerPipe.Dispose(); $spawnerPipe = $null
         $mainW.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $false } } | ConvertTo-Json -Compress -Depth 5))
         $mainStillAlive = ($mainR.ReadLine() | ConvertFrom-Json)
         Assert-Case ($mainStillAlive.ok -and $mainStillAlive.value -eq 'initialized' -and -not $mainProc.HasExited)
+
+        $spawner2PipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
+        $display2PipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
+        $spawner2Pipe = [IO.Pipes.NamedPipeServerStream]::new($spawner2PipeName, [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
+        $display2Pipe = [IO.Pipes.NamedPipeServerStream]::new($display2PipeName, [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
+        try {
+            $mainW.WriteLine((@{ operation = 'launch-verifier'; data = @{ pipeName = $spawner2PipeName; scriptPath = $workerCopy; spawnerOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
+            $sp2Launch = ($mainR.ReadLine() | ConvertFrom-Json)
+            $sp2Pid = 0
+            Assert-Case ($sp2Launch.ok -and [int]::TryParse([string]$sp2Launch.value, [ref]$sp2Pid) -and $sp2Pid -gt 0)
+            $spawner2Pipe.WaitForConnectionAsync($cts.Token).GetAwaiter().GetResult()
+            $sp2R = [IO.StreamReader]::new($spawner2Pipe,[Text.Encoding]::UTF8,$false,4096,$true)
+            $sp2W = [IO.StreamWriter]::new($spawner2Pipe,[Text.UTF8Encoding]::new($false),4096,$true); $sp2W.AutoFlush = $true
+            $sp2W.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $false; spawnerOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
+            $sp2Init = ($sp2R.ReadLine() | ConvertFrom-Json)
+            Assert-Case ($sp2Init.ok -and $sp2Init.value -eq 'initialized')
+            $sp2W.WriteLine((@{ operation = 'launch-verifier'; data = @{ pipeName = $display2PipeName; scriptPath = $displayCopy } } | ConvertTo-Json -Compress -Depth 5))
+            $d2Launch = ($sp2R.ReadLine() | ConvertFrom-Json)
+            $d2Pid = 0
+            Assert-Case ($d2Launch.ok -and [int]::TryParse([string]$d2Launch.value, [ref]$d2Pid) -and $d2Pid -gt 0)
+            $display2Pipe.WaitForConnectionAsync($cts.Token).GetAwaiter().GetResult()
+            $d2R = [IO.StreamReader]::new($display2Pipe,[Text.Encoding]::UTF8,$false,4096,$true)
+            $d2W = [IO.StreamWriter]::new($display2Pipe,[Text.UTF8Encoding]::new($false),4096,$true); $d2W.AutoFlush = $true
+            $d2W.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
+            $d2Init = ($d2R.ReadLine() | ConvertFrom-Json)
+            Assert-Case ($d2Init.ok -and $d2Init.value -eq 'initialized')
+            $d2W.WriteLine('{"operation":"exit"}'); $sp2W.WriteLine('{"operation":"exit"}')
+            $d2W.Dispose(); $d2R.Dispose(); $sp2W.Dispose(); $sp2R.Dispose()
+        } finally {
+            try { $display2Pipe.Dispose() } catch { }
+            try { $spawner2Pipe.Dispose() } catch { }
+        }
 
         # Clean exit tears down main worker cleanly
         $mainW.WriteLine('{"operation":"exit"}')

@@ -2390,6 +2390,278 @@ public static class SelfTests
             if (mainServerB is not null) await mainServerB.WaitAsync(TimeSpan.FromSeconds(3));
             if (spawnerServerB is not null) await spawnerServerB.WaitAsync(TimeSpan.FromSeconds(3));
         });
+        await Check("hyperv-display-spawner-recovers-after-no-reply-outer-timeout-and-init-unavailable-without-re-elevation", async () => {
+            var recRoot = Path.Combine(root, "hv-spawner-recover"); Directory.CreateDirectory(recRoot);
+            var st = new SessionState { VmId = Guid.NewGuid().ToString("D"), Options = new() { Root = recRoot, PlatformId = "hyperv", VmName = "HV-Recover" } };
+            var sec = new Secrets { VmPassword = "ValidPassword!123" };
+
+            // Scenario 1: Round 1 spawner hangs with NO reply AND outer wait (150ms) expires BEFORE inner RPC timeout (5s) ->
+            // spawner #1 is retired immediately, main stays alive on seq 1, and Round 2 resize rebuilds spawner #2
+            // via the live main worker (launch-verifier spawnerOnly:true) and succeeds guest resolution sync with zero UAC!
+            var spawnerConnSeq = 0;
+            var mainSpawnerLaunches = 0;
+            var mainRunningCount = 0;
+            var hungEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hungRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var serverTasks = new List<Task>();
+
+            var hv = new HyperV(
+                connectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeRecMain-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    serverTasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"running\""))
+                                    {
+                                        Interlocked.Increment(ref mainRunningCount);
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"True\",\"code\":\"OK\"}");
+                                    }
+                                    else if (line.Contains("\"launch-verifier\"") && line.Contains("\"spawnerOnly\":true"))
+                                    {
+                                        Interlocked.Increment(ref mainSpawnerLaunches);
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"888888\",\"code\":\"OK\"}");
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayConnectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeRecDisp-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    serverTasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"sync-display\""))
+                                    {
+                                        var payload = JsonSerializer.Serialize(new { before = "1024x768", after = "1440x900", applied = "1440x900", selectedZoom = 1.0, modes = new[] { "1440x900" } });
+                                        var env = JsonSerializer.Serialize(new { ok = true, value = payload, code = "OK" });
+                                        await w.WriteLineAsync(env);
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayColdStartViaLauncher: true,
+                spawnerConnectFixture: async (_, ct) => {
+                    var seq = Interlocked.Increment(ref spawnerConnSeq);
+                    var pipeName = "ClaudomeRecSpawner-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    serverTasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"launch-verifier\""))
+                                    {
+                                        if (seq == 1)
+                                        {
+                                            hungEntered.TrySetResult();
+                                            await hungRelease.Task; // Hung first spawner
+                                        }
+                                        else
+                                        {
+                                            await w.WriteLineAsync("{\"ok\":true,\"value\":\"777777\",\"code\":\"OK\"}");
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                });
+            // Force outer wait (150ms) to expire well BEFORE inner RPC read timeout (5s)
+            hv.LaunchVerifierTimeout = TimeSpan.FromSeconds(5);
+            hv.OuterLaunchWaitOverride = TimeSpan.FromMilliseconds(150);
+
+            Assert(await hv.IsRunning(st, CancellationToken.None) && hv.ConnectionSequence == 1, "Recover test initial connect failed");
+
+            // Round 1: spawner #1 hangs, outer wait fires first -> fails cleanly without disrupting main pipe
+            var r1TimedOut = false;
+            try { await hv.SyncGuestDisplayMode(st, sec, 1280, 720, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (SetupException ex) when (ex.Message.Contains("超时")) { r1TimedOut = true; }
+            Assert(r1TimedOut && await hv.IsRunning(st, CancellationToken.None) &&
+                   hv.HasManagementConnection && hv.ConnectionSequence == 1 && hv.ManagementWorkerLaunchCount == 1,
+                "Round 1 outer-timeout did not fail cleanly or disrupted main management pipe");
+
+            // Round 2 (resize to 1440x900): recovers fresh spawner #2 via existing main worker and syncs resolution!
+            hv.OuterLaunchWaitOverride = TimeSpan.FromSeconds(4);
+            var r2 = await hv.SyncGuestDisplayMode(st, sec, 1440, 900, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+            hungRelease.TrySetResult();
+            Assert(r2 is not null && r2.After == "1440x900" &&
+                   hv.HasManagementConnection && hv.ConnectionSequence == 1 &&
+                   hv.ManagementWorkerLaunchCount == 1 && hv.ElevatedPromptCount == 0 &&
+                   hv.SpawnerRecoveryCount == 1 && mainSpawnerLaunches == 1 && spawnerConnSeq == 2 && mainRunningCount == 2,
+                "Round 2 display sync did not recover spawner without replacing main worker or prompting UAC");
+            await hv.DisposeAsync();
+            await Task.WhenAll(serverTasks).WaitAsync(TimeSpan.FromSeconds(3));
+
+            // Scenario 2: Spawner unavailable at init (skipInitialSpawnerAttach=true) -> first resize recovers seamlessly
+            var initTasks = new List<Task>();
+            var initMainSpawnerLaunches = 0;
+            var hvInitMiss = new HyperV(
+                connectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeInitMissMain-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    initTasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"running\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"True\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"launch-verifier\"") && line.Contains("\"spawnerOnly\":true"))
+                                    {
+                                        Interlocked.Increment(ref initMainSpawnerLaunches);
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"666666\",\"code\":\"OK\"}");
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayConnectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeInitMissDisp-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    initTasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"sync-display\""))
+                                    {
+                                        var payload = JsonSerializer.Serialize(new { before = "1024x768", after = "1280x720", applied = "1280x720", selectedZoom = 1.0, modes = new[] { "1280x720" } });
+                                        var env = JsonSerializer.Serialize(new { ok = true, value = payload, code = "OK" });
+                                        await w.WriteLineAsync(env);
+                                    }
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayColdStartViaLauncher: true,
+                spawnerConnectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeInitMissSp-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    initTasks.Add(Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"launch-verifier\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"555555\",\"code\":\"OK\"}");
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    }));
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                skipInitialSpawnerAttach: true);
+            Assert(await hvInitMiss.IsRunning(st, CancellationToken.None) && hvInitMiss.ConnectionSequence == 1,
+                "Init-miss subcase initial connect failed");
+            var firstSync = await hvInitMiss.SyncGuestDisplayMode(st, sec, 1280, 720, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(firstSync is not null && firstSync.After == "1280x720" &&
+                   hvInitMiss.HasManagementConnection && hvInitMiss.ConnectionSequence == 1 &&
+                   hvInitMiss.ManagementWorkerLaunchCount == 1 && hvInitMiss.ElevatedPromptCount == 0 &&
+                   hvInitMiss.SpawnerRecoveryCount == 1 && initMainSpawnerLaunches == 1,
+                "Init-unavailable spawner did not recover cleanly via live main worker without re-elevation");
+            await hvInitMiss.DisposeAsync();
+            await Task.WhenAll(initTasks).WaitAsync(TimeSpan.FromSeconds(3));
+        });
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));
