@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 param([Parameter(Mandatory)][string]$OutputDirectory)
 $ErrorActionPreference='Stop'
 # Evaluate only selected production function ASTs. Every external operation in
@@ -7,7 +7,7 @@ $ErrorActionPreference='Stop'
 $worker=Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($worker,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'PRODUCTION_PARSE_FAILED'}
-$names=@('Invoke-ConsolePolicyLock','Console-Owner','Use-BasicConsolePolicy','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm','Assert-LocalPath','Test-OwnedVmMarker','Save-OwnedVmMarker','Resolve-OrCreateTaskVm','Assert-InstallDiskPath','Assert-InstallDrives','Confirm-WindowsDisk','Get-WindowsInstallProbe','Reset-HyperVRequestDiagnostics','Save-HyperVErrorContext','Format-HyperVErrorResponse')
+$names=@('Invoke-ConsolePolicyLock','Console-Owner','Use-BasicConsolePolicy','Guard-Console','Verify-Console','Restore-Console','Assert-NoNetworkAdapter','Disable-HostMetadata','Bus-ServicePath','Verify-BusService','Test-VMKeyProtectorPresent','Enable-TaskVirtualTpm','Assert-LocalPath','Test-OwnedVmMarker','Save-OwnedVmMarker','Resolve-OrCreateTaskVm','Assert-InstallDiskPath','Assert-InstallDrives','Confirm-WindowsDisk','Resolve-AttachedVhdChain','Get-WindowsInstallDiagnostics','Get-WindowsInstallProbe','Disable-TaskVmAutomaticCheckpoints','New-HyperVUnattendXml','Reset-HyperVRequestDiagnostics','Save-HyperVErrorContext','Format-HyperVErrorResponse')
 foreach($name in $names){$definition=$ast.FindAll({param($a)$a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq $name},$true) | Select-Object -First 1;if(-not $definition){throw 'FUNCTION_MISSING'};Invoke-Expression -Command $definition.Extent.Text}
 $script:store=@{};$script:policyEnabled=$true;$script:nicCount=0;$script:metadataEnabled=$true;$script:changes=0
 $script:o=[pscustomobject]@{WorkspaceId='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';HyperVBasicConsoleConfirmed=$false}
@@ -301,7 +301,9 @@ Check 'hyperv-windows-install-probe-distinguishes-empty-ready-and-needs-recovery
     $savedO = $script:o
     $savedGetDrives = ${function:Get-VMHardDiskDrive}
     $savedGetVhd = ${function:Get-VHD}
+    $savedGetSnap = ${function:Get-VMSnapshot}
     try {
+        function script:Get-VMSnapshot($VM) { @() }
         [IO.Directory]::CreateDirectory($vmDir) | Out-Null
         $vmId = [guid]'77777777-7777-7777-7777-777777777777'
         $vm = [pscustomobject]@{ Id = $vmId; Path = $vmDir; Name = 'ProbeVm' }
@@ -359,6 +361,80 @@ Check 'hyperv-windows-install-probe-distinguishes-empty-ready-and-needs-recovery
         $script:o = $savedO
         if ($savedGetDrives) { Set-Item function:script:Get-VMHardDiskDrive -Value $savedGetDrives } else { Remove-Item function:script:Get-VMHardDiskDrive -ErrorAction SilentlyContinue }
         if ($savedGetVhd) { Set-Item function:script:Get-VHD -Value $savedGetVhd } else { Remove-Item function:script:Get-VHD -ErrorAction SilentlyContinue }
+        if ($savedGetSnap) { Set-Item function:script:Get-VMSnapshot -Value $savedGetSnap } else { Remove-Item function:script:Get-VMSnapshot -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+Check 'hyperv-avhdx-parent-chain-diagnostics-checkpoint-policy-and-unattend-xml' {
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('hv-avhdx-' + [guid]::NewGuid().ToString('N'))
+    $vmDir = Join-Path $tempRoot 'machines\CpVm'
+    $savedO = $script:o
+    $savedGetDrives = ${function:Get-VMHardDiskDrive}
+    $savedGetVhd = ${function:Get-VHD}
+    $savedGetSnap = ${function:Get-VMSnapshot}
+    $savedGetVm = ${function:Get-VM}
+    $savedSetVm = ${function:Set-VM}
+    try {
+        [IO.Directory]::CreateDirectory($vmDir) | Out-Null
+        $vmId = [guid]'12121212-1212-1212-1212-121212121212'
+        $script:cpVmState = 'Off'
+        $script:cpAutoEnabled = $true
+        $script:cpSnaps = @()
+        $script:cpSetCalls = 0
+        $vm = [pscustomobject]@{ Id = $vmId; Path = $vmDir; Name = 'CpVm'; State = 'Off'; AutomaticCheckpointsEnabled = $true }
+        $script:o = [pscustomobject]@{ Root = $tempRoot; VmName = 'CpVm'; WorkspaceId = 'cccccccccccccccccccccccccccccccc'; IsoSha256 = ('b' * 64); WindowsImageIndex = 4; UserName = 'ClaudeUser'; DiskGb = 80 }
+        $baseDisk = Join-Path $vmDir 'Windows11.vhdx'
+        $avhdxDisk = Join-Path $vmDir 'Windows11_B8944BAA-D3B5-4427-A09B-547378F9A6C2.avhdx'
+        $foreignDisk = Join-Path $vmDir 'Foreign.avhdx'
+        [IO.File]::WriteAllBytes($baseDisk, [byte[]]@(1))
+        [IO.File]::WriteAllBytes($avhdxDisk, [byte[]]@(2))
+        $baseGuid = [guid]'34343434-3434-3434-3434-343434343434'
+        $cpPath = Join-Path $vmDir '.windows-install.json'
+        @{ schema = 1; vmId = [string]$vmId; workspaceId = $script:o.WorkspaceId; isoSha256 = $script:o.IsoSha256; imageIndex = 4; userName = 'ClaudeUser'; diskGb = 80; diskPath = $baseDisk; diskId = [string]$baseGuid; phase = 'ready'; preservedDisks = @() } |
+            ConvertTo-Json | Set-Content -LiteralPath $cpPath -Encoding utf8NoBOM
+
+        function script:Get-VMSnapshot($VM) { $script:cpSnaps }
+        function script:Get-VM([guid]$Id) { [pscustomobject]@{ Id = $vmId; Path = $vmDir; Name = 'CpVm'; State = $script:cpVmState; AutomaticCheckpointsEnabled = $script:cpAutoEnabled } }
+        function script:Set-VM { param($VM, [bool]$AutomaticCheckpointsEnabled) $script:cpSetCalls++; $script:cpAutoEnabled = $AutomaticCheckpointsEnabled }
+        function script:Get-VMHardDiskDrive($VM) { $script:cpDrives }
+        function script:Get-VHD([string]$Path) {
+            if ($Path -eq $baseDisk) { return [pscustomobject]@{ Path = $baseDisk; DiskIdentifier = $baseGuid; Size = 80L * 1GB; VhdFormat = 'VHDX'; VhdType = 'Dynamic'; ParentPath = $null; Attached = $true } }
+            if ($Path -eq $avhdxDisk) { return [pscustomobject]@{ Path = $avhdxDisk; DiskIdentifier = [guid]::NewGuid(); Size = 80L * 1GB; VhdFormat = 'VHDX'; VhdType = 'Differencing'; ParentPath = $baseDisk; Attached = $true } }
+            if ($Path -eq $foreignDisk) { return [pscustomobject]@{ Path = $foreignDisk; DiskIdentifier = [guid]::NewGuid(); Size = 80L * 1GB; VhdFormat = 'VHDX'; VhdType = 'Differencing'; ParentPath = $foreignDisk; Attached = $true } }
+            throw 'UNKNOWN_VHD'
+        }
+
+        # 1. Active .avhdx matching base chain diagnoses checkpoint-chain-matched cleanly and stays needs-recovery (no auto-delete/merge)
+        $script:cpSnaps = @([pscustomobject]@{ Name = 'AutoSnap' })
+        $script:cpDrives = @([pscustomobject]@{ Path = $avhdxDisk })
+        $diag1 = Get-WindowsInstallDiagnostics $vm
+        Assert-Case ($diag1.state -eq 'needs-recovery' -and $diag1.reason -eq 'checkpoint-chain-matched' -and $diag1.chainMatchesBase -eq $true -and $diag1.snapshotCount -eq 1)
+        $cpBlocked = $false
+        try { $null = Disable-TaskVmAutomaticCheckpoints $vm } catch { if ($_.Exception.Message -eq 'HYPERV_CHECKPOINT_ACTIVE') { $cpBlocked = $true } }
+        Assert-Case ($cpBlocked -and $script:cpSetCalls -eq 0 -and [IO.File]::Exists($avhdxDisk))
+
+        # 2. Cycle / foreign chain diagnoses checkpoint-chain-invalid
+        $script:cpDrives = @([pscustomobject]@{ Path = $foreignDisk })
+        $diag2 = Get-WindowsInstallDiagnostics $vm
+        Assert-Case ($diag2.state -eq 'needs-recovery' -and $diag2.reason -eq 'checkpoint-chain-invalid' -and $diag2.chainMatchesBase -eq $false)
+
+        # 3. Clean Off VM with merged disk disables automatic checkpoints and reads back
+        $script:cpSnaps = @()
+        $script:cpDrives = @([pscustomobject]@{ Path = $baseDisk })
+        Assert-Case ((Disable-TaskVmAutomaticCheckpoints $vm) -eq 'disabled' -and -not $script:cpAutoEnabled -and $script:cpSetCalls -eq 1)
+        Assert-Case ((Disable-TaskVmAutomaticCheckpoints $vm) -eq 'already-disabled' -and $script:cpSetCalls -eq 1)
+
+        # 4. Unattend XML emits International-Core without unsupported OEM/Server switches
+        $xml = New-HyperVUnattendXml 'ClaudeUser' 'StrongPass!12' '已有订阅链接' 'Korea Standard Time' 'zh-CN'
+        $doc = [xml]$xml
+        Assert-Case ($null -ne $doc -and $xml.Contains('Microsoft-Windows-International-Core') -and $xml.Contains('<UILanguage>zh-CN</UILanguage>') -and -not $xml.Contains('HideEULAPage') -and -not $xml.Contains('HideLocalAccountScreen') -and -not $xml.Contains('BypassNRO') -and -not $xml.Contains('ProtectYourPC'))
+    } finally {
+        $script:o = $savedO
+        if ($savedGetDrives) { Set-Item function:script:Get-VMHardDiskDrive -Value $savedGetDrives } else { Remove-Item function:script:Get-VMHardDiskDrive -ErrorAction SilentlyContinue }
+        if ($savedGetVhd) { Set-Item function:script:Get-VHD -Value $savedGetVhd } else { Remove-Item function:script:Get-VHD -ErrorAction SilentlyContinue }
+        if ($savedGetSnap) { Set-Item function:script:Get-VMSnapshot -Value $savedGetSnap } else { Remove-Item function:script:Get-VMSnapshot -ErrorAction SilentlyContinue }
+        if ($savedGetVm) { Set-Item function:script:Get-VM -Value $savedGetVm } else { Remove-Item function:script:Get-VM -ErrorAction SilentlyContinue }
+        if ($savedSetVm) { Set-Item function:script:Set-VM -Value $savedSetVm } else { Remove-Item function:script:Set-VM -ErrorAction SilentlyContinue }
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }

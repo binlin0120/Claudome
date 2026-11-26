@@ -1,11 +1,24 @@
 ﻿#requires -Version 7.0
-param([Parameter(Mandatory)][string]$PipeName)
+param([string]$PipeName='',[switch]$ProbeGuestStatus)
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
-if($PipeName -notmatch '^ClaudeSetup-[a-f0-9]{32}$'){exit 1}
-$pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::None,[Security.Principal.TokenImpersonationLevel]::Identification)
-$pipe.Connect(180000)
-$reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,4096,$true)
-$writer=[IO.StreamWriter]::new($pipe,[Text.UTF8Encoding]::new($false),4096,$true);$writer.AutoFlush=$true
+$script:supervisedChildPids=[Collections.Generic.List[int]]::new()
+$script:workerScriptPath=$PSCommandPath
+function Stop-SupervisedChildren {
+    foreach($childPid in @($script:supervisedChildPids)) {
+        try {
+            $proc = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+            if($proc -and -not $proc.HasExited){ $proc.Kill($true) }
+        } catch { }
+    }
+    $script:supervisedChildPids.Clear()
+}
+if(-not $ProbeGuestStatus) {
+    if($PipeName -notmatch '^ClaudeSetup-[a-f0-9]{32}$'){exit 1}
+    $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::None,[Security.Principal.TokenImpersonationLevel]::Identification)
+    $pipe.Connect(180000)
+    $reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,4096,$true)
+    $writer=[IO.StreamWriter]::new($pipe,[Text.UTF8Encoding]::new($false),4096,$true);$writer.AutoFlush=$true
+}
 $o=$null;$verificationOnly=$false
 function Assert-LocalPath([string]$Path,[string]$Parent) {
     $full=[IO.Path]::GetFullPath($Path);$base=[IO.Path]::GetFullPath($Parent).TrimEnd('\')+'\'
@@ -171,7 +184,7 @@ function Get-GuestSessionFailure($ErrorRecord) {
     return 'SessionUnavailable'
 }
 
-function Get-HyperVGuestStatus($Data) {
+function Invoke-GuestStatusProbeDirect($Data) {
     $vm = Target-VM $Data
     $named = $null
     try { $named = Guest-Session $Data }
@@ -188,6 +201,55 @@ function Get-HyperVGuestStatus($Data) {
     catch { return Get-GuestSessionFailure $_ }
     try { return Read-GuestBootstrap $fallback ([string]$vm.Id) ([string]$o.WorkspaceId) $false }
     finally { Remove-PSSession $fallback }
+}
+
+function Get-HyperVGuestStatus($Data, [int]$TimeoutMs = 12000) {
+    $null = Target-VM $Data
+    if (-not $script:workerScriptPath -or -not [IO.File]::Exists($script:workerScriptPath)) {
+        return Invoke-GuestStatusProbeDirect $Data
+    }
+    $pwshExe = Join-Path $PSHOME 'pwsh.exe'
+    if (-not [IO.File]::Exists($pwshExe)) {
+        return Invoke-GuestStatusProbeDirect $Data
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new($pwshExe)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($a in @('-NoLogo','-NoProfile','-NonInteractive','-File',$script:workerScriptPath,'-ProbeGuestStatus')) {
+        $start.ArgumentList.Add($a)
+    }
+    $child = [Diagnostics.Process]::Start($start)
+    if (-not $child) { return 'SessionUnavailable' }
+    $script:supervisedChildPids.Add($child.Id)
+    try {
+        $payload = @{
+            options = $o
+            data = @{ vmId = [string]$Data.vmId; password = [string]$Data.password }
+        } | ConvertTo-Json -Compress -Depth 4
+        $child.StandardInput.WriteLine($payload)
+        $child.StandardInput.Close()
+        $outTask = $child.StandardOutput.ReadToEndAsync()
+        $errTask = $child.StandardError.ReadToEndAsync()
+        if (-not $child.WaitForExit($TimeoutMs)) {
+            try { $child.Kill($true); $child.WaitForExit(2000) | Out-Null } catch { }
+            return 'SessionUnavailable'
+        }
+        $child.WaitForExit()
+        $stdout = $outTask.GetAwaiter().GetResult()
+        $null = $errTask.Wait(500)
+        foreach ($line in ($stdout -split "`r?`n")) {
+            if ($line -match '^STATUS:([A-Za-z0-9]+)$') {
+                return $Matches[1]
+            }
+        }
+        return 'SessionUnavailable'
+    } finally {
+        $null = $script:supervisedChildPids.Remove($child.Id)
+        $child.Dispose()
+    }
 }
 
 function Copy-VerifiedGuestResource($Session, $Data, $Source, [string]$UserName, [string]$Temporary) {
@@ -538,47 +600,114 @@ function Format-HyperVErrorResponse($Request, $ErrorRecord) {
     }
     return $resp
 }
-function Get-WindowsInstallProbe($Vm) {
-    $path=Assert-LocalPath (Join-Path $Vm.Path '.windows-install.json') $Vm.Path
+function Resolve-AttachedVhdChain($Vm, [string]$AttachedPath, [int]$MaxDepth = 16) {
+    $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $current = Assert-LocalPath $AttachedPath $Vm.Path
+    $depth = 0
+    $baseVhd = $null
+    while ($current) {
+        if ($depth -ge $MaxDepth) { return @{ chainValid = $false; reason = 'chain-too-deep'; chainDepth = $depth; basePath = $current; baseVhd = $null } }
+        if (-not $visited.Add($current)) { return @{ chainValid = $false; reason = 'chain-cycle'; chainDepth = $depth; basePath = $current; baseVhd = $null } }
+        $vhd = Get-VHD -Path $current
+        $resolved = Assert-LocalPath ([string]$vhd.Path) $Vm.Path
+        if ($resolved -ne $current) { return @{ chainValid = $false; reason = 'path-mismatch'; chainDepth = $depth; basePath = $current; baseVhd = $null } }
+        $parent = [string]$vhd.ParentPath
+        if ([string]::IsNullOrWhiteSpace($parent)) {
+            $baseVhd = $vhd
+            return @{ chainValid = $true; reason = 'ok'; chainDepth = $depth; basePath = $resolved; baseVhd = $baseVhd }
+        }
+        $current = Assert-LocalPath $parent $Vm.Path
+        $depth++
+    }
+    return @{ chainValid = $false; reason = 'empty-chain'; chainDepth = $depth; basePath = ''; baseVhd = $null }
+}
+function Get-WindowsInstallDiagnostics($Vm) {
+    $snaps = @(Get-VMSnapshot -VM $Vm -ErrorAction SilentlyContinue)
+    $path = Assert-LocalPath (Join-Path $Vm.Path '.windows-install.json') $Vm.Path
     if([IO.File]::Exists($path)) {
         try {
-            if(([IO.FileInfo]::new($path)).Length -gt 65536){return 'needs-recovery'}
+            if(([IO.FileInfo]::new($path)).Length -gt 65536){return @{state='needs-recovery';reason='invalid-log';snapshotCount=$snaps.Count;chainMatchesBase=$false;baseDiskPath=''}}
             $c=[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
-            if($c.schema -ne 1 -or $c.vmId -ne [string]$Vm.Id -or $c.workspaceId -ne $o.WorkspaceId -or $c.isoSha256 -ne $o.IsoSha256 -or $c.imageIndex -ne $o.WindowsImageIndex -or $c.userName -ne $o.UserName -or $c.diskGb -ne $o.DiskGb -or $c.phase -notin @('planned','applying','image-ready','ready') -or @($c.preservedDisks).Count -gt 128){return 'needs-recovery'}
+            if($c.schema -ne 1 -or $c.vmId -ne [string]$Vm.Id -or $c.workspaceId -ne $o.WorkspaceId -or $c.isoSha256 -ne $o.IsoSha256 -or $c.imageIndex -ne $o.WindowsImageIndex -or $c.userName -ne $o.UserName -or $c.diskGb -ne $o.DiskGb -or $c.phase -notin @('planned','applying','image-ready','ready') -or @($c.preservedDisks).Count -gt 128){return @{state='needs-recovery';reason='identity-mismatch';snapshotCount=$snaps.Count;chainMatchesBase=$false;baseDiskPath=''}}
             $disk=Assert-InstallDiskPath ([string]$c.diskPath) $Vm
             foreach($old in @($c.preservedDisks)){$null=Assert-InstallDiskPath ([string]$old) $Vm}
+            $allDrives = @(Get-VMHardDiskDrive -VM $Vm)
+            if ($allDrives.Count -eq 1) {
+                $attachedFull = [IO.Path]::GetFullPath([string]$allDrives[0].Path)
+                if ($attachedFull -ne $disk) {
+                    try {
+                        $chain = Resolve-AttachedVhdChain $Vm $attachedFull
+                        $matchesBase = $chain.chainValid -and ($chain.basePath -eq $disk) -and $chain.baseVhd -and
+                            ([string]$chain.baseVhd.DiskIdentifier -eq $c.diskId) -and $c.diskId -and
+                            ($chain.baseVhd.Size -eq ([long]$o.DiskGb*1GB)) -and ($chain.baseVhd.VhdFormat -eq 'VHDX') -and ($chain.baseVhd.VhdType -eq 'Dynamic')
+                        $rs = if ($matchesBase) { 'checkpoint-chain-matched' } else { 'checkpoint-chain-invalid' }
+                        return @{ state = 'needs-recovery'; reason = $rs; snapshotCount = $snaps.Count; chainMatchesBase = [bool]$matchesBase; baseDiskPath = $disk }
+                    } catch {
+                        return @{ state = 'needs-recovery'; reason = 'checkpoint-chain-invalid'; snapshotCount = $snaps.Count; chainMatchesBase = $false; baseDiskPath = $disk }
+                    }
+                }
+            }
             $drives=@(Assert-InstallDrives $Vm $disk)
+            if ($snaps.Count -gt 0) {
+                return @{ state = 'needs-recovery'; reason = 'checkpoint-active'; snapshotCount = $snaps.Count; chainMatchesBase = $true; baseDiskPath = $disk }
+            }
             if($c.phase -eq 'ready') {
-                if($drives.Count -ne 1){return 'needs-recovery'}
+                if($drives.Count -ne 1){return @{state='needs-recovery';reason='drive-missing';snapshotCount=$snaps.Count;chainMatchesBase=$false;baseDiskPath=$disk}}
                 $null=Confirm-WindowsDisk $c $Vm -AllowAttached:$true
-                return 'ready'
+                return @{state='ready';reason='ok';snapshotCount=0;chainMatchesBase=$true;baseDiskPath=$disk}
             }
             if($c.phase -eq 'image-ready') {
-                if($drives.Count -ne 0){return 'needs-recovery'}
+                if($drives.Count -ne 0){return @{state='needs-recovery';reason='drive-unexpected';snapshotCount=$snaps.Count;chainMatchesBase=$false;baseDiskPath=$disk}}
                 $null=Confirm-WindowsDisk $c $Vm
-                return 'image-ready'
+                return @{state='image-ready';reason='ok';snapshotCount=0;chainMatchesBase=$true;baseDiskPath=$disk}
             }
-            if($c.phase -eq 'applying'){return 'needs-recovery'}
-            if($drives.Count -gt 0 -or [IO.File]::Exists($disk)){return 'needs-recovery'}
-            return 'empty'
-        } catch { return 'needs-recovery' }
+            if($c.phase -eq 'applying'){return @{state='needs-recovery';reason='incomplete-apply';snapshotCount=$snaps.Count;chainMatchesBase=$false;baseDiskPath=$disk}}
+            if($drives.Count -gt 0 -or [IO.File]::Exists($disk)){return @{state='needs-recovery';reason='unexpected-disk';snapshotCount=$snaps.Count;chainMatchesBase=$false;baseDiskPath=$disk}}
+            return @{state='empty';reason='ok';snapshotCount=0;chainMatchesBase=$true;baseDiskPath=$disk}
+        } catch { return @{state='needs-recovery';reason='probe-error';snapshotCount=$snaps.Count;chainMatchesBase=$false;baseDiskPath=''} }
     }
     $defaultDisk=Assert-InstallDiskPath (Join-Path $Vm.Path 'Windows11.vhdx') $Vm
-    try { $drives=@(Assert-InstallDrives $Vm $defaultDisk) } catch { return 'needs-recovery' }
+    try { $drives=@(Assert-InstallDrives $Vm $defaultDisk) } catch { return @{state='needs-recovery';reason='drive-mismatch';snapshotCount=$snaps.Count;chainMatchesBase=$false;baseDiskPath=$defaultDisk} }
+    if ($snaps.Count -gt 0) {
+        return @{ state = 'needs-recovery'; reason = 'checkpoint-active'; snapshotCount = $snaps.Count; chainMatchesBase = $false; baseDiskPath = $defaultDisk }
+    }
     $ready=Assert-LocalPath (Join-Path $Vm.Path '.windows-applied') $Vm.Path
     $legacy=([IO.File]::Exists($ready)) -and ([IO.File]::ReadAllText($ready)).Trim() -eq 'applied'
     if($legacy) {
         try {
-            if(-not [IO.File]::Exists($defaultDisk)){return 'needs-recovery'}
+            if(-not [IO.File]::Exists($defaultDisk)){return @{state='needs-recovery';reason='missing-disk';snapshotCount=0;chainMatchesBase=$false;baseDiskPath=$defaultDisk}}
             $vhd=Get-VHD -Path $defaultDisk
-            if($vhd.Size -ne ([long]$o.DiskGb*1GB) -or $vhd.VhdFormat -ne 'VHDX' -or $vhd.VhdType -ne 'Dynamic' -or $vhd.ParentPath){return 'needs-recovery'}
-            if($drives.Count -eq 1){return 'ready'}
-            if($drives.Count -eq 0 -and -not $vhd.Attached){return 'image-ready'}
-            return 'needs-recovery'
-        } catch { return 'needs-recovery' }
+            if($vhd.Size -ne ([long]$o.DiskGb*1GB) -or $vhd.VhdFormat -ne 'VHDX' -or $vhd.VhdType -ne 'Dynamic' -or $vhd.ParentPath){return @{state='needs-recovery';reason='vhd-mismatch';snapshotCount=0;chainMatchesBase=$false;baseDiskPath=$defaultDisk}}
+            if($drives.Count -eq 1){return @{state='ready';reason='ok';snapshotCount=0;chainMatchesBase=$true;baseDiskPath=$defaultDisk}}
+            if($drives.Count -eq 0 -and -not $vhd.Attached){return @{state='image-ready';reason='ok';snapshotCount=0;chainMatchesBase=$true;baseDiskPath=$defaultDisk}}
+            return @{state='needs-recovery';reason='vhd-attached';snapshotCount=0;chainMatchesBase=$false;baseDiskPath=$defaultDisk}
+        } catch { return @{state='needs-recovery';reason='legacy-error';snapshotCount=0;chainMatchesBase=$false;baseDiskPath=$defaultDisk} }
     }
-    if($drives.Count -eq 0 -and -not [IO.File]::Exists($defaultDisk)){return 'empty'}
-    return 'needs-recovery'
+    if($drives.Count -eq 0 -and -not [IO.File]::Exists($defaultDisk)){return @{state='empty';reason='ok';snapshotCount=0;chainMatchesBase=$true;baseDiskPath=$defaultDisk}}
+    return @{state='needs-recovery';reason='orphan-disk';snapshotCount=0;chainMatchesBase=$false;baseDiskPath=$defaultDisk}
+}
+function Get-WindowsInstallProbe($Vm) {
+    return (Get-WindowsInstallDiagnostics $Vm).state
+}
+function Disable-TaskVmAutomaticCheckpoints($Vm) {
+    $current = Get-VM -Id $Vm.Id
+    if (-not $current.AutomaticCheckpointsEnabled) { return 'already-disabled' }
+    if ($current.State -ne 'Off') { throw 'HYPERV_CHECKPOINT_ACTIVE' }
+    $snaps = @(Get-VMSnapshot -VM $current -ErrorAction SilentlyContinue)
+    if ($snaps.Count -gt 0) { throw 'HYPERV_CHECKPOINT_ACTIVE' }
+    $ownerMarker = Join-Path (Split-Path -Parent $current.Path) '.claude-hyperv-owner.json'
+    $ownerAlt = Join-Path $current.Path '.claude-hyperv-owner.json'
+    if ([IO.File]::Exists($ownerMarker)) {
+        if (-not (Test-OwnedVmMarker $ownerMarker ([string]$o.WorkspaceId) ([string]$o.VmName))) { throw 'VM_SCOPE' }
+    } elseif ([IO.File]::Exists($ownerAlt)) {
+        if (-not (Test-OwnedVmMarker $ownerAlt ([string]$o.WorkspaceId) ([string]$o.VmName))) { throw 'VM_SCOPE' }
+    }
+    $probe = Get-WindowsInstallProbe $current
+    if ($probe -notin @('empty','image-ready','ready')) { throw 'HYPERV_CHECKPOINT_ACTIVE' }
+    Set-VM -VM $current -AutomaticCheckpointsEnabled $false
+    $after = Get-VM -Id $current.Id
+    if ($after.AutomaticCheckpointsEnabled) { throw 'VM_CHECKPOINT_POLICY' }
+    return 'disabled'
 }
 function Complete-WindowsDisk($Vm,$Checkpoint) {
     $script:windowsInstallStage='attach-vhd'
@@ -596,6 +725,10 @@ function Complete-WindowsDisk($Vm,$Checkpoint) {
     # Retained for compatibility. The bound checkpoint, not this text flag,
     # determines whether the disk can be started on subsequent attempts.
     'applied' | Set-Content -LiteralPath (Assert-LocalPath (Join-Path $Vm.Path '.windows-applied') $Vm.Path) -Encoding utf8NoBOM
+    if ((Get-VM -Id $Vm.Id).AutomaticCheckpointsEnabled) {
+        Set-VM -VM $Vm -AutomaticCheckpointsEnabled $false
+        if ((Get-VM -Id $Vm.Id).AutomaticCheckpointsEnabled) { throw 'VM_CHECKPOINT_POLICY' }
+    }
     $script:windowsInstallStage='start-vm'
     Start-VM -VM $Vm | Out-Null
 }
@@ -623,6 +756,28 @@ function Resolve-WindowsInstallDisk($MountedVhd) {
     if($disk.CimSystemProperties.ClassName -ne 'MSFT_Disk' -or $bus -isnot [uint16] -or $bus -ne 15 -or
        $disk.PartitionStyle -ne 'RAW' -or $disk.IsBoot -or $disk.IsSystem){throw 'DISK_SCOPE'}
     return $disk
+}
+function New-HyperVUnattendXml([string]$UserName, [string]$Password, [string]$NetworkSource, [string]$TimeZoneId, [string]$UiLanguage = '') {
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Password + 'Password'))
+    $name = [Security.SecurityElement]::Escape($UserName)
+    $tz = if ($NetworkSource -ne '稍后配置' -and $TimeZoneId) { '<TimeZone>' + [Security.SecurityElement]::Escape($TimeZoneId) + '</TimeZone>' } else { '' }
+    $langBlock = ''
+    if ($UiLanguage -and $UiLanguage -match '^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})+$') {
+        $langEsc = [Security.SecurityElement]::Escape($UiLanguage)
+        $langBlock = "<component name=`"Microsoft-Windows-International-Core`" processorArchitecture=`"amd64`" publicKeyToken=`"31bf3856ad364e35`" language=`"neutral`" versionScope=`"nonSxS`"><InputLocale>$langEsc</InputLocale><SystemLocale>$langEsc</SystemLocale><UILanguage>$langEsc</UILanguage><UserLocale>$langEsc</UserLocale></component>"
+    }
+    return @"
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+ <settings pass="specialize"><component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"><ComputerName>ClaudeWorkspace</ComputerName>$tz</component></settings>
+ <settings pass="oobeSystem">$langBlock<component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+  <OOBE><HideOnlineAccountScreens>true</HideOnlineAccountScreens><HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE></OOBE>
+  <UserAccounts><LocalAccounts><LocalAccount wcm:action="add"><Password><Value>$encoded</Value><PlainText>false</PlainText></Password><Name>$name</Name><Group>Administrators</Group></LocalAccount></LocalAccounts></UserAccounts>
+  <AutoLogon><Password><Value>$encoded</Value><PlainText>false</PlainText></Password><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>$name</Username></AutoLogon>
+  <FirstLogonCommands><SynchronousCommand wcm:action="add"><Order>1</Order><Description>Prepare local VM management</Description><CommandLine>C:\ProgramData\ClaudeBootstrap\pwsh\pwsh.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File C:\ProgramData\ClaudeBootstrap\Initialize.ps1</CommandLine></SynchronousCommand></FirstLogonCommands>
+ </component></settings>
+</unattend>
+"@
 }
 function Apply-WindowsImageToNewDisk($vm,$checkpoint,$Data) {
     $script:windowsInstallStage='new-vhd'
@@ -656,6 +811,8 @@ function Apply-WindowsImageToNewDisk($vm,$checkpoint,$Data) {
         $images=@(Get-WindowsImage -ImagePath $source)
         $image=$images | Where-Object {$_.ImageIndex -eq [int]$o.WindowsImageIndex} | Select-Object -First 1
         if(-not $image){throw 'WINDOWS_MEDIA_UNSUPPORTED'}
+        $uiLang = @($image.Languages | Where-Object { $_ -match '^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})+$' }) | Select-Object -First 1
+        if (-not $uiLang -and [string]$o.IsoPath -match '(?i)zh[-_]cn') { $uiLang = 'zh-CN' }
         $script:windowsInstallStage='apply-image'
         Apply-WindowsImageWithProgress $source $image.ImageIndex $target
         $script:windowsInstallStage='bootstrap'
@@ -664,21 +821,7 @@ function Apply-WindowsImageToNewDisk($vm,$checkpoint,$Data) {
         Expand-Archive -LiteralPath $psArchive -DestinationPath (Join-Path $bootstrap 'pwsh') -Force
         @{vmId=[string]$vm.Id;workspaceId=[string]$o.WorkspaceId} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $bootstrap 'identity.json') -Encoding utf8NoBOM
         Copy-Item -LiteralPath ([string]$Data.bootstrapScript) -Destination (Join-Path $bootstrap 'Initialize.ps1')
-        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(([string]$Data.password)+'Password'))
-        $name=[Security.SecurityElement]::Escape([string]$o.UserName)
-        $tz=if($o.NetworkSource -ne '稍后配置'){'<TimeZone>'+[Security.SecurityElement]::Escape([string]$o.TimeZoneId)+'</TimeZone>'}else{''}
-        $xml=@"
-<?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
- <settings pass="specialize"><component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"><ComputerName>ClaudeWorkspace</ComputerName>$tz</component></settings>
- <settings pass="oobeSystem"><component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-  <OOBE><HideOnlineAccountScreens>true</HideOnlineAccountScreens><HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE></OOBE>
-  <UserAccounts><LocalAccounts><LocalAccount wcm:action="add"><Password><Value>$encoded</Value><PlainText>false</PlainText></Password><Name>$name</Name><Group>Administrators</Group></LocalAccount></LocalAccounts></UserAccounts>
-  <AutoLogon><Password><Value>$encoded</Value><PlainText>false</PlainText></Password><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>$name</Username></AutoLogon>
-  <FirstLogonCommands><SynchronousCommand wcm:action="add"><Order>1</Order><Description>Prepare local VM management</Description><CommandLine>C:\ProgramData\ClaudeBootstrap\pwsh\pwsh.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File C:\ProgramData\ClaudeBootstrap\Initialize.ps1</CommandLine></SynchronousCommand></FirstLogonCommands>
- </component></settings>
-</unattend>
-"@
+        $xml = New-HyperVUnattendXml ([string]$o.UserName) ([string]$Data.password) ([string]$o.NetworkSource) ([string]$o.TimeZoneId) ([string]$uiLang)
         $panther=Join-Path $target 'Windows\Panther';New-Item -ItemType Directory -Path $panther -Force | Out-Null
         [IO.File]::WriteAllText((Join-Path $panther 'unattend.xml'),$xml,[Text.UTF8Encoding]::new($false))
         $script:windowsInstallStage='bcdboot'
@@ -692,6 +835,21 @@ function Apply-WindowsImageToNewDisk($vm,$checkpoint,$Data) {
         if($iso -and -not $imageBefore.Attached){Dismount-DiskImage -ImagePath ([string]$o.IsoPath) -ErrorAction SilentlyContinue | Out-Null}
     }
 
+}
+if ($ProbeGuestStatus) {
+    try {
+        Import-Module Hyper-V -ErrorAction Stop
+        $probeInput = [Console]::In.ReadLine() | ConvertFrom-Json
+        $o = $probeInput.options
+        $d = $probeInput.data
+        if (-not $o -or -not $d) { Write-Output 'STATUS:StatusUnavailable'; exit 0 }
+        $status = Invoke-GuestStatusProbeDirect $d
+        Write-Output ('STATUS:' + [string]$status)
+        exit 0
+    } catch {
+        Write-Output 'STATUS:SessionUnavailable'
+        exit 0
+    }
 }
 try {
     while($null -ne ($line=$reader.ReadLine())) {
@@ -757,6 +915,14 @@ try {
                             $vm=Target-VM $d
                             $value=Get-WindowsInstallProbe $vm
                         }
+                        'windows-install-diagnose' {
+                            $vm=Target-VM $d
+                            $value=(Get-WindowsInstallDiagnostics $vm) | ConvertTo-Json -Compress
+                        }
+                        'ensure-checkpoint-policy' {
+                            $vm=Target-VM $d
+                            $value=Disable-TaskVmAutomaticCheckpoints $vm
+                        }
                         'configure' {
                             $script:hypervSubstage='target-vm'
                             $vm=Target-VM $d;if($vm.State -ne 'Off'){throw 'VM_SCOPE'}
@@ -777,7 +943,8 @@ try {
                             $script:hypervSubstage='verify-security'
                             if(-not (Get-VMSecurity -VM $vm).TpmEnabled -or [string](Get-VMFirmware -VM $vm).SecureBoot -ne 'On'){throw 'VM_SECURITY'}
                             $script:hypervSubstage='set-vm-options'
-                            Set-VM -VM $vm -AutomaticStartAction Nothing -AutomaticStopAction ShutDown
+                            Set-VM -VM $vm -AutomaticStartAction Nothing -AutomaticStopAction ShutDown -AutomaticCheckpointsEnabled $false
+                            if((Get-VM -Id $vm.Id).AutomaticCheckpointsEnabled){throw 'VM_CHECKPOINT_POLICY'}
                             try{Set-VM -VM $vm -EnhancedSessionTransportType HvSocket -ErrorAction SilentlyContinue}catch{}
                             $value='configured'
                         }
@@ -787,7 +954,7 @@ try {
                             if((Get-FileHash -LiteralPath $scriptFile -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash){throw 'VM_SCOPE'}
                             $start=[Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'));$start.UseShellExecute=$false;$start.CreateNoWindow=$true
                             foreach($a in @('-NoLogo','-NoProfile','-File',$scriptFile,'-PipeName',[string]$d.pipeName)){$start.ArgumentList.Add($a)}
-                            $process=[Diagnostics.Process]::Start($start);$value=[string]$process.Id
+                            $process=[Diagnostics.Process]::Start($start);if($process){$script:supervisedChildPids.Add($process.Id)};$value=[string]$process.Id
                         }
                         'boundary-prepare' {
                             $vm=Target-VM $d
@@ -940,4 +1107,4 @@ try {
         $writer.WriteLine(($response | ConvertTo-Json -Compress -Depth 4))
         $request=$null;$d=$null
     }
-}finally{$writer.Dispose();$reader.Dispose();$pipe.Dispose()}
+}finally{Stop-SupervisedChildren;if($writer){$writer.Dispose()};if($reader){$reader.Dispose()};if($pipe){$pipe.Dispose()}}

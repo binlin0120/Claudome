@@ -23,25 +23,91 @@ internal enum HyperVWindowsInstallState
     NeedsRecovery
 }
 
+internal sealed record HyperVWindowsInstallDiagnosis(
+    HyperVWindowsInstallState State,
+    string Reason,
+    int SnapshotCount,
+    bool ChainMatchesBase,
+    string BaseDiskPath);
+
 // A single elevated, current-user-only pipe session avoids repeated UAC prompts.
 // Passwords travel in the protected pipe; command lines contain only the pipe name.
 public sealed class HyperV : IVmBackend
 {
     private readonly HyperV? launcher;
+    private readonly Func<SetupOptions, CancellationToken, Task<Stream>>? connectFixture;
     private HyperV? verifier;
     private readonly IProgress<InstallationProgress>? progress;
     public HyperV(IProgress<InstallationProgress>? progress = null) { this.progress = progress; }
+    internal HyperV(Func<SetupOptions, CancellationToken, Task<Stream>> connectFixture, IProgress<InstallationProgress>? progress = null)
+    {
+        this.connectFixture = connectFixture;
+        this.progress = progress;
+    }
     private HyperV(HyperV launcher) { this.launcher=launcher; }
-    private NamedPipeServerStream? pipe;
+    private Stream? pipe;
     private StreamReader? reader;
     private StreamWriter? writer;
     private Process? worker;
     private PrivateFile? workerFile;
     private readonly SemaphoreSlim serial = new(1, 1);
-    internal bool HasManagementConnection => pipe?.IsConnected == true && writer is not null;
+    private int disposed;
+    private volatile bool faultedOrAborted;
+    private readonly List<string> disposeTrace = [];
+    internal IReadOnlyList<string> DisposeTrace => disposeTrace;
+    internal int ConnectionSequence { get; private set; }
+    internal bool HasManagementConnection => Volatile.Read(ref disposed) == 0 && !faultedOrAborted && pipe is { CanRead: true, CanWrite: true } && (pipe is not NamedPipeServerStream nps || nps.IsConnected) && writer is not null;
+
+    private static bool IsCancellableReadOperation(string operation) => operation is
+        "ready" or "running" or "windows-install-state" or "windows-install-diagnose" or
+        "clipboard-status" or "boundary-verify" or "ensure-checkpoint-policy";
+
+    private static TimeSpan? TimeoutForOperation(string operation) => operation switch
+    {
+        "ready" => TimeSpan.FromSeconds(30),
+        "repair-guest-session" => TimeSpan.FromSeconds(90),
+        _ when IsCancellableReadOperation(operation) => TimeSpan.FromSeconds(30),
+        _ => null
+    };
+
+    private void AbortPipeUnsafely()
+    {
+        faultedOrAborted = true;
+        var p = Interlocked.Exchange(ref pipe, null);
+        var r = Interlocked.Exchange(ref reader, null);
+        var w = Interlocked.Exchange(ref writer, null);
+        // Dispose the underlying stream FIRST so any blocked ReadLineAsync unblocks immediately
+        // without deadlocking on StreamReader / StreamWriter synchronous Flush locks.
+        if (p is not null) try { p.Dispose(); } catch { }
+        if (r is not null) try { r.Dispose(); } catch { }
+        if (w is not null) try { w.Dispose(); } catch { }
+    }
+
     private async Task Connect(SetupOptions o, CancellationToken token)
     {
-        if (pipe is not null) return;
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        if (pipe is not null && !faultedOrAborted) return;
+        AbortPipeUnsafely();
+        if (worker is { } staleWorker)
+        {
+            worker = null;
+            try { if (!staleWorker.HasExited) staleWorker.Kill(entireProcessTree: true); } catch { }
+            try { staleWorker.Dispose(); } catch { }
+        }
+        workerFile?.Dispose();
+        workerFile = null;
+        faultedOrAborted = false;
+
+        if (connectFixture is not null)
+        {
+            pipe = await connectFixture(o, token);
+            reader = new(pipe, Encoding.UTF8, false, 4096, true);
+            writer = new(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+            ConnectionSequence++;
+            await CallLocked(o, "init", new { options = o, verificationOnly = launcher is not null }, token);
+            return;
+        }
+
         var resource = Catalog.Resources.Single(r => r.Id == "pwsh");
         var archive = Paths.Under(o.Cache, resource.FileName);
         if (!File.Exists(archive) || await Downloader.Hash(archive, token) != resource.Sha256) throw new SetupException("请先下载并核验 PowerShell 组件，再使用 Hyper-V 自动部署。");
@@ -51,7 +117,8 @@ public sealed class HyperV : IVmBackend
         Paths.RejectLinks(runtime);
         HostRuntime.ExtractVerified(archive, runtime);
         var name = "ClaudeSetup-" + Guid.NewGuid().ToString("N");
-        pipe = new(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        var serverPipe = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        pipe = serverPipe;
         workerFile = new PrivateFile(o.Private, Catalog.EmbeddedText("HyperVWorker.ps1"), ".ps1");
         var start = new ProcessStartInfo(Path.Combine(runtime, "pwsh.exe")) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
         foreach (var arg in new[] { "-NoLogo", "-NoProfile", "-File", workerFile.FileName, "-PipeName", name }) start.ArgumentList.Add(arg);
@@ -61,38 +128,99 @@ public sealed class HyperV : IVmBackend
             worker=Process.GetProcessById(int.Parse(id));
         }
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromMinutes(3));
-        await pipe.WaitForConnectionAsync(timeout.Token);
+        await serverPipe.WaitForConnectionAsync(timeout.Token);
         reader = new(pipe, Encoding.UTF8, false, 4096, true); writer = new(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
-        await Call(o, "init", new { options = o, verificationOnly = launcher is not null }, token);
+        ConnectionSequence++;
+        await CallLocked(o, "init", new { options = o, verificationOnly = launcher is not null }, token);
     }
     private async Task<string> Call(SetupOptions options, string operation, object? data, CancellationToken token)
     {
-        if (pipe is null) await Connect(options, token);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         await serial.WaitAsync(token);
         try {
-            token.ThrowIfCancellationRequested();
-            await writer!.WriteLineAsync(JsonSerializer.Serialize(new { operation, data }));
-            // Do not interrupt disk application, feature servicing or the guest installer.
-            using var probeTimeout = operation is "ready" or "repair-guest-session"
-                ? new CancellationTokenSource(TimeSpan.FromSeconds(operation == "ready" ? 30 : 90)) : null;
-            JsonDocument result;
-            while (true) {
-                string? line;
-                try { line = await reader!.ReadLineAsync(probeTimeout?.Token ?? CancellationToken.None); }
-                catch (OperationCanceledException) when (probeTimeout?.IsCancellationRequested == true)
-                {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+            if (pipe is null || faultedOrAborted) await Connect(options, token);
+            return await CallLocked(options, operation, data, token);
+        } finally {
+            try { if (Volatile.Read(ref disposed) == 0) serial.Release(); }
+            catch (ObjectDisposedException) { }
+        }
+    }
+
+    private async Task<string> CallLocked(SetupOptions options, string operation, object? data, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var cancellableRead = IsCancellableReadOperation(operation);
+        var opTimeout = TimeoutForOperation(operation);
+        var activeWriter = writer ?? throw new SetupException("Hyper-V 管理通道未就绪，请重试。");
+        var activeReader = reader ?? throw new SetupException("Hyper-V 管理通道未就绪，请重试。");
+        var payload = JsonSerializer.Serialize(new { operation, data });
+        try
+        {
+            await activeWriter.WriteLineAsync(payload.AsMemory(), cancellableRead ? token : CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(10), cancellableRead ? token : CancellationToken.None);
+        }
+        catch (OperationCanceledException) when (cancellableRead && token.IsCancellationRequested)
+        {
+            AbortPipeUnsafely();
+            throw new OperationCanceledException("已暂停当前 Hyper-V 检查，原任务保留。", token);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or TimeoutException)
+        {
+            AbortPipeUnsafely();
+            throw new SetupException("Hyper-V 管理通道发送请求失败，原任务已保留，请继续部署。");
+        }
+
+        JsonDocument result;
+        while (true) {
+            string? line;
+            using var timeoutCts = opTimeout is { } d ? new CancellationTokenSource(d) : null;
+            using var linkedCts = cancellableRead
+                ? (timeoutCts is not null ? CancellationTokenSource.CreateLinkedTokenSource(token, timeoutCts.Token) : CancellationTokenSource.CreateLinkedTokenSource(token))
+                : (timeoutCts is not null ? CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token) : null);
+            try { line = await activeReader.ReadLineAsync(linkedCts?.Token ?? CancellationToken.None); }
+            catch (OperationCanceledException) when (Volatile.Read(ref disposed) != 0)
+            {
+                AbortPipeUnsafely();
+                throw new OperationCanceledException("Hyper-V 管理通道已关闭。");
+            }
+            catch (OperationCanceledException) when (cancellableRead && token.IsCancellationRequested)
+            {
+                AbortPipeUnsafely();
+                throw new OperationCanceledException("已暂停当前 Hyper-V 检查，原任务保留。", token);
+            }
+            catch (OperationCanceledException) when (timeoutCts?.IsCancellationRequested == true)
+            {
+                AbortPipeUnsafely();
+                if (operation is "ready" or "repair-guest-session")
                     throw new HandoffException(new("Hyper-V 来宾初始化检查超时",
                         [operation == "ready" ? "来宾 PowerShell Direct 未在 30 秒内返回状态。" : "来宾会话修复未在 90 秒内返回结果。",
                          "请保留原虚拟机和当前安装进度，确认 Windows 桌面及初始化状态后继续原任务。"], "guest-wait"));
-                }
-                if (line is null) throw new SetupException("Hyper-V 管理通道已结束，原任务会保留，请继续部署。");
-                result = JsonDocument.Parse(line);
-                if (!result.RootElement.TryGetProperty("event", out var kind)) break;
-                using (result) {
-                    if (kind.GetString() != "install-progress" || operation is not ("windows" or "cleanup-recovery")) throw new SetupException("安装进度与当前操作不符。");
-                    progress?.Report(InstallationProgress.FromWorker(result.RootElement));
-                }
+                throw new HandoffException(new("Hyper-V 状态查询超时",
+                    ["宿主机未在 30 秒内完成当前只读状态回读，已安全断开本次通道。",
+                     "原虚拟机与磁盘保留完好，请确认 Hyper-V 管理器状态后继续原任务。"], "guest-wait"));
             }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                AbortPipeUnsafely();
+                if (Volatile.Read(ref disposed) != 0 || (cancellableRead && token.IsCancellationRequested))
+                    throw new OperationCanceledException("已暂停当前 Hyper-V 检查，原任务保留。", token);
+                throw new SetupException("Hyper-V 管理通道已结束，原任务会保留，请继续部署。");
+            }
+            if (line is null)
+            {
+                AbortPipeUnsafely();
+                if (Volatile.Read(ref disposed) != 0 || (cancellableRead && token.IsCancellationRequested))
+                    throw new OperationCanceledException("已暂停当前 Hyper-V 检查，原任务保留。", token);
+                throw new SetupException("Hyper-V 管理通道已结束，原任务会保留，请继续部署。");
+            }
+            result = JsonDocument.Parse(line);
+            if (!result.RootElement.TryGetProperty("event", out var kind)) break;
+            using (result) {
+                if (kind.GetString() != "install-progress" || operation is not ("windows" or "cleanup-recovery")) throw new SetupException("安装进度与当前操作不符。");
+                progress?.Report(InstallationProgress.FromWorker(result.RootElement));
+            }
+        }
             using var completedResponse = result;
             if (!result.RootElement.GetProperty("ok").GetBoolean()) {
                 var code = result.RootElement.GetProperty("code").GetString();
@@ -110,6 +238,8 @@ public sealed class HyperV : IVmBackend
                     "VM_KEY_PROTECTOR_READ_FAILED" => "无法读取本任务的 Hyper-V 密钥保护器。请查看同一时间的 Hyper-V-VMMS 管理日志。",
                     "VM_KEY_PROTECTOR_SETUP_FAILED" => "未能创建或回读本任务的本地密钥保护器。请保留原任务并查看 Hyper-V-VMMS 管理日志。",
                     "VM_TPM_ENABLE_FAILED" => "Hyper-V 未能启用虚拟 TPM。已保留原密钥保护器，请查看 Hyper-V-VMMS 管理日志。",
+                    "VM_CHECKPOINT_POLICY" => "Hyper-V 未能关闭当前虚拟机的自动检查点设置，请确认虚拟机已正常关机且无未合并检查点后重试。",
+                    "HYPERV_CHECKPOINT_ACTIVE" => "当前虚拟机存在尚未合并的检查点或差分盘（.avhdx）。请保持原盘不要删除，先正常关机并在 Hyper-V 管理器合并检查点后继续。",
                     "DISK_SCOPE" => "虚拟磁盘身份校验失败，未执行分区或格式化。",
                     "HYPERV_NOT_READY" => "Hyper-V 尚未就绪。请在宿主机排查：1) 进入主板 BIOS 确认开启 VT-x / AMD-V 与 SLAT 虚拟化；2) 在「启用或关闭 Windows 功能」勾选全部 Hyper-V 项并重启电脑；3) 以管理员身份重新运行 Claudome。",
                     "HYPERV_MODULE_UNAVAILABLE" => "已启用 Hyper-V，但未能加载 PowerShell Hyper-V 模块。请在宿主机打开「控制面板 → 程序 → 启用或关闭 Windows 功能」，勾选「Hyper-V 管理工具（Hyper-V Module for Windows PowerShell）」并重启后继续。",
@@ -176,7 +306,6 @@ public sealed class HyperV : IVmBackend
                 throw new SetupException(CommandFailure.HyperV(operation, code, detail));
             }
             return result.RootElement.GetProperty("value").GetString() ?? "";
-        } finally { serial.Release(); }
     }
     internal static string FallbackOperationDetail(string operation) => operation switch
     {
@@ -285,8 +414,37 @@ public sealed class HyperV : IVmBackend
     internal Task ShutdownOriginal(SessionState state, CancellationToken token) =>
         Call(state.Options, "shutdown", Context(state), token);
     public async Task<bool> IsRunning(SessionState s, CancellationToken token) => await Call(s.Options, "running", Context(s), token) == "True";
+    internal Task<string> EnsureCheckpointPolicy(SessionState s, CancellationToken token) =>
+        Call(s.Options, "ensure-checkpoint-policy", Context(s), token);
     internal async Task<HyperVWindowsInstallState> ProbeWindowsInstallState(SessionState s, CancellationToken token) =>
         ParseWindowsInstallState(await Call(s.Options, "windows-install-state", Context(s), token));
+
+    internal async Task<HyperVWindowsInstallDiagnosis> DiagnoseWindowsInstallState(SessionState s, CancellationToken token)
+    {
+        var raw = await Call(s.Options, "windows-install-diagnose", Context(s), token);
+        return ParseWindowsInstallDiagnosis(raw);
+    }
+
+    internal static HyperVWindowsInstallDiagnosis ParseWindowsInstallDiagnosis(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return new(HyperVWindowsInstallState.NeedsRecovery, "empty-response", 0, false, "");
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+            var state = root.TryGetProperty("state", out var st) ? ParseWindowsInstallState(st.GetString() ?? "") : HyperVWindowsInstallState.NeedsRecovery;
+            var reason = root.TryGetProperty("reason", out var rs) ? rs.GetString() ?? "" : "";
+            var snaps = root.TryGetProperty("snapshotCount", out var sc) && sc.TryGetInt32(out var sVal) ? sVal : 0;
+            var match = root.TryGetProperty("chainMatchesBase", out var cm) && cm.ValueKind == JsonValueKind.True;
+            var basePath = root.TryGetProperty("baseDiskPath", out var bp) ? bp.GetString() ?? "" : "";
+            return new(state, reason, snaps, match, basePath);
+        }
+        catch (JsonException)
+        {
+            return new(ParseWindowsInstallState(raw), "", 0, false, "");
+        }
+    }
 
     internal static HyperVWindowsInstallState ParseWindowsInstallState(string value) => value switch
     {
@@ -368,10 +526,71 @@ public sealed class HyperV : IVmBackend
     }
     public async ValueTask DisposeAsync()
     {
-        if(verifier is not null) {await verifier.DisposeAsync();verifier=null;}
-        try { if (writer is not null) await writer.WriteLineAsync("{\"operation\":\"exit\"}"); } catch { }
-        reader?.Dispose(); writer?.Dispose(); pipe?.Dispose();
-        if (worker is not null) { using var timeout = new CancellationTokenSource(5000); try { await worker.WaitForExitAsync(timeout.Token); } catch { } worker.Dispose(); }
-        workerFile?.Dispose(); serial.Dispose();
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+        var totalSw = Stopwatch.StartNew();
+        try
+        {
+            if (verifier is not null)
+            {
+                await verifier.DisposeAsync();
+                verifier = null;
+                disposeTrace.Add($"verifier:{totalSw.ElapsedMilliseconds}ms");
+            }
+            var canSendExit = !faultedOrAborted && serial.CurrentCount > 0 &&
+                pipe is { CanWrite: true } && (pipe is not NamedPipeServerStream nps || nps.IsConnected) &&
+                writer is not null && worker is not { HasExited: true };
+            if (canSendExit && writer is { } activeWriter)
+            {
+                var exitSw = Stopwatch.StartNew();
+                try
+                {
+                    await activeWriter.WriteLineAsync("{\"operation\":\"exit\"}").WaitAsync(TimeSpan.FromMilliseconds(400));
+                    await activeWriter.FlushAsync().WaitAsync(TimeSpan.FromMilliseconds(400));
+                    disposeTrace.Add($"exit-sent:{exitSw.ElapsedMilliseconds}ms");
+                }
+                catch
+                {
+                    faultedOrAborted = true;
+                    disposeTrace.Add($"exit-aborted:{exitSw.ElapsedMilliseconds}ms");
+                }
+            }
+            else
+            {
+                disposeTrace.Add($"exit-skipped(faulted={faultedOrAborted},busy={serial.CurrentCount == 0})");
+            }
+
+            var pipeSw = Stopwatch.StartNew();
+            AbortPipeUnsafely();
+            disposeTrace.Add($"pipe-closed:{pipeSw.ElapsedMilliseconds}ms");
+
+            if (worker is { } activeWorker)
+            {
+                var waitSw = Stopwatch.StartNew();
+                var waitMs = canSendExit && !faultedOrAborted ? 2500 : 400;
+                using var timeout = new CancellationTokenSource(waitMs);
+                try { await activeWorker.WaitForExitAsync(timeout.Token); } catch { }
+                disposeTrace.Add($"wait-worker:{waitSw.ElapsedMilliseconds}ms(exited={activeWorker.HasExited})");
+                if (!activeWorker.HasExited)
+                {
+                    try
+                    {
+                        activeWorker.Kill(entireProcessTree: true);
+                        disposeTrace.Add("worker-killed");
+                    }
+                    catch (Exception ex)
+                    {
+                        disposeTrace.Add($"worker-kill-skipped:0x{unchecked((uint)ex.HResult):X8}");
+                    }
+                }
+                activeWorker.Dispose();
+                worker = null;
+            }
+            workerFile?.Dispose();
+            workerFile = null;
+        }
+        finally
+        {
+            disposeTrace.Add($"total:{totalSw.ElapsedMilliseconds}ms");
+        }
     }
 }

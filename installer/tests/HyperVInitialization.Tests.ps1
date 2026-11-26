@@ -6,7 +6,7 @@ $tokens = $null; $errors = $null
 $worker = Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
 $ast = [Management.Automation.Language.Parser]::ParseFile($worker, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'WORKER_PARSE_FAILED' }
-foreach ($name in 'Get-GuestSessionFailure', 'Get-HyperVGuestStatus', 'Read-GuestBootstrap', 'Copy-VerifiedGuestResource', 'Send-VerifiedGuestResource') {
+foreach ($name in 'Get-GuestSessionFailure', 'Invoke-GuestStatusProbeDirect', 'Get-HyperVGuestStatus', 'Read-GuestBootstrap', 'Copy-VerifiedGuestResource', 'Send-VerifiedGuestResource') {
     $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if (!$definition) { throw "Missing production function $name" }
     . ([scriptblock]::Create($definition.Extent.Text))

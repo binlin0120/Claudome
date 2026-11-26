@@ -1051,6 +1051,27 @@ public sealed partial class SetupWindow
         if (!p1FlowOk) failed++;
         rows.Add(new { name = "empty-vm-routes-to-build-step-and-resumed-route-snapshot-avoids-refetch", passed = p1FlowOk, emptyBlocked, legacyUnverifiedBlocked, startedAllowed, snapshotOk, draftDetected, badDetected, deployClickUsedSnapshot, manualRestoreOk, manualRestoreFailureNotified, step0Fits, step0Bottom, step0Viewport });
 
+        // Verify Stage 4 OOBE desktop banner, always-accessible standalone Hyper-V entry, and zoom preference thresholds
+        Navigate(7);
+        state.VmId = "88888888-8888-8888-8888-888888888888";
+        state.Options.PlatformId = "hyperv";
+        state.Completed.Remove("guest-ready");
+        state.Completed.Add("windows-started");
+        busy = true;
+        UpdateDesktopActivity();
+        var oobeBannerVisible = desktopOobeBanner?.Visibility == Visibility.Visible &&
+            topStandaloneHyperV?.Visibility == Visibility.Visible &&
+            HyperVConsoleZoom.ChooseZoomMenuLevel(520) == 4 &&
+            HyperVConsoleZoom.ChooseZoomMenuLevel(700) == 3 &&
+            HyperVConsoleZoom.ChooseZoomMenuLevel(820) == 2;
+        busy = false;
+        state.Completed.Remove("windows-started");
+        state.VmId = savedVmForP1;
+        state.Options = savedOptsSnapshot;
+        if (!oobeBannerVisible) failed++;
+        rows.Add(new { name = "stage4-desktop-oobe-banner-standalone-button-and-zoom-thresholds", passed = oobeBannerVisible });
+        Navigate(0);
+
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);
         JsonFile.Write(Path.Combine(directory, "customer-feedback-ui-tests.json"), new { type = "synthetic WPF visual captions; no VM deployment", passed = rows.Count - failed, failed, tests = rows });

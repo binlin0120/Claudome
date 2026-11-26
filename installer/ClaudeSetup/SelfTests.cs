@@ -21,7 +21,7 @@ public static class SelfTests
         async Task Check(string name, Func<Task> test)
         {
             try { await test(); rows.Add(new { name, passed = true }); }
-            catch (Exception ex) { failed++; rows.Add(new { name, passed = false, errorType = ex.GetType().Name, detail = ex.Message }); }
+            catch (Exception ex) { failed++; rows.Add(new { name, passed = false, errorType = ex.GetType().Name, detail = ex.ToString() }); }
         }
         Task Sync(Action test) { test(); return Task.CompletedTask; }
         await TransportTests.Run(Check, root);
@@ -1835,6 +1835,155 @@ public static class SelfTests
             Assert(SetupWindow.ResolvePreferredImageIndex(media, 2, preserveExplicitSelection: true) == (ProductProfile.IsHyperVStandalone ? 4 : 2),
                 "CoreCountrySpecific preservation should follow edition IsHomeChinaBlocked rule");
         }));
+        await Check("hyperv-pipe-no-reply-late-reply-and-concurrent-dispose", async () =>
+        {
+            var ws = Path.Combine(root, "hv-pipe-fixtures");
+            Paths.EnsureWorkspace(ws);
+            var opts = new SetupOptions { Root = ws, PlatformId = "hyperv", VmName = "PipeFixtureVm" };
+            var st = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = opts };
+
+            // Fixture 1: Caller pause interrupts hung read immediately, poisons pipe, and ignores late reply on pipe 1
+            var serverCount = 0;
+            var op1Received = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var lateWriteObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstServerHold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var serverTasks = new List<Task>();
+            await using var hv1 = new HyperV(async (_, ct) =>
+            {
+                var idx = ++serverCount;
+                var pipeName = "ClaudePipeTest-" + Guid.NewGuid().ToString("N");
+                var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                    System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                var task = Task.Run(async () =>
+                {
+                    using (server)
+                    {
+                        await server.WaitForConnectionAsync(CancellationToken.None);
+                        using var r = new StreamReader(server, Encoding.UTF8, false, 4096, leaveOpen: true);
+                        var w = new StreamWriter(server, new UTF8Encoding(false), 4096, leaveOpen: true) { AutoFlush = true };
+                        try
+                        {
+                            var initLine = await r.ReadLineAsync();
+                            if (initLine is not null) await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                            var opLine = await r.ReadLineAsync();
+                            if (idx == 1)
+                            {
+                                if (opLine is not null) op1Received.TrySetResult();
+                                // Wait until client cancels, then try emitting a late response onto dead pipe 1
+                                await firstServerHold.Task;
+                                try { await w.WriteLineAsync("{\"ok\":true,\"value\":\"False\",\"code\":\"OK\"}"); } catch { }
+                                lateWriteObserved.TrySetResult();
+                            }
+                            else
+                            {
+                                await w.WriteLineAsync("{\"ok\":true,\"value\":\"True\",\"code\":\"OK\"}");
+                                try { await r.ReadLineAsync(); } catch { }
+                            }
+                        }
+                        finally
+                        {
+                            try { w.Dispose(); } catch { }
+                        }
+                    }
+                });
+                serverTasks.Add(task);
+                var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                    System.IO.Pipes.PipeOptions.Asynchronous);
+                await client.ConnectAsync(5000, ct);
+                return client;
+            });
+
+            using var pauseCts = new CancellationTokenSource();
+            var pauseCancelledFast = false;
+            var swPause = System.Diagnostics.Stopwatch.StartNew();
+            var call1 = hv1.IsRunning(st, pauseCts.Token);
+            await op1Received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            swPause.Restart();
+            pauseCts.Cancel();
+            try { await call1; }
+            catch (OperationCanceledException) { pauseCancelledFast = swPause.ElapsedMilliseconds < 2500; }
+            firstServerHold.TrySetResult();
+            await lateWriteObserved.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            // Next call must connect on fresh pipe 2 and get "True" (never reading pipe 1's late "False")
+            var secondResult = await hv1.IsRunning(st, CancellationToken.None);
+            Assert(pauseCancelledFast && hv1.ConnectionSequence == 2 && secondResult,
+                "Cancelled pipe read must abort fast, discard pipe 1 late reply, and use fresh pipe 2");
+            await hv1.DisposeAsync();
+            await Task.WhenAll(serverTasks).WaitAsync(TimeSpan.FromSeconds(3));
+
+            // Fixture 2: Concurrent DisposeAsync while a Call is blocked in ReadLineAsync must complete promptly (< 1s) without deadlocking
+            var readyEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var server2Hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Task? server2Task = null;
+            var hv2 = new HyperV(async (_, ct) =>
+            {
+                var pipeName = "ClaudePipeDispose-" + Guid.NewGuid().ToString("N");
+                var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                    System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                server2Task = Task.Run(async () =>
+                {
+                    using (server)
+                    {
+                        await server.WaitForConnectionAsync(CancellationToken.None);
+                        using var r = new StreamReader(server, Encoding.UTF8, false, 4096, leaveOpen: true);
+                        var w = new StreamWriter(server, new UTF8Encoding(false), 4096, leaveOpen: true) { AutoFlush = true };
+                        try
+                        {
+                            if (await r.ReadLineAsync() is not null) await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                            if (await r.ReadLineAsync() is not null) readyEntered.TrySetResult();
+                            await server2Hold.Task;
+                        }
+                        finally
+                        {
+                            try { w.Dispose(); } catch { }
+                        }
+                    }
+                });
+                var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                    System.IO.Pipes.PipeOptions.Asynchronous);
+                await client.ConnectAsync(5000, ct);
+                return client;
+            });
+            var pendingRead = hv2.ProbeWindowsInstallState(st, CancellationToken.None);
+            await readyEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var disposeSw = System.Diagnostics.Stopwatch.StartNew();
+            await hv2.DisposeAsync();
+            disposeSw.Stop();
+            var pendingReadAborted = false;
+            try { await pendingRead.WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (OperationCanceledException) { pendingReadAborted = true; }
+            catch (SetupException) { pendingReadAborted = true; }
+            server2Hold.TrySetResult();
+            if (server2Task is not null) await server2Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert(disposeSw.ElapsedMilliseconds < 1500 && pendingReadAborted && hv2.DisposeTrace.Count > 0,
+                "Concurrent DisposeAsync must abort pipe cleanly without waiting on serial or stream lock");
+
+            // Fixture 3: Checkpoint-chain diagnosis triggers clear HandoffException without calling install, and Ready enforces checkpoint policy
+            var cpSt = new SessionState { VmId = "11111111-1111-1111-1111-111111111111", Options = opts };
+            var cpInstallCalls = 0; var cpHandoffMatched = false;
+            try
+            {
+                await Deployment.ExecuteHyperVWindowsStageAsync(cpSt,
+                    () => Task.FromResult(HyperVWindowsInstallState.NeedsRecovery),
+                    () => Task.FromResult(false),
+                    () => { cpInstallCalls++; return Task.CompletedTask; },
+                    () => Task.CompletedTask,
+                    diagnoseInstallStateAsync: () => Task.FromResult(new HyperVWindowsInstallDiagnosis(
+                        HyperVWindowsInstallState.NeedsRecovery, "checkpoint-chain-matched", 1, true, @"D:\VMs\Windows11.vhdx")));
+            }
+            catch (HandoffException hex) { cpHandoffMatched = hex.Action.Id == "hyperv-disk-recovery" && hex.Message.Contains(".avhdx"); }
+            Assert(cpHandoffMatched && cpInstallCalls == 0,
+                "Active .avhdx checkpoint chain must pause safely with recovery guidance and zero installs");
+
+            var readyCpPolicies = 0;
+            await Deployment.ExecuteHyperVWindowsStageAsync(cpSt,
+                () => Task.FromResult(HyperVWindowsInstallState.Ready),
+                () => Task.FromResult(false),
+                () => Task.CompletedTask,
+                () => Task.CompletedTask,
+                ensureCheckpointPolicyAsync: () => { readyCpPolicies++; return Task.CompletedTask; });
+            Assert(readyCpPolicies == 1, "Resumed Ready disk must invoke EnsureCheckpointPolicy before start");
+        });
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(new { passed = rows.Count - failed, failed }));

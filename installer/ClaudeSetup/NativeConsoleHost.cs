@@ -315,6 +315,36 @@ public sealed class NativeConsoleHost : HwndHost
         return result;
     }
 
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]private static extern int GetClassName(IntPtr handle, System.Text.StringBuilder text, int maxCount);
+
+    internal bool HasOverflowScrollbars()
+    {
+        if (!IsAttached) return false;
+        if (VisibleScrollViewport() is not null) return true;
+        var found = false;
+        var sb = new System.Text.StringBuilder(64);
+        EnumChildWindows(child, (window, _) =>
+        {
+            if (found) return false;
+            if (!IsWindowVisible(window) || GetWindowThreadProcessId(window, out var pid) == 0 || pid != childProcess) return true;
+            var style = GetLong(window, StyleIndex).ToInt64();
+            if ((style & 0x00300000L) != 0) // WS_VSCROLL | WS_HSCROLL
+            {
+                found = true;
+                return false;
+            }
+            sb.Clear();
+            if (GetClassName(window, sb, sb.Capacity) > 0 &&
+                sb.ToString().Contains("ScrollBar", StringComparison.OrdinalIgnoreCase))
+            {
+                found = true;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     internal static ConsolePixelSize? FindScrollingContent(IReadOnlyList<Rect> children, double minimumWidth, double minimumHeight)
     {
         foreach (var view in children)

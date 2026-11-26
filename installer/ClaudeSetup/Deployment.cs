@@ -128,6 +128,30 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         return false;
     }
 
+    internal static HandoffException CreateHyperVRecoveryHandoff(HyperVWindowsInstallDiagnosis? diagnosis)
+    {
+        if (diagnosis is { Reason: "checkpoint-active" or "checkpoint-chain-matched" or "checkpoint-chain-invalid" })
+        {
+            if (diagnosis.ChainMatchesBase)
+            {
+                return new HandoffException(new("原虚拟机存在待合并的检查点或差分盘", [
+                    $"检测到已绑定基盘身份吻合，但虚拟机当前挂有活动检查点或差分盘（快照数 {diagnosis.SnapshotCount}），程序不会自动删除或重挂 .avhdx。",
+                    "请保留所有磁盘文件不要删除；打开 Hyper-V 管理器确认虚拟机已正常关机，并在检查点窗格删除/等待自动检查点合并完成（使挂载盘恢复为基盘 VHDX）。",
+                    "合并完成后回到助手继续原任务，系统盘不会被覆盖。"
+                ], "hyperv-disk-recovery"));
+            }
+            return new HandoffException(new("原安装磁盘存在无法自动恢复的检查点或差分链", [
+                "检测到原虚拟机挂有外部/异常差分盘（.avhdx）或检查点链与本任务绑定记录不一致，已阻止自动恢复和写盘。",
+                "请先保留原磁盘文件并在 Hyper-V 管理器核对原虚拟机的磁盘与检查点链，不要直接删除磁盘后重建。"
+            ], "hyperv-disk-recovery"));
+        }
+        return new HandoffException(new("原安装磁盘需要确认", [
+            "程序已支持安装检查点恢复，并保留中断磁盘；本次检测到无法自动接管的挂载、附加关系或文件缺失。",
+            "请确认本任务虚拟机已正常关机，并在磁盘管理中分离本任务仍被主机挂载的 VHDX（不要删除文件）。",
+            "核对并恢复原磁盘/任务文件后，回到助手继续；不会格式化原磁盘或覆盖已有系统。"
+        ], "hyperv-disk-recovery"));
+    }
+
     internal static async Task ExecuteHyperVWindowsStageAsync(
         SessionState state,
         Func<Task<HyperVWindowsInstallState>> probeInstallStateAsync,
@@ -135,13 +159,17 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         Func<Task> installWindowsAsync,
         Func<Task> openVmAsync,
         Func<Task>? ensureInstallGateAsync = null,
-        bool installGateVerifiedUpFront = false)
+        bool installGateVerifiedUpFront = false,
+        Func<Task>? ensureCheckpointPolicyAsync = null,
+        Func<Task<HyperVWindowsInstallDiagnosis>>? diagnoseInstallStateAsync = null)
     {
         if (!state.Completed.Contains("guest-ready"))
         {
             var probe = await probeInstallStateAsync();
             if (probe == HyperVWindowsInstallState.Ready)
             {
+                if (ensureCheckpointPolicyAsync is not null)
+                    await ensureCheckpointPolicyAsync();
                 if (!state.Completed.Contains("windows-started"))
                 {
                     state.Completed.Add("windows-started");
@@ -149,6 +177,13 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 }
                 if (!await isRunningAsync()) await openVmAsync();
                 return;
+            }
+
+            if (probe == HyperVWindowsInstallState.NeedsRecovery && diagnoseInstallStateAsync is not null)
+            {
+                var diag = await diagnoseInstallStateAsync();
+                if (diag.Reason is "checkpoint-active" or "checkpoint-chain-matched" or "checkpoint-chain-invalid")
+                    throw CreateHyperVRecoveryHandoff(diag);
             }
 
             if (state.Completed.Contains("windows-started"))
@@ -171,6 +206,8 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                         "请先在「专属桌面」操作栏或 Hyper-V 管理器安全关闭虚拟机（不会自动格式化或覆盖任何磁盘），再返回「开始安装」点击「开始 / 继续部署」。"
                     ], "vm-stop-before-install"));
                 }
+                if (ensureCheckpointPolicyAsync is not null)
+                    await ensureCheckpointPolicyAsync();
                 if (!installGateVerifiedUpFront && probe != HyperVWindowsInstallState.ImageReady)
                 {
                     await (ensureInstallGateAsync is not null
@@ -187,6 +224,8 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             }
         }
 
+        if (ensureCheckpointPolicyAsync is not null)
+            await ensureCheckpointPolicyAsync();
         if (!await isRunningAsync()) await openVmAsync();
     }
 
@@ -350,7 +389,9 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                     () => { Stage(state, "4 / 7  安装 Windows"); return box.InstallWindows(state, secrets, token); },
                     () => box.Open(state, token),
                     () => EnsureWindowsInstallGateAsync(state, token),
-                    initialInstallWindows);
+                    initialInstallWindows,
+                    () => hvBox.EnsureCheckpointPolicy(state, token),
+                    () => hvBox.DiagnoseWindowsInstallState(state, token));
                 plan = ResumePlan.For(state);
             }
             else if (plan.InstallWindows)

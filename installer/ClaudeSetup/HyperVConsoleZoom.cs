@@ -11,7 +11,9 @@ internal static partial class HyperVConsoleZoom
     [
         ["View", "查看", "视图", "檢視"],
         ["Zoom Level", "缩放级别", "缩放等级", "缩放", "縮放層級", "縮放比例", "縮放"],
-        ["Auto", "Automatic", "自动", "自動"]
+        ["Auto", "Automatic", "自动", "自動"],
+        ["75%"],
+        ["50%"]
     ];
 
     internal static bool MatchesMenu(string name, int level)
@@ -24,7 +26,13 @@ internal static partial class HyperVConsoleZoom
     [GeneratedRegex(@"\s*\(&?[A-Za-z]\)$")]
     private static partial Regex MenuShortcut();
 
-    internal static bool TrySelectAuto(ConsoleWindow window, CancellationToken token)
+    internal static int ChooseZoomMenuLevel(int viewportHeight) =>
+        viewportHeight < 560 ? 4 : viewportHeight < 790 ? 3 : 2;
+
+    internal static bool TrySelectAuto(ConsoleWindow window, CancellationToken token) =>
+        TrySelectZoomLevel(window, 2, token);
+
+    internal static bool TrySelectZoomLevel(ConsoleWindow window, int targetLevel, CancellationToken token)
     {
         if (!Path.GetFileName(window.Executable).Equals("vmconnect.exe", StringComparison.OrdinalIgnoreCase) ||
             !ConsoleWindowLocator.IsAlive(window)) return false;
@@ -51,8 +59,9 @@ internal static partial class HyperVConsoleZoom
                 expanded.Push(section);
             }
 
-            var auto = FindMenuItem(menu, 2, window.ProcessId, token);
-            if (auto is null || !auto.TryGetCurrentPattern(InvokePattern.Pattern, out var invoke)) return false;
+            var target = FindMenuItem(menu, targetLevel, window.ProcessId, token)
+                ?? (targetLevel != 2 ? FindMenuItem(menu, 2, window.ProcessId, token) : null);
+            if (target is null || !target.TryGetCurrentPattern(InvokePattern.Pattern, out var invoke)) return false;
             token.ThrowIfCancellationRequested();
             if (!ConsoleWindowLocator.IsAlive(window)) return false;
             ((InvokePattern)invoke).Invoke();

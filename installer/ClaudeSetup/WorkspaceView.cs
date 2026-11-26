@@ -24,7 +24,7 @@ public sealed partial class SetupWindow
     private ComboBox? guideStepChoice;
     private string guidePhase="";
     private Button? desktopContinue, desktopSyncAuth, desktopRecoverDisplay, desktopForceRepair, desktopRecoverDisplayMenuItem, desktopForceRepairMenuItem, desktopManualAdsPower;
-    private Border? desktopForceRepairBanner;
+    private Border? desktopForceRepairBanner, desktopOobeBanner;
     private TextBlock? desktopManualAdsGuide, desktopFinishHint;
     private Button? desktopConfirmAdsExit, desktopFinish;
     private bool recoveringDisplay;
@@ -36,7 +36,7 @@ public sealed partial class SetupWindow
     private bool taskFaulted, installationNetworkFailed;
     private NativeConsoleHost? consoleHost;
     private bool fittingVBoxDisplay, fittingHyperVDisplay;
-    private Button? openStandaloneHyperV;
+    private Button? openStandaloneHyperV, topStandaloneHyperV;
     private bool waitingForGuestFrame;
     private DateTime? waitingForGuestFrameSinceUtc;
     private bool notifiedMultiCoreBlankTimeout;
@@ -99,6 +99,7 @@ public sealed partial class SetupWindow
             desktopFinish = Action("完成设置", (_, _) => FinishWorkspace(), true);
             desktopFinishHint = Text("", 11);
             openStandaloneHyperV = Action("在独立窗口查看 Hyper-V 桌面", (_, _) => ShowStandaloneHyperV());
+            topStandaloneHyperV = Action("独立窗口查看", (_, _) => ShowStandaloneHyperV());
             desktopRecoverDisplay = Action("保存状态并恢复显示", async (_, _) => await RecoverVirtualBoxDisplay(), true);
             desktopRecoverDisplay.Visibility = Visibility.Collapsed;
             desktopForceRepair = Action("强制关闭并恢复 1 核", async (_, _) => await ForceRepairVirtualBoxDialog(), true);
@@ -174,11 +175,23 @@ public sealed partial class SetupWindow
             var pauseSaveBtn = Action("保存并暂停", (_, _) => PauseCurrentTask());
             var topBarRow = new DockPanel { LastChildFill = true };
             var actionCluster = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
-            foreach (var item in new UIElement[] { desktopContinue, pauseSaveBtn, clipboardBtn, maintenanceBtn, desktopRecoverDisplay, desktopSyncAuth, desktopManualAdsPower, desktopConfirmAdsExit, desktopFinish })
+            foreach (var item in new UIElement[] { desktopContinue, pauseSaveBtn, topStandaloneHyperV, clipboardBtn, maintenanceBtn, desktopRecoverDisplay, desktopSyncAuth, desktopManualAdsPower, desktopConfirmAdsExit, desktopFinish })
                 actionCluster.Children.Add(item);
             DockPanel.SetDock(actionCluster, Dock.Right);
             topBarRow.Children.Add(actionCluster);
             topBarRow.Children.Add(consoleStatus);
+
+            desktopOobeBanner = new Border
+            {
+                Background = Pale,
+                BorderBrush = Accent,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(10, 7, 10, 7),
+                Margin = new Thickness(0, 4, 0, 2),
+                Visibility = Visibility.Collapsed,
+                Child = Text("如果虚拟机仍在 Windows 首次设置，请按屏幕提示确认地区与键盘。看不到底部按钮时，请最大化窗口或在独立窗口查看。", 11.5, false)
+            };
 
             desktopDetailDrawer = new StackPanel
             {
@@ -186,6 +199,7 @@ public sealed partial class SetupWindow
                 Visibility = Visibility.Collapsed,
                 Children =
                 {
+                    desktopOobeBanner,
                     desktopForceRepairBanner,
                     desktopActivity,
                     desktopActivityProgress,
@@ -485,6 +499,7 @@ public sealed partial class SetupWindow
                 consoleHost.Fit(forceRedraw: true);
             }
             if (!waitingForGuestFrame) SetDesktopConnectionStatus(DesktopConnectedStatus());
+            if (backend is HyperV) await FitHyperVConsole(consoleHost);
             UpdateDesktopActivity();
             if (backend is VirtualBox) await RefreshDefaultNativeClipboard();
             else if (backend is HyperV hyperV) await RefreshHyperVClipboardSettings(hyperV);
@@ -574,21 +589,26 @@ public sealed partial class SetupWindow
         UpdateDesktopActivity();
         try
         {
-            var applied = await Task.Run(() => HyperVConsoleZoom.TrySelectAuto(window, token), token)
+            var targetLevel = HyperVConsoleZoom.ChooseZoomMenuLevel(host.ViewportPixels.Height);
+            var applied = await Task.Run(() => HyperVConsoleZoom.TrySelectZoomLevel(window, targetLevel, token), token)
                 .WaitAsync(token);
             if (applied)
-                await Task.Delay(325, lifetime); // VMConnect can animate its own resize after selecting Auto.
+                await Task.Delay(350, lifetime); // VMConnect can animate its own resize after selecting zoom level.
             if (!lifetime.IsCancellationRequested && section == 7 && state.VmId == vmId &&
                 host == consoleHost && host.IsAttached && host.GuestWindow == window.Handle)
             {
                 host.Fit(forceRedraw: true);
-                SetDesktopConnectionStatus(applied ? "已请求 Hyper-V 控制台自动缩放。" : HyperVZoomUnavailable);
+                var stillOverflow = host.HasOverflowScrollbars();
+                if (applied && !stillOverflow)
+                    SetDesktopConnectionStatus("已完成 Hyper-V 显示区域缩放适配。");
+                else
+                    SetDesktopConnectionStatus(HyperVZoomFallbackMessage(applied));
             }
         }
         catch (OperationCanceledException)
         {
             if (!lifetime.IsCancellationRequested && section == 7 && state.VmId == vmId && host.IsAttached && host.GuestWindow == window.Handle)
-                SetDesktopConnectionStatus(HyperVZoomUnavailable);
+                SetDesktopConnectionStatus(HyperVZoomFallbackMessage(false));
         }
         finally
         {
@@ -597,11 +617,13 @@ public sealed partial class SetupWindow
         }
     }
 
-    private const string HyperVZoomUnavailable = "无法调用 Hyper-V 自动缩放。请在内嵌控制台顶部菜单选择「查看 → 缩放级别 → 自动」，或用「在独立窗口查看 Hyper-V 桌面」。";
+    private static string HyperVZoomFallbackMessage(bool menuClicked) => menuClicked
+        ? "Hyper-V 基本会话当前仍存在画面滚动条，请最大化窗口，或点击「独立窗口查看」。"
+        : "未能调整 Hyper-V 控制台缩放。请最大化窗口、在内嵌控制台选「查看 → 缩放级别 → 75%」，或点击「独立窗口查看」。";
 
     private void ShowStandaloneHyperV()
     {
-        if (connectingConsole || fittingHyperVDisplay || shuttingDownVm || state.Options.PlatformId != "hyperv" ||
+        if (connectingConsole || shuttingDownVm || state.Options.PlatformId != "hyperv" ||
             lastConsoleWindow is not { } window || !ConsoleWindowLocator.IsAlive(window)) return;
 
         desktopConnectionPolicy.Suspend();
@@ -640,8 +662,17 @@ public sealed partial class SetupWindow
         if (openStandaloneHyperV is not null)
         {
             openStandaloneHyperV.Visibility = state.Options.PlatformId == "hyperv" ? Visibility.Visible : Visibility.Collapsed;
-            openStandaloneHyperV.IsEnabled = consoleHost?.IsAttached == true && !connectingConsole && !fittingHyperVDisplay;
+            openStandaloneHyperV.IsEnabled = consoleHost?.IsAttached == true && !connectingConsole && !shuttingDownVm;
         }
+        if (topStandaloneHyperV is not null)
+        {
+            topStandaloneHyperV.Visibility = state.Options.PlatformId == "hyperv" ? Visibility.Visible : Visibility.Collapsed;
+            topStandaloneHyperV.IsEnabled = consoleHost?.IsAttached == true && !connectingConsole && !shuttingDownVm;
+        }
+        var showOobeBanner = state.Options.PlatformId == "hyperv" && !string.IsNullOrEmpty(state.VmId) &&
+            !state.Completed.Contains("guest-ready") && (busy || state.Completed.Contains("windows-started"));
+        if (desktopOobeBanner is not null)
+            desktopOobeBanner.Visibility = showOobeBanner ? Visibility.Visible : Visibility.Collapsed;
         if (desktopRecoverDisplay is not null)
         {
             desktopRecoverDisplay.Visibility = !ProductProfile.IsHyperVStandalone && !string.IsNullOrEmpty(framebufferConflictVm) &&
@@ -713,7 +744,7 @@ public sealed partial class SetupWindow
         if(desktopActivityProgress is not null){desktopActivityProgress.Visibility=busy?Visibility.Visible:Visibility.Collapsed;desktopActivityProgress.IsIndeterminate=progress.IsIndeterminate;desktopActivityProgress.Value=progress.Value;}
         if (desktopDetailDrawer is not null)
         {
-            var hasContext = showActivity || offerMultiCoreRecovery || state.Options.ManualAdsPower || showFinish;
+            var hasContext = (desktopOobeBanner?.Visibility == Visibility.Visible) || showActivity || offerMultiCoreRecovery || state.Options.ManualAdsPower || showFinish;
             desktopDetailDrawer.Visibility = hasContext ? Visibility.Visible : Visibility.Collapsed;
         }
     }
