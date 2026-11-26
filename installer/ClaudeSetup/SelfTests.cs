@@ -2174,12 +2174,14 @@ public static class SelfTests
             var st = new SessionState { VmId = Guid.NewGuid().ToString("D"), Options = new() { Root = coldRoot, PlatformId = "hyperv", VmName = "HV-ColdStart" } };
             var sec = new Secrets { VmPassword = "ValidPassword!123" };
 
-            // Subcase A: Caller cancels during slow launch-verifier cold start -> display returns immediately,
-            // main management pipe is NOT aborted and stays on ConnectionSequence == 1.
+            // Subcase A: Caller cancels during slow launch-verifier cold start on isolated displaySpawner ->
+            // display returns immediately, main pipe NEVER receives launch-verifier and stays on ConnectionSequence == 1.
             var launchEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseLaunchReply = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var mainRunningReplies = 0;
+            var mainSawLaunchVerifierA = false;
             Task? mainServerA = null;
+            Task? spawnerServerA = null;
             var hvA = new HyperV(
                 connectFixture: async (_, ct) => {
                     var pipeName = "ClaudomeColdCancelMain-" + Guid.NewGuid().ToString("N");
@@ -2195,13 +2197,46 @@ public static class SelfTests
                             {
                                 while (await r.ReadLineAsync() is { } line)
                                 {
+                                    if (line.Contains("\"exit\"")) break;
                                     if (line.Contains("\"init\""))
                                         await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
                                     else if (line.Contains("\"running\""))
                                     {
-                                        mainRunningReplies++;
+                                        Interlocked.Increment(ref mainRunningReplies);
                                         await w.WriteLineAsync("{\"ok\":true,\"value\":\"True\",\"code\":\"OK\"}");
                                     }
+                                    else if (line.Contains("\"launch-verifier\""))
+                                        mainSawLaunchVerifierA = true;
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    });
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayConnectFixture: (_, _) => Task.FromException<Stream>(new InvalidOperationException("Cancelled cold start should not connect display pipe")),
+                displayColdStartViaLauncher: true,
+                spawnerConnectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeColdCancelSpawner-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    spawnerServerA = Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
                                     else if (line.Contains("\"launch-verifier\""))
                                     {
                                         launchEntered.TrySetResult();
@@ -2218,9 +2253,7 @@ public static class SelfTests
                         System.IO.Pipes.PipeOptions.Asynchronous);
                     await client.ConnectAsync(5000, ct);
                     return client;
-                },
-                displayConnectFixture: (_, _) => Task.FromException<Stream>(new InvalidOperationException("Cancelled cold start should not connect display pipe")),
-                displayColdStartViaLauncher: true);
+                });
             hvA.LaunchVerifierTimeout = TimeSpan.FromSeconds(4);
 
             Assert(await hvA.IsRunning(st, CancellationToken.None) && hvA.HasManagementConnection && hvA.ConnectionSequence == 1,
@@ -2236,25 +2269,68 @@ public static class SelfTests
             swCancel.Stop();
             releaseLaunchReply.TrySetResult();
             var mainAfterCancel = await hvA.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
-            Assert(cancelledFast && swCancel.ElapsedMilliseconds < 1000 &&
-                   mainAfterCancel && hvA.HasManagementConnection && hvA.ConnectionSequence == 1 && mainRunningReplies == 2,
-                "Cancelling display cold-start launch-verifier aborted or disrupted healthy main management pipe");
+            Assert(cancelledFast && swCancel.ElapsedMilliseconds < 1000 && !mainSawLaunchVerifierA &&
+                   mainAfterCancel && hvA.HasManagementConnection && hvA.ConnectionSequence == 1 &&
+                   hvA.ManagementWorkerLaunchCount == 1 && hvA.ElevatedPromptCount == 0 && mainRunningReplies == 2,
+                "Cancelling display cold-start touched, aborted, or replaced healthy main management pipe");
             await hvA.DisposeAsync();
             if (mainServerA is not null) await mainServerA.WaitAsync(TimeSpan.FromSeconds(3));
+            if (spawnerServerA is not null) await spawnerServerA.WaitAsync(TimeSpan.FromSeconds(3));
 
-            // Subcase B: launch-verifier hangs with NO reply -> bounded LaunchVerifierTimeout unblocks display and
-            // releases main serial lock so subsequent management requests recover cleanly instead of deadlocking.
+            // Subcase B: Isolated displaySpawner launch-verifier hangs with NO reply ->
+            // 1) Main management pipe stays completely unblocked WHILE spawner is hung;
+            // 2) Timeout disposes ONLY displaySpawner, NEVER aborts/reconnects main pipe, NEVER swaps management worker,
+            //    and NEVER triggers another elevation prompt (ConnectionSequence == 1, ManagementWorkerLaunchCount == 1).
             var hungEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var hungRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var connectCount = 0;
-            var serverTasksB = new List<Task>();
+            var mainRunningRepliesB = 0;
+            var mainSawLaunchVerifierB = false;
+            var spawnerSawSpawnerOnly = false;
+            Task? mainServerB = null;
+            Task? spawnerServerB = null;
             var hvB = new HyperV(
                 connectFixture: async (_, ct) => {
-                    var seq = Interlocked.Increment(ref connectCount);
                     var pipeName = "ClaudomeColdHangMain-" + Guid.NewGuid().ToString("N");
                     var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
                         System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
-                    serverTasksB.Add(Task.Run(async () => {
+                    mainServerB = Task.Run(async () => {
+                        using (server)
+                        {
+                            await server.WaitForConnectionAsync();
+                            using var r = new StreamReader(server, Encoding.UTF8, false, 4096, true);
+                            var w = new StreamWriter(server, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
+                            try
+                            {
+                                while (await r.ReadLineAsync() is { } line)
+                                {
+                                    if (line.Contains("\"exit\"")) break;
+                                    if (line.Contains("\"init\""))
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
+                                    else if (line.Contains("\"running\""))
+                                    {
+                                        Interlocked.Increment(ref mainRunningRepliesB);
+                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"True\",\"code\":\"OK\"}");
+                                    }
+                                    else if (line.Contains("\"launch-verifier\""))
+                                        mainSawLaunchVerifierB = true;
+                                }
+                            }
+                            catch { }
+                            finally { try { w.Dispose(); } catch { } }
+                        }
+                    });
+                    var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+                        System.IO.Pipes.PipeOptions.Asynchronous);
+                    await client.ConnectAsync(5000, ct);
+                    return client;
+                },
+                displayConnectFixture: (_, _) => Task.FromException<Stream>(new InvalidOperationException("Hung launch-verifier should not reach display pipe")),
+                displayColdStartViaLauncher: true,
+                spawnerConnectFixture: async (_, ct) => {
+                    var pipeName = "ClaudomeColdHangSpawner-" + Guid.NewGuid().ToString("N");
+                    var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+                    spawnerServerB = Task.Run(async () => {
                         using (server)
                         {
                             await server.WaitForConnectionAsync();
@@ -2265,10 +2341,11 @@ public static class SelfTests
                                 while (await r.ReadLineAsync() is { } line)
                                 {
                                     if (line.Contains("\"init\""))
+                                    {
+                                        spawnerSawSpawnerOnly = line.Contains("\"spawnerOnly\":true");
                                         await w.WriteLineAsync("{\"ok\":true,\"value\":\"initialized\",\"code\":\"OK\"}");
-                                    else if (line.Contains("\"running\""))
-                                        await w.WriteLineAsync("{\"ok\":true,\"value\":\"True\",\"code\":\"OK\"}");
-                                    else if (line.Contains("\"launch-verifier\"") && seq == 1)
+                                    }
+                                    else if (line.Contains("\"launch-verifier\""))
                                     {
                                         hungEntered.TrySetResult();
                                         await hungRelease.Task; // Never replies during timeout window
@@ -2278,29 +2355,40 @@ public static class SelfTests
                             catch { }
                             finally { try { w.Dispose(); } catch { } }
                         }
-                    }));
+                    });
                     var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
                         System.IO.Pipes.PipeOptions.Asynchronous);
                     await client.ConnectAsync(5000, ct);
                     return client;
-                },
-                displayConnectFixture: (_, _) => Task.FromException<Stream>(new InvalidOperationException("Hung launch-verifier should not reach display pipe")),
-                displayColdStartViaLauncher: true);
-            hvB.LaunchVerifierTimeout = TimeSpan.FromMilliseconds(350);
+                });
+            hvB.LaunchVerifierTimeout = TimeSpan.FromMilliseconds(450);
 
-            Assert(await hvB.IsRunning(st, CancellationToken.None) && hvB.ConnectionSequence == 1,
+            Assert(await hvB.IsRunning(st, CancellationToken.None) && hvB.ConnectionSequence == 1 && hvB.ManagementWorkerLaunchCount == 1,
                 "Cold-start subcase B failed initial connect");
             var swHang = System.Diagnostics.Stopwatch.StartNew();
+            var hangSyncTask = hvB.SyncGuestDisplayMode(st, sec, 1280, 720, CancellationToken.None);
+            await hungEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+            // While displaySpawner is completely hung, main management pipe MUST stay immediately responsive on sequence 1!
+            var duringHangRunning = await hvB.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+            Assert(duringHangRunning && hvB.HasManagementConnection && hvB.ConnectionSequence == 1,
+                "Hung display cold-start blocked main management pipe");
+
             var timedOut = false;
-            try { await hvB.SyncGuestDisplayMode(st, sec, 1280, 720, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)); }
+            try { await hangSyncTask.WaitAsync(TimeSpan.FromSeconds(3)); }
             catch (SetupException ex) when (ex.Message.Contains("超时")) { timedOut = true; }
             swHang.Stop();
-            var mainRecovered = await hvB.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+            var afterHangRunning = await hvB.IsRunning(st, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
             hungRelease.TrySetResult();
-            Assert(timedOut && swHang.ElapsedMilliseconds < 2000 && mainRecovered && hvB.HasManagementConnection,
-                "Hung launch-verifier cold start failed to bound timeout or wedged main management calls");
+            Assert(timedOut && swHang.ElapsedMilliseconds < 2500 &&
+                   spawnerSawSpawnerOnly && !mainSawLaunchVerifierB &&
+                   afterHangRunning && hvB.HasManagementConnection &&
+                   hvB.ConnectionSequence == 1 && hvB.ManagementWorkerLaunchCount == 1 &&
+                   hvB.ElevatedPromptCount == 0 && mainRunningRepliesB == 3,
+                "Hung display cold-start aborted main pipe, replaced management worker, or triggered re-elevation");
             await hvB.DisposeAsync();
-            await Task.WhenAll(serverTasksB).WaitAsync(TimeSpan.FromSeconds(3));
+            if (mainServerB is not null) await mainServerB.WaitAsync(TimeSpan.FromSeconds(3));
+            if (spawnerServerB is not null) await spawnerServerB.WaitAsync(TimeSpan.FromSeconds(3));
         });
         var report = new { dateUtc = DateTime.UtcNow, type = "isolated local fixtures; no VM installation, real subscription or host network changes", passed = rows.Count - failed, failed, tests = rows };
         JsonFile.Write(Path.Combine(output, "installer-tests.json"), report);

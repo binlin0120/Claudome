@@ -376,6 +376,86 @@ public static class ResolverTests
             catch (SetupException) { privateBlocked = true; }
             Assert(privateBlocked, "Private IP in active binding bypassed IsolationPolicy");
         });
+        await check("hyperv-legacy-multi-ip-saved-hash-reused-on-cold-reconnect-and-fallback-requires-reapply", async () => {
+            var proxy = NetworkImport.Parse("socks5://legacy.example:1080#LegacyMultiIp").Nodes.Single();
+            var opts = new SetupOptions { PlatformId = "hyperv", Root = System.IO.Path.GetTempPath() };
+            string HashFor(string[] addrs)
+            {
+                var sorted = IsolationPolicy.ValidateEndpoints(addrs).Order(StringComparer.Ordinal).ToArray();
+                var cfg = NetworkImport.CoreConfig(proxy, sorted, "ClaudomeBridge", null, sorted);
+                return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(cfg))).ToLowerInvariant();
+            }
+
+            // Legacy task saved multi-IP group hash [1.0.0.1, 1.1.1.1]; confirm neither single IP matches it.
+            var legacyHash = HashFor(["1.0.0.1", "1.1.1.1"]);
+            Assert(HashFor(["1.0.0.1"]) != legacyHash && HashFor(["1.1.1.1"]) != legacyHash,
+                "Test precondition failed: single IP hash unexpectedly matched multi-IP hash");
+
+            var hostNet = new HostNetworkContext(false, false, [], "未检测到宿主 TUN 或 HTTP 系统代理");
+            var plan = new EndpointCandidatePlan(
+                [new("直连 DoH (AliDNS)", ["1.0.0.1", "1.1.1.1"], new TcpReachabilityResult(true, "1.1.1.1", 18, "物理网卡 WLAN"))],
+                [],
+                hostNet);
+
+            // 1. ExpandSingleEndpointPlan prioritizes intact legacy trusted group FIRST, followed by single-IP fallbacks.
+            var expanded = NodeExitProbe.ExpandSingleEndpointPlan(plan, addrs => HashFor(addrs) == legacyHash);
+            Assert(expanded.Groups.Length == 3 &&
+                expanded.Groups[0].Addresses.SequenceEqual(["1.0.0.1", "1.1.1.1"]) &&
+                expanded.Groups[1].Addresses.SequenceEqual(["1.1.1.1"]) &&
+                expanded.Groups[2].Addresses.SequenceEqual(["1.0.0.1"]),
+                "ExpandSingleEndpointPlan did not prioritize intact legacy multi-IP group matching saved CoreConfigSha256");
+
+            // 2. Cold reconnect with healthy intact legacy group succeeds with EXACT saved CoreConfigSha256
+            //    and honestly labels pre-probe IP without falsely claiming single-IP bound peer.
+            var coldBound = await Deployment.ResolveOrBindEndpointsAsync(
+                proxy, proxy, hasUpstream: false,
+                EndpointResolutionStrategy.HyperVStandalone, pinnedEndpoints: null, CancellationToken.None,
+                options: opts, upstreamNode: null,
+                preferredCoreConfigSha256: legacyHash,
+                physicalInterfaceForConfigHash: "ClaudomeBridge",
+                candidateVerifier: (_, _, _, _, ct) => NodeExitProbe.ExecuteAcrossCandidatePlanAsync(expanded, report =>
+                    Task.FromResult(new NodeProbeResult("203.0.113.88", "JP", "Asia/Tokyo", "Tokyo Standard Time", 72, true,
+                        "物理网卡 WLAN", report.Summary, "握手成功", "api.ip.sb · 72 ms", hostNet.Summary,
+                        report.Addresses, report.Addresses,
+                        VerifiedConnectedEndpoint: report.Addresses.Length == 1 ? $"{report.Addresses[0]}:1080" : null,
+                        PreProbeEndpoint: "1.1.1.1:1080")), ct));
+            Assert(coldBound.FirstHopAddresses.SequenceEqual(["1.0.0.1", "1.1.1.1"]) &&
+                HashFor(coldBound.FirstHopAddresses) == legacyHash &&
+                coldBound.Summary.Contains("TCP 预探测 1.1.1.1:1080") &&
+                !coldBound.Summary.Contains("已绑定实连端点"),
+                "Cold reconnect for legacy multi-IP task failed to match saved hash or mislabeled pre-probe as single bound peer");
+
+            // 3. When intact legacy group fails protocol check, plan advances to single-IP bound candidate [1.0.0.1],
+            //    reporting accurate single-bound evidence and producing a distinct hash for explicit re-apply flow.
+            var fallbackBound = await Deployment.ResolveOrBindEndpointsAsync(
+                proxy, proxy, hasUpstream: false,
+                EndpointResolutionStrategy.HyperVStandalone, pinnedEndpoints: null, CancellationToken.None,
+                options: opts, upstreamNode: null,
+                preferredCoreConfigSha256: legacyHash,
+                physicalInterfaceForConfigHash: "ClaudomeBridge",
+                candidateVerifier: (_, _, _, _, ct) => NodeExitProbe.ExecuteAcrossCandidatePlanAsync(expanded, report => {
+                    if (report.Addresses.Length > 1 || report.Addresses[0] == "1.1.1.1")
+                        throw new NodeProbeException("旧绑定或 1.1.1.1 协议握手失败");
+                    return Task.FromResult(new NodeProbeResult("203.0.113.89", "JP", "Asia/Tokyo", "Tokyo Standard Time", 68, true,
+                        "物理网卡 WLAN", report.Summary, "单点绑定代理对端 1.0.0.1:1080", "api.ip.sb · 68 ms", hostNet.Summary,
+                        report.Addresses, report.Addresses,
+                        VerifiedConnectedEndpoint: "1.0.0.1:1080",
+                        PreProbeEndpoint: "1.1.1.1:1080"));
+                }, ct));
+            Assert(fallbackBound.FirstHopAddresses.SequenceEqual(["1.0.0.1"]) &&
+                HashFor(fallbackBound.FirstHopAddresses) != legacyHash &&
+                fallbackBound.Summary.Contains("已绑定实连端点 1.0.0.1:1080") &&
+                fallbackBound.Summary.Contains("TCP 预探测 1.1.1.1:1080"),
+                "Fallback from failing legacy multi-IP group did not yield verified single-IP bound candidate");
+
+            // 4. Single-IP saved hash [1.0.0.1] prioritizes [1.0.0.1] first (no intact multi-IP group prepended).
+            var singleHash = HashFor(["1.0.0.1"]);
+            var singleExpanded = NodeExitProbe.ExpandSingleEndpointPlan(plan, addrs => HashFor(addrs) == singleHash);
+            Assert(singleExpanded.Groups.Length == 2 &&
+                singleExpanded.Groups[0].Addresses.SequenceEqual(["1.0.0.1"]) &&
+                singleExpanded.Groups[1].Addresses.SequenceEqual(["1.1.1.1"]),
+                "Single-IP saved hash did not prioritize matching single IP first");
+        });
     }
 
     private sealed class StubHandler : HttpMessageHandler

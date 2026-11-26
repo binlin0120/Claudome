@@ -158,12 +158,26 @@ public static class NodeExitProbe
 
     internal static EndpointCandidatePlan ExpandSingleEndpointPlan(
         EndpointCandidatePlan plan,
-        Func<string, bool>? isPreferredSingleIp = null)
+        Func<string[], bool>? isPreferredAddressSet = null)
     {
+        var preferredIntactGroups = new List<EndpointCandidateGroup>();
         var singleEntries = new List<(bool Preferred, EndpointCandidateGroup Group)>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var seenSingle = new HashSet<string>(StringComparer.Ordinal);
+        var seenIntact = new HashSet<string>(StringComparer.Ordinal);
+
         foreach (var group in plan.Groups)
         {
+            if (isPreferredAddressSet is not null && group.Addresses.Length > 1)
+            {
+                var normalizedGroup = group.Addresses.Order(StringComparer.Ordinal).ToArray();
+                var intactKey = string.Join(",", normalizedGroup);
+                if (seenIntact.Add(intactKey) && isPreferredAddressSet(normalizedGroup))
+                {
+                    preferredIntactGroups.Add(new EndpointCandidateGroup(
+                        $"{group.Source} · 原任务可信绑定组", normalizedGroup, group.Reachability));
+                }
+            }
+
             var orderedIps = new List<string>(group.Addresses.Length);
             var preProbeIp = group.Reachability?.ConnectedIp;
             if (!string.IsNullOrEmpty(preProbeIp) && group.Addresses.Contains(preProbeIp, StringComparer.Ordinal))
@@ -175,15 +189,16 @@ public static class NodeExitProbe
             }
             foreach (var ip in orderedIps)
             {
-                if (!seen.Add(ip)) continue;
-                var preferred = isPreferredSingleIp?.Invoke(ip) == true;
+                if (!seenSingle.Add(ip)) continue;
+                var preferred = isPreferredAddressSet?.Invoke([ip]) == true;
                 var sourceLabel = group.Addresses.Length > 1 ? $"{group.Source} · 单点 {ip}" : group.Source;
                 singleEntries.Add((preferred, new EndpointCandidateGroup(sourceLabel, [ip], group.Reachability)));
             }
         }
-        var ordered = singleEntries
-            .OrderByDescending(entry => entry.Preferred)
-            .Select(entry => entry.Group)
+        var ordered = preferredIntactGroups
+            .Concat(singleEntries
+                .OrderByDescending(entry => entry.Preferred)
+                .Select(entry => entry.Group))
             .ToArray();
         return new EndpointCandidatePlan(ordered, plan.Attempts, plan.HostNetwork);
     }
@@ -400,17 +415,22 @@ public static class NodeExitProbe
 
             if (strategy == EndpointResolutionStrategy.HyperVStandalone)
             {
-                Func<string, bool>? matchesSavedConfig = null;
+                Func<string[], bool>? matchesSavedConfig = null;
                 if (!string.IsNullOrWhiteSpace(preferredCoreConfigSha256))
                 {
-                    matchesSavedConfig = ip =>
+                    matchesSavedConfig = candidateAddrs =>
                     {
                         try
                         {
+                            var normalizedFirst = IsolationPolicy.ValidateEndpoints(candidateAddrs).Order(StringComparer.Ordinal).ToArray();
                             var sameServer = upstreamNode is not null &&
                                 selectedNode.Server.Equals(upstreamNode.Server, StringComparison.OrdinalIgnoreCase);
-                            var exitForHash = sameServer ? [ip] : (secondHopAddresses ?? [ip]);
-                            var candidateConfig = NetworkImport.CoreConfig(selectedNode, [ip], physicalInterfaceForConfigHash, upstreamNode, exitForHash);
+                            var exitForHash = sameServer
+                                ? normalizedFirst
+                                : (secondHopAddresses is { Length: > 0 }
+                                    ? IsolationPolicy.ValidateEndpoints(secondHopAddresses).Order(StringComparer.Ordinal).ToArray()
+                                    : normalizedFirst);
+                            var candidateConfig = NetworkImport.CoreConfig(selectedNode, normalizedFirst, physicalInterfaceForConfigHash, upstreamNode, exitForHash);
                             var candidateHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(candidateConfig)));
                             return candidateHash.Equals(preferredCoreConfigSha256, StringComparison.OrdinalIgnoreCase);
                         }

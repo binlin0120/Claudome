@@ -581,10 +581,100 @@ Check 'hyperv-worker-display-only-isolation-and-task-cleanup' {
     $null = [System.Management.Automation.Language.Parser]::ParseFile($workerPath, [ref]$null, [ref]$parseErrors)
     Assert-Case ($parseErrors.Count -eq 0)
     Assert-Case ($workerText -match '\$displayOnly\s*=\s*\$false')
+    Assert-Case ($workerText -match '\$spawnerOnly\s*=\s*\[bool\]\$SpawnerOnly')
     Assert-Case ($workerText -match 'if\s*\(\$displayOnly\s*-and\s*\$request\.operation\s*-ne\s*''sync-display''\)\s*\{\s*throw\s+''UNSUPPORTED_OPERATION''\s*\}')
+    Assert-Case ($workerText -match 'if\s*\(\$spawnerOnly\s*-and\s*\$request\.operation\s*-ne\s*''launch-verifier''\)\s*\{\s*throw\s+''UNSUPPORTED_OPERATION''\s*\}')
     Assert-Case ($workerText -match 'if\s*\(\$verificationOnly\s*-and\s*\$request\.operation\s*-ne\s*''boundary-verify''\)\s*\{\s*throw\s+''UNSUPPORTED_OPERATION''\s*\}')
     Assert-Case ($workerText -match 'ClaudomeDisplay-\*')
     Assert-Case ($workerText -match 'Stop-ScheduledTask' -and $workerText -match 'Unregister-ScheduledTask' -and $workerText -match 'Remove-Item\s+-LiteralPath\s+\$bundle')
+}
+
+Check 'hyperv-worker-spawner-only-live-process-isolation' {
+    # Production HyperVWorker.ps1 process test (no VM touched): real pwsh worker auto-spawns isolated -SpawnerOnly
+    # child, spawner launches displayOnly child without touching main pipe, and exiting main cleans up children.
+    $workerSource = Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
+    $pwshExe = Join-Path $PSHOME 'pwsh.exe'
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('claudome-spawner-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $privateDir = Join-Path $tempRoot 'private'
+    $mainPipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
+    $spawnerPipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
+    $displayPipeName = 'ClaudeSetup-' + [guid]::NewGuid().ToString('N')
+    $mainPipe = $null; $spawnerPipe = $null; $displayPipe = $null; $mainProc = $null; $displayPid = 0
+    try {
+        [IO.Directory]::CreateDirectory($privateDir) | Out-Null
+        $workerCopy = Join-Path $privateDir 'HyperVWorker-live.ps1'
+        $displayCopy = Join-Path $privateDir 'HyperVWorker-display.ps1'
+        Copy-Item -LiteralPath $workerSource -Destination $workerCopy -Force
+        Copy-Item -LiteralPath $workerSource -Destination $displayCopy -Force
+
+        $mainPipe = [IO.Pipes.NamedPipeServerStream]::new($mainPipeName, [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
+        $spawnerPipe = [IO.Pipes.NamedPipeServerStream]::new($spawnerPipeName, [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
+        $displayPipe = [IO.Pipes.NamedPipeServerStream]::new($displayPipeName, [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
+
+        $psi = [Diagnostics.ProcessStartInfo]::new($pwshExe)
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        foreach ($arg in @('-NoLogo','-NoProfile','-File',$workerCopy,'-PipeName',$mainPipeName,'-SpawnerPipeName',$spawnerPipeName)) { $psi.ArgumentList.Add($arg) }
+        $mainProc = [Diagnostics.Process]::Start($psi)
+        Assert-Case ($null -ne $mainProc)
+
+        $cts = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(15))
+        $mainPipe.WaitForConnectionAsync($cts.Token).GetAwaiter().GetResult()
+        $spawnerPipe.WaitForConnectionAsync($cts.Token).GetAwaiter().GetResult()
+
+        $mainR = [IO.StreamReader]::new($mainPipe,[Text.Encoding]::UTF8,$false,4096,$true)
+        $mainW = [IO.StreamWriter]::new($mainPipe,[Text.UTF8Encoding]::new($false),4096,$true); $mainW.AutoFlush = $true
+        $spR = [IO.StreamReader]::new($spawnerPipe,[Text.Encoding]::UTF8,$false,4096,$true)
+        $spW = [IO.StreamWriter]::new($spawnerPipe,[Text.UTF8Encoding]::new($false),4096,$true); $spW.AutoFlush = $true
+
+        $opts = @{ PlatformId = 'hyperv'; VmName = 'SpawnerLiveTest'; Root = $tempRoot }
+        $mainW.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $false } } | ConvertTo-Json -Compress -Depth 5))
+        $mainInit = ($mainR.ReadLine() | ConvertFrom-Json)
+        Assert-Case ($mainInit.ok -and $mainInit.value -eq 'initialized')
+
+        $spW.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $false; spawnerOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
+        $spInit = ($spR.ReadLine() | ConvertFrom-Json)
+        Assert-Case ($spInit.ok -and $spInit.value -eq 'initialized')
+
+        # Spawner-only process MUST reject non-launch-verifier operations
+        $spW.WriteLine((@{ operation = 'sync-display'; data = @{ vmId = '00000000-0000-0000-0000-000000000000' } } | ConvertTo-Json -Compress -Depth 5))
+        $spRejected = ($spR.ReadLine() | ConvertFrom-Json)
+        Assert-Case (-not $spRejected.ok -and $spRejected.code -eq 'UNSUPPORTED_OPERATION')
+
+        # Spawner-only launches real displayOnly child pwsh.exe without touching main pipe
+        $spW.WriteLine((@{ operation = 'launch-verifier'; data = @{ pipeName = $displayPipeName; scriptPath = $displayCopy } } | ConvertTo-Json -Compress -Depth 5))
+        $spLaunch = ($spR.ReadLine() | ConvertFrom-Json)
+        Assert-Case ($spLaunch.ok -and [int]::TryParse([string]$spLaunch.value, [ref]$displayPid) -and $displayPid -gt 0)
+
+        $displayPipe.WaitForConnectionAsync($cts.Token).GetAwaiter().GetResult()
+        $dispR = [IO.StreamReader]::new($displayPipe,[Text.Encoding]::UTF8,$false,4096,$true)
+        $dispW = [IO.StreamWriter]::new($displayPipe,[Text.UTF8Encoding]::new($false),4096,$true); $dispW.AutoFlush = $true
+        $dispW.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $true } } | ConvertTo-Json -Compress -Depth 5))
+        $dispInit = ($dispR.ReadLine() | ConvertFrom-Json)
+        Assert-Case ($dispInit.ok -and $dispInit.value -eq 'initialized')
+
+        # Display-only child rejects non-sync-display operations
+        $dispW.WriteLine((@{ operation = 'running'; data = @{ vmId = '00000000-0000-0000-0000-000000000000' } } | ConvertTo-Json -Compress -Depth 5))
+        $dispRejected = ($dispR.ReadLine() | ConvertFrom-Json)
+        Assert-Case (-not $dispRejected.ok -and $dispRejected.code -eq 'UNSUPPORTED_OPERATION')
+
+        # Even if spawner & display pipes are closed abruptly, main pipe remains alive and responsive
+        $dispW.Dispose(); $dispR.Dispose(); $displayPipe.Dispose(); $displayPipe = $null
+        $spW.Dispose(); $spR.Dispose(); $spawnerPipe.Dispose(); $spawnerPipe = $null
+        $mainW.WriteLine((@{ operation = 'init'; data = @{ options = $opts; verificationOnly = $false; displayOnly = $false } } | ConvertTo-Json -Compress -Depth 5))
+        $mainStillAlive = ($mainR.ReadLine() | ConvertFrom-Json)
+        Assert-Case ($mainStillAlive.ok -and $mainStillAlive.value -eq 'initialized' -and -not $mainProc.HasExited)
+
+        # Clean exit tears down main worker cleanly
+        $mainW.WriteLine('{"operation":"exit"}')
+        Assert-Case ($mainProc.WaitForExit(5000))
+    } finally {
+        if ($displayPid -gt 0) { try { $dp = Get-Process -Id $displayPid -ErrorAction SilentlyContinue; if ($dp -and -not $dp.HasExited) { $dp.Kill($true) } } catch { } }
+        if ($mainProc -and -not $mainProc.HasExited) { try { $mainProc.Kill($true) } catch { } }
+        if ($displayPipe) { try { $displayPipe.Dispose() } catch { } }
+        if ($spawnerPipe) { try { $spawnerPipe.Dispose() } catch { } }
+        if ($mainPipe) { try { $mainPipe.Dispose() } catch { } }
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 # Call the real .NET file API directly; the mock registry provider remains scoped

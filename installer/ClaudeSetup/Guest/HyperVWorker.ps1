@@ -1,5 +1,5 @@
 ﻿#requires -Version 7.0
-param([string]$PipeName='',[switch]$ProbeGuestStatus)
+param([string]$PipeName='',[switch]$ProbeGuestStatus,[string]$SpawnerPipeName='',[switch]$SpawnerOnly)
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
 $script:supervisedChildPids=[Collections.Generic.List[int]]::new()
 $script:workerScriptPath=$PSCommandPath
@@ -14,12 +14,22 @@ function Stop-SupervisedChildren {
 }
 if(-not $ProbeGuestStatus) {
     if($PipeName -notmatch '^ClaudeSetup-[a-f0-9]{32}$'){exit 1}
+    if($SpawnerPipeName) {
+        if($SpawnerOnly -or $SpawnerPipeName -notmatch '^ClaudeSetup-[a-f0-9]{32}$'){exit 1}
+        try {
+            $spStart=[Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
+            $spStart.UseShellExecute=$false;$spStart.CreateNoWindow=$true
+            foreach($a in @('-NoLogo','-NoProfile','-File',$PSCommandPath,'-PipeName',$SpawnerPipeName,'-SpawnerOnly')){$spStart.ArgumentList.Add($a)}
+            $spProc=[Diagnostics.Process]::Start($spStart)
+            if($spProc){$script:supervisedChildPids.Add($spProc.Id)}
+        } catch { }
+    }
     $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::None,[Security.Principal.TokenImpersonationLevel]::Identification)
     $pipe.Connect(180000)
     $reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,4096,$true)
     $writer=[IO.StreamWriter]::new($pipe,[Text.UTF8Encoding]::new($false),4096,$true);$writer.AutoFlush=$true
 }
-$o=$null;$verificationOnly=$false;$displayOnly=$false
+$o=$null;$verificationOnly=$false;$displayOnly=$false;$spawnerOnly=[bool]$SpawnerOnly
 function Assert-LocalPath([string]$Path,[string]$Parent) {
     $full=[IO.Path]::GetFullPath($Path);$base=[IO.Path]::GetFullPath($Parent).TrimEnd('\')+'\'
     if(-not $full.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)){throw 'VM_SCOPE'}
@@ -863,6 +873,7 @@ try {
                 $o=$d.options
                 $verificationOnly=[bool]$d.verificationOnly
                 $displayOnly=[bool]$d.displayOnly
+                $spawnerOnly=[bool]$SpawnerOnly -or [bool]$d.spawnerOnly
                 if(-not $o -or $o.PlatformId -ne 'hyperv' -or $o.VmName -notmatch '^[a-zA-Z0-9_-]{1,50}$' -or -not [IO.Path]::IsPathFullyQualified($o.Root) -or $o.Root.StartsWith('\\') -or ([IO.Path]::GetPathRoot($o.Root).TrimEnd('\') -eq $o.Root.TrimEnd('\'))){throw 'VM_SCOPE'}
                 $null=Assert-LocalPath (Join-Path $o.Root 'machines') $o.Root
                 $value='initialized'
@@ -870,6 +881,7 @@ try {
                 if(-not $o){throw 'VM_SCOPE'}
                 if($verificationOnly -and $request.operation -ne 'boundary-verify'){throw 'UNSUPPORTED_OPERATION'}
                 if($displayOnly -and $request.operation -ne 'sync-display'){throw 'UNSUPPORTED_OPERATION'}
+                if($spawnerOnly -and $request.operation -ne 'launch-verifier'){throw 'UNSUPPORTED_OPERATION'}
                 if($request.operation -eq 'prepare') {
                     $script:hypervSubstage='edition-check'
                     $edition=(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
