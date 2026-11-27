@@ -794,6 +794,119 @@ Check 'hyperv-guest-status-probe-returns-ready-unregisters-and-handles-timeout-a
     }
 }
 
+Check 'new-vm-default-video-sets-1920x1080-with-maximum-fallback-and-preserves-existing-vm' {
+    $workerPath = Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($workerPath, [ref]$null, [ref]$null)
+    foreach ($fnName in @('Assert-LocalPath', 'Test-OwnedVmMarker', 'Save-OwnedVmMarker', 'Set-NewTaskVmDefaultVideo', 'Resolve-OrCreateTaskVm')) {
+        $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true) | Select-Object -First 1
+        Assert-Case ($null -ne $fn)
+        . ([scriptblock]::Create($fn.Extent.Text))
+    }
+
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('claudome-vmvideo-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $savedO = $script:o
+    $videoCalls = [Collections.Generic.List[string]]::new()
+    $script:failSingle = $false
+    $script:mockVideo = @{ w = 1024; h = 768; t = 'Single' }
+    $script:mockExistingVm = $null
+    try {
+        [IO.Directory]::CreateDirectory($tempRoot) | Out-Null
+        $script:o = [pscustomobject]@{ Root = $tempRoot; VmName = 'NewVideoVm'; WorkspaceId = '22222222222222222222222222222222'; MemoryMb = 4096 }
+        function Get-VM([string]$Name = '', $Id = $null) { return $script:mockExistingVm }
+        function New-VM([string]$Name, [string]$Path, [int]$Generation, [long]$MemoryStartupBytes, [switch]$NoVHD) {
+            return [pscustomobject]@{ Id = [guid]'66666666-6666-6666-6666-666666666666'; Name = $Name; Path = $Path }
+        }
+        function Get-VMNetworkAdapter($VM) { @() }
+        function Remove-VMNetworkAdapter { }
+        function Set-VMVideo($VM, [int]$HorizontalResolution, [int]$VerticalResolution, [string]$ResolutionType) {
+            $videoCalls.Add("${HorizontalResolution}x${VerticalResolution}:${ResolutionType}")
+            if ($script:failSingle -and $ResolutionType -eq 'Single') { throw 'Single mode unsupported' }
+            $script:mockVideo = @{ w = $HorizontalResolution; h = $VerticalResolution; t = $ResolutionType }
+        }
+        function Get-VMVideo($VM) {
+            return [pscustomobject]@{ HorizontalResolution = $script:mockVideo.w; VerticalResolution = $script:mockVideo.h; ResolutionType = $script:mockVideo.t }
+        }
+
+        # 1. Newly created VM gets 1920x1080 Single and records verified video state in owner marker.
+        $createdId = Resolve-OrCreateTaskVm ([pscustomobject]@{ vmId = '' })
+        Assert-Case ($createdId -eq '66666666-6666-6666-6666-666666666666')
+        Assert-Case ($videoCalls.Count -eq 1 -and $videoCalls[0] -eq '1920x1080:Single')
+        $markerPath = Join-Path $tempRoot 'machines\NewVideoVm\.claude-hyperv-owner.json'
+        $marker = [IO.File]::ReadAllText($markerPath) | ConvertFrom-Json
+        Assert-Case ($marker.defaultVideo.verified -eq $true -and $marker.defaultVideo.applied -eq '1920x1080' -and $marker.defaultVideo.resolutionType -eq 'Single')
+
+        # 2. Existing VM reuse NEVER calls Set-VMVideo (preserves existing VM config).
+        $videoCalls.Clear()
+        $script:mockExistingVm = [pscustomobject]@{ Id = [guid]'66666666-6666-6666-6666-666666666666'; Name = 'NewVideoVm'; Path = (Join-Path $tempRoot 'machines\NewVideoVm') }
+        $reusedId = Resolve-OrCreateTaskVm ([pscustomobject]@{ vmId = '' })
+        Assert-Case ($reusedId -eq '66666666-6666-6666-6666-666666666666' -and $videoCalls.Count -eq 0)
+
+        # 3. Single mode failure falls back cleanly to Maximum and verifies 1920x1080 readback.
+        $videoCalls.Clear()
+        $script:failSingle = $true
+        $fallbackRes = Set-NewTaskVmDefaultVideo ([pscustomobject]@{ Name = 'FallbackVm' }) 1920 1080
+        Assert-Case ($fallbackRes.verified -eq $true -and $fallbackRes.resolutionType -eq 'Maximum' -and $videoCalls.Count -eq 2 -and $videoCalls[1] -eq '1920x1080:Maximum')
+    } finally {
+        $script:o = $savedO
+        foreach ($mockFn in @('Get-VM','New-VM','Get-VMNetworkAdapter','Remove-VMNetworkAdapter','Set-VMVideo','Get-VMVideo')) {
+            Remove-Item ("function:$mockFn") -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Check 'clash-runtime-settings-mismatch-reports-sanitized-8-field-diff-without-secrets' {
+    $auditPath = Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\NetworkAudit.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($auditPath, [ref]$null, [ref]$null)
+    foreach ($fnName in @('Format-ClashAuditScalar', 'Get-ClashRuntimeSettingMismatches')) {
+        $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true) | Select-Object -First 1
+        Assert-Case ($null -ne $fn)
+        . ([scriptblock]::Create($fn.Extent.Text))
+    }
+
+    $validActive = [pscustomobject]@{
+        'mixed-port' = 17897
+        'allow-lan' = $false
+        ipv6 = $false
+        mode = 'Rule'
+        secret = 'SUPER-SECRET-TOKEN-999'
+        tun = [pscustomobject]@{
+            enable = $true
+            device = 'ClaudeTun'
+            'auto-route' = $true
+            'strict-route' = $true
+        }
+    }
+    $okDiff = @(Get-ClashRuntimeSettingMismatches $validActive)
+    Assert-Case ($okDiff.Count -eq 0)
+
+    $badActive = [pscustomobject]@{
+        'mixed-port' = 7897
+        'allow-lan' = $true
+        ipv6 = $true
+        mode = 'global'
+        secret = 'SUPER-SECRET-TOKEN-999'
+        subscription = 'https://secret.sub.example/token=abc123'
+        tun = [pscustomobject]@{
+            enable = $false
+            device = 'Meta'
+            'auto-route' = $false
+        }
+    }
+    $badDiff = @(Get-ClashRuntimeSettingMismatches $badActive)
+    $joined = $badDiff -join '；'
+    Assert-Case ($badDiff.Count -eq 8)
+    Assert-Case ($joined.Contains('mixed-port: 期望 17897，实际 7897'))
+    Assert-Case ($joined.Contains('allow-lan: 期望 false，实际 true'))
+    Assert-Case ($joined.Contains('ipv6: 期望 false，实际 true'))
+    Assert-Case ($joined.Contains('mode: 期望 rule，实际 global'))
+    Assert-Case ($joined.Contains('tun.enable: 期望 true，实际 false'))
+    Assert-Case ($joined.Contains('tun.device: 期望 ClaudeTun，实际 Meta'))
+    Assert-Case ($joined.Contains('tun.auto-route: 期望 true，实际 false'))
+    Assert-Case ($joined.Contains('tun.strict-route: 期望 true，实际 缺失'))
+    Assert-Case (-not $joined.Contains('SUPER-SECRET') -and -not $joined.Contains('secret.sub.example'))
+}
+
 # Call the real .NET file API directly; the mock registry provider remains scoped
 # to this test process, not the user's PowerShell session or machine.
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null

@@ -1,4 +1,4 @@
-# Shared readback / outage checks. Loaded only in the verified task VM.
+﻿# Shared readback / outage checks. Loaded only in the verified task VM.
 function ConvertTo-CanonicalConfig($Value) {
     if($null -eq $Value){return $null}
     if($Value -is [Collections.IDictionary]){
@@ -73,44 +73,99 @@ function Assert-ClashServiceCommand([string]$Command,[string]$RuntimePath,[strin
     $actualPipe=if($Matches[1]){$Matches[1]}else{$Matches[2]}
     if($actualPipe -ne ('\\.\pipe\'+$Pipe)){throw 'CLASH_CONTROLLER_UNAVAILABLE'}
 }
+function Format-ClashAuditScalar($Container, [string]$PropertyName) {
+    if ($null -eq $Container) { return @{ present = $false; value = $null; text = '缺失' } }
+    $hasProp = $false
+    $val = $null
+    if ($Container -is [Collections.IDictionary]) {
+        if ($Container.Contains($PropertyName)) { $hasProp = $true; $val = $Container[$PropertyName] }
+    } else {
+        $p = $Container.PSObject.Properties[$PropertyName]
+        if ($null -ne $p) { $hasProp = $true; $val = $p.Value }
+    }
+    if (-not $hasProp -or $null -eq $val) { return @{ present = $false; value = $null; text = '缺失' } }
+    if ($val -is [bool]) { return @{ present = $true; value = $val; text = $(if ($val) { 'true' } else { 'false' }) } }
+    if ($val -is [int] -or $val -is [long] -or $val -is [double] -or $val -is [decimal]) {
+        return @{ present = $true; value = $val; text = [string]$val }
+    }
+    $s = [string]$val
+    if ($s.Length -gt 32) { $s = $s.Substring(0, 32) + '…' }
+    return @{ present = $true; value = $s; text = $s }
+}
+function Get-ClashRuntimeSettingMismatches($Active) {
+    $mismatches = [Collections.Generic.List[string]]::new()
+    if ($null -eq $Active) {
+        $mismatches.Add('/configs: 期望 对象，实际 缺失')
+        return @($mismatches)
+    }
+    $mixed = Format-ClashAuditScalar $Active 'mixed-port'
+    if (-not $mixed.present -or ([string]$mixed.value -ne '17897')) { $mismatches.Add("mixed-port: 期望 17897，实际 $($mixed.text)") }
+    $allowLan = Format-ClashAuditScalar $Active 'allow-lan'
+    if ($allowLan.present -and [bool]$allowLan.value) { $mismatches.Add("allow-lan: 期望 false，实际 $($allowLan.text)") }
+    $ipv6 = Format-ClashAuditScalar $Active 'ipv6'
+    if ($ipv6.present -and [bool]$ipv6.value) { $mismatches.Add("ipv6: 期望 false，实际 $($ipv6.text)") }
+    $mode = Format-ClashAuditScalar $Active 'mode'
+    if (-not $mode.present -or ([string]$mode.value -ine 'rule')) { $mismatches.Add("mode: 期望 rule，实际 $($mode.text)") }
+
+    $tun = $null
+    if ($Active -is [Collections.IDictionary]) {
+        if ($Active.Contains('tun')) { $tun = $Active['tun'] }
+    } elseif ($null -ne $Active.PSObject.Properties['tun']) {
+        $tun = $Active.PSObject.Properties['tun'].Value
+    }
+    $tunEnable = Format-ClashAuditScalar $tun 'enable'
+    if (-not $tunEnable.present -or -not [bool]$tunEnable.value) { $mismatches.Add("tun.enable: 期望 true，实际 $($tunEnable.text)") }
+    $tunDevice = Format-ClashAuditScalar $tun 'device'
+    if (-not $tunDevice.present -or ([string]$tunDevice.value -cne 'ClaudeTun')) { $mismatches.Add("tun.device: 期望 ClaudeTun，实际 $($tunDevice.text)") }
+    $tunAutoRoute = Format-ClashAuditScalar $tun 'auto-route'
+    if (-not $tunAutoRoute.present -or -not [bool]$tunAutoRoute.value) { $mismatches.Add("tun.auto-route: 期望 true，实际 $($tunAutoRoute.text)") }
+    $tunStrictRoute = Format-ClashAuditScalar $tun 'strict-route'
+    if (-not $tunStrictRoute.present -or -not [bool]$tunStrictRoute.value) { $mismatches.Add("tun.strict-route: 期望 true，实际 $($tunStrictRoute.text)") }
+    return @($mismatches)
+}
 function Assert-ClashRuntime {
+    $script:LastRuntimeMismatchDetail=''
     $clashHome=Join-Path $env:APPDATA 'io.github.clash-verge-rev.clash-verge-rev'
     $profile=Join-Path $clashHome 'profiles\claude-environment-setup.yaml'
     $wantedHash=if($payload.coreConfigSha256){[string]$payload.coreConfigSha256}else{[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes([string]$payload.coreConfig))).ToLowerInvariant()}
-    if((Get-FileHash -LiteralPath $profile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $wantedHash){throw 'PERSISTED_PROFILE_CHANGED'}
+    if((Get-FileHash -LiteralPath $profile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $wantedHash){$script:LastRuntimeMismatchDetail='profiles/claude-environment-setup.yaml 哈希与任务记录不一致';throw 'PERSISTED_PROFILE_CHANGED'}
     $selected=Read-LocalYaml $profile
     $profiles=Read-LocalYaml (Join-Path $clashHome 'profiles.yaml')
-    if($profiles['current'] -ne 'claude-environment-setup'){throw 'PERSISTED_PROFILE_NOT_SELECTED'}
+    if($profiles['current'] -ne 'claude-environment-setup'){$cur=[string]$profiles['current'];if($cur.Length -gt 32){$cur=$cur.Substring(0,32)+'…'};$script:LastRuntimeMismatchDetail="profiles.current: 期望 claude-environment-setup，实际 $(if($cur){$cur}else{'缺失'})";throw 'PERSISTED_PROFILE_NOT_SELECTED'}
     $service=Get-CimInstance Win32_Service -Filter "Name='clash_verge_service'"
-    if($service.State -ne 'Running' -or $service.ProcessId -le 0){throw 'CLASH_SERVICE_NOT_RUNNING'}
+    if($service.State -ne 'Running' -or $service.ProcessId -le 0){$script:LastRuntimeMismatchDetail="clash_verge_service: 期望 Running，实际 $($service.State)";throw 'CLASH_SERVICE_NOT_RUNNING'}
     $script:ClashExe=Get-ClashExecutable
     $process=Get-VerifiedClashListener
     $script:CoreExe=ConvertTo-ClashLocalPath $process.Path
     $core=Get-CimInstance Win32_Process -Filter ('ProcessId='+$process.Id)
-    if($core.ParentProcessId -ne $service.ProcessId){throw 'CLASH_SERVICE_CORE_REQUIRED'}
+    if($core.ParentProcessId -ne $service.ProcessId){$script:LastRuntimeMismatchDetail='mihomo 核心进程非 clash_verge_service 子进程';throw 'CLASH_SERVICE_CORE_REQUIRED'}
     $ownerKey=Get-ClashOwnerKey
     $runtimePath=Join-Path (Get-ClashServiceRoot) ('users\'+$ownerKey+'\runtime\config.yaml')
     $pipe='verge-mihomo-production-'+$ownerKey
     Assert-ClashServiceCommand $core.CommandLine $runtimePath $pipe
     $runtime=Read-LocalYaml $runtimePath
     if(($runtime['external-controller'] -and $runtime['external-controller'] -notmatch '^(?:127\.0\.0\.1|\[::1\]|localhost):[0-9]{1,5}$') -or
-        $runtime['external-controller-tls']){throw 'RUNTIME_CONTROLLER_NOT_LOCAL'}
+        $runtime['external-controller-tls']){$script:LastRuntimeMismatchDetail='external-controller 非本机监听或开启了 TLS';throw 'RUNTIME_CONTROLLER_NOT_LOCAL'}
     foreach($key in @('proxies','proxy-groups','rules','hosts','dns')){
         $a=ConvertTo-Json -InputObject (ConvertTo-CanonicalConfig $runtime[$key]) -Depth 30 -Compress
         $b=ConvertTo-Json -InputObject (ConvertTo-CanonicalConfig $selected[$key]) -Depth 30 -Compress
-        if($a -cne $b){throw 'RUNTIME_ROUTE_MISMATCH'}
+        if($a -cne $b){$script:LastRuntimeMismatchDetail="运行配置段 $key 与任务专用配置不一致";throw 'RUNTIME_ROUTE_MISMATCH'}
     }
     $secret=[string]$runtime['secret']
     $active=Read-ClashController $pipe $process.Id $secret 'configs'
-    if($active.'mixed-port' -ne 17897 -or $active.'allow-lan' -or $active.ipv6 -or $active.mode -ne 'rule' -or -not $active.tun.enable -or $active.tun.device -ne 'ClaudeTun' -or -not $active.tun.'auto-route' -or -not $active.tun.'strict-route'){throw 'RUNTIME_NETWORK_SETTINGS_MISMATCH'}
+    $settingMismatches=@(Get-ClashRuntimeSettingMismatches $active)
+    if($settingMismatches.Count -gt 0){
+        $script:LastRuntimeMismatchDetail=($settingMismatches -join '；')
+        throw 'RUNTIME_NETWORK_SETTINGS_MISMATCH'
+    }
     $group=Read-ClashController $pipe $process.Id $secret 'proxies/Claude'
-    if($group.now -ne 'SelectedNode'){throw 'RUNTIME_ROUTE_MISMATCH'}
+    if($group.now -ne 'SelectedNode'){$script:LastRuntimeMismatchDetail='proxies/Claude.now 非 SelectedNode';throw 'RUNTIME_ROUTE_MISMATCH'}
     $rules=Read-ClashController $pipe $process.Id $secret 'rules'
-    if(@($rules.rules).Count -ne 1 -or $rules.rules[0].type -ne 'Match' -or $rules.rules[0].proxy -ne 'Claude'){throw 'RUNTIME_ROUTE_MISMATCH'}
-    if(@(Get-NetAdapter | Where-Object {$_.Name -eq 'ClaudeTun' -and $_.Status -eq 'Up'}).Count -ne 1){throw 'CLASH_TUN_REQUIRED'}
-    if(@(Get-NetFirewallProfile -PolicyStore ActiveStore | Where-Object {-not $_.Enabled -or $_.DefaultOutboundAction -ne 'Block'}).Count){throw 'FIREWALL_NOT_ENFORCED'}
-    if(@(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Outbound -Enabled True -Action Allow | Where-Object {$_.Group -ne 'ClaudeEnvironmentSetup'}).Count){throw 'UNREVIEWED_OUTBOUND_ALLOW'}
-    if((Get-TimeZone).Id -ne $payload.timeZoneId -or (Get-WinHomeLocation).GeoId -ne ([Globalization.RegionInfo]::new([string]$payload.country)).GeoId){throw 'REGION_READBACK_FAILED'}
+    if(@($rules.rules).Count -ne 1 -or $rules.rules[0].type -ne 'Match' -or $rules.rules[0].proxy -ne 'Claude'){$script:LastRuntimeMismatchDetail="rules 数量=$(@($rules.rules).Count)，期望仅 1 条 MATCH,Claude";throw 'RUNTIME_ROUTE_MISMATCH'}
+    if(@(Get-NetAdapter | Where-Object {$_.Name -eq 'ClaudeTun' -and $_.Status -eq 'Up'}).Count -ne 1){$script:LastRuntimeMismatchDetail='未检测到唯一状态为 Up 的 ClaudeTun 网卡';throw 'CLASH_TUN_REQUIRED'}
+    if(@(Get-NetFirewallProfile -PolicyStore ActiveStore | Where-Object {-not $_.Enabled -or $_.DefaultOutboundAction -ne 'Block'}).Count){$script:LastRuntimeMismatchDetail='Windows 防火墙出站默认策略未处于全 Profile Block';throw 'FIREWALL_NOT_ENFORCED'}
+    if(@(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Outbound -Enabled True -Action Allow | Where-Object {$_.Group -ne 'ClaudeEnvironmentSetup'}).Count){$script:LastRuntimeMismatchDetail='存在非本任务组（ClaudeEnvironmentSetup）的启用出站放行规则';throw 'UNREVIEWED_OUTBOUND_ALLOW'}
+    if((Get-TimeZone).Id -ne $payload.timeZoneId -or (Get-WinHomeLocation).GeoId -ne ([Globalization.RegionInfo]::new([string]$payload.country)).GeoId){$script:LastRuntimeMismatchDetail="区域或时区与任务不一致（当前时区=$((Get-TimeZone).Id)）";throw 'REGION_READBACK_FAILED'}
 }
 function Get-TraceMismatch($Trace) {
     if($Trace.loc -ne $payload.country){return 'COUNTRY_MISMATCH'}

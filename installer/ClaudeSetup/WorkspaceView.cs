@@ -103,6 +103,15 @@ public sealed partial class SetupWindow
     private ScrollViewer? shellContentScroll;
     private Border? desktopTopBar;
     private StackPanel? desktopDetailDrawer;
+    private WrapPanel? desktopActionCluster;
+    private Button? desktopTopBarToggle, desktopFullscreenButton;
+    private bool desktopTopBarCollapsed, desktopFullscreen;
+    private WindowStyle savedWindowStyle = WindowStyle.SingleBorderWindow;
+    private WindowState savedWindowState = WindowState.Normal;
+    private ResizeMode savedResizeMode = ResizeMode.CanResize;
+    private Border? desktopResumeNetworkBanner;
+    private TextBlock? desktopResumeNetworkText;
+    private Button? desktopRetryNetworkBtn, desktopReconfigureNetworkBtn;
     private StackPanel? desktopGuidePanel, consoleIdleOverlay;
     private System.Windows.Controls.Primitives.Popup? desktopClipboardPopup, desktopMaintenancePopup;
     private Expander? desktopMaintenanceExpander, desktopStepGuideExpander;
@@ -130,7 +139,35 @@ public sealed partial class SetupWindow
     private DateTime? waitingForGuestFrameSinceUtc;
     private bool notifiedMultiCoreBlankTimeout;
     private VBoxDisplayLayout? lastVBoxLayout;
-    private readonly DispatcherTimer consoleResizeTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
+    private readonly DispatcherTimer consoleResizeTimer = new() { Interval = TimeSpan.FromMilliseconds(350) };
+
+    internal static Rect ComputeCentered16By9Frame(double availableWidth, double availableHeight)
+    {
+        if (availableWidth <= 0 || availableHeight <= 0 ||
+            double.IsNaN(availableWidth) || double.IsNaN(availableHeight) ||
+            double.IsInfinity(availableWidth) || double.IsInfinity(availableHeight))
+            return new Rect(0, 0, 0, 0);
+
+        const double targetRatio = 16.0 / 9.0;
+        var widthFromHeight = availableHeight * targetRatio;
+        double width;
+        double height;
+        if (widthFromHeight <= availableWidth)
+        {
+            width = Math.Floor(widthFromHeight);
+            height = Math.Floor(availableHeight);
+        }
+        else
+        {
+            width = Math.Floor(availableWidth);
+            height = Math.Floor(availableWidth / targetRatio);
+        }
+        width = Math.Max(1, Math.Min(width, availableWidth));
+        height = Math.Max(1, Math.Min(height, availableHeight));
+        var x = Math.Max(0, Math.Floor((availableWidth - width) / 2.0));
+        var y = Math.Max(0, Math.Floor((availableHeight - height) / 2.0));
+        return new Rect(x, y, width, height);
+    }
     private TextBlock? consoleStatus,consoleGuide;
     private readonly TextBlock creationNote=Text("首次创建前填写的 CPU、内存与磁盘参数会实际传入虚拟机。",11);
     private bool connectingConsole,autoConnectDesktop,desktopTimerHooked,closingDesktop;
@@ -239,6 +276,7 @@ public sealed partial class SetupWindow
                         Action("黑屏与启动诊断", async (_, _) => await ReadVmDiagnostic()),
                         Action("检查 Clash / AdsPower", async (_, _) => await RunValidation(false, false)),
                         Action("一键连接网络", async (_, _) => await EnterOriginalWorkspace(networkOnly: true)),
+                        Action("重新配置本任务网络", async (_, _) => { if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = false; await ReconfigureGuestNetworkWithConfirmation(); }),
                         Action("备用线路", async (_, _) => await PickSavedRoute()),
                         Action("防护结果", (_, _) => { if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = false; Navigate(5); }),
                         Action("重新连接桌面", async (_, _) => { desktopConnectionPolicy.ResumeExplicitly(); autoConnectDesktop = true; await ConnectDesktop(requested: true); }, true),
@@ -262,11 +300,30 @@ public sealed partial class SetupWindow
             };
 
             var pauseSaveBtn = Action("保存并暂停", (_, _) => PauseCurrentTask());
+            desktopTopBarToggle = Action("▲ 收起", (_, _) => ToggleDesktopTopBar());
+            desktopTopBarToggle.Name = "DesktopTopBarToggle";
+            desktopTopBarToggle.ToolTip = "收起或展开专属桌面顶部工具栏";
+            desktopFullscreenButton = Action("⛶ 全屏", (_, _) => ToggleDesktopFullscreen());
+            desktopFullscreenButton.Name = "DesktopFullscreenButton";
+            desktopFullscreenButton.ToolTip = "切换 Claudome 内嵌桌面全屏（按 Esc 退出）";
+
+            var persistentCluster = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            persistentCluster.Children.Add(desktopFullscreenButton);
+            persistentCluster.Children.Add(desktopTopBarToggle);
+
             var topBarRow = new DockPanel { LastChildFill = true };
             var actionCluster = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+            desktopActionCluster = actionCluster;
             foreach (var item in new UIElement[] { desktopContinue, pauseSaveBtn, topStandaloneHyperV, clipboardBtn, maintenanceBtn, desktopRecoverDisplay, desktopSyncAuth, desktopManualAdsPower, desktopConfirmAdsExit, desktopFinish })
                 actionCluster.Children.Add(item);
+            DockPanel.SetDock(persistentCluster, Dock.Right);
             DockPanel.SetDock(actionCluster, Dock.Right);
+            topBarRow.Children.Add(persistentCluster);
             topBarRow.Children.Add(actionCluster);
             topBarRow.Children.Add(consoleStatus);
 
@@ -282,6 +339,32 @@ public sealed partial class SetupWindow
                 Child = Text("如果虚拟机仍在 Windows 首次设置，请按屏幕提示确认地区与键盘。看不到底部按钮时，请最大化窗口或在独立窗口查看。", 11.5, false)
             };
 
+            desktopResumeNetworkText = Text("", 11.5, false);
+            desktopResumeNetworkText.Margin = new Thickness(0, 0, 0, 6);
+            desktopRetryNetworkBtn = Action("重试检查原网络", async (_, _) => await StartInstall(checkSavedNetwork: true));
+            desktopRetryNetworkBtn.Name = "DesktopRetryNetworkButton";
+            desktopReconfigureNetworkBtn = Action("重新配置本任务网络", async (_, _) => await ReconfigureGuestNetworkWithConfirmation(), true);
+            desktopReconfigureNetworkBtn.Name = "DesktopReconfigureNetworkButton";
+            desktopResumeNetworkBanner = new Border
+            {
+                Name = "DesktopResumeNetworkBanner",
+                Background = Pale,
+                BorderBrush = Accent,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(10, 8, 10, 8),
+                Margin = new Thickness(0, 4, 0, 2),
+                Visibility = Visibility.Collapsed,
+                Child = new StackPanel
+                {
+                    Children =
+                    {
+                        desktopResumeNetworkText,
+                        Row(desktopRetryNetworkBtn, desktopReconfigureNetworkBtn)
+                    }
+                }
+            };
+
             desktopDetailDrawer = new StackPanel
             {
                 Margin = new Thickness(0, 4, 0, 0),
@@ -289,6 +372,7 @@ public sealed partial class SetupWindow
                 Children =
                 {
                     desktopOobeBanner,
+                    desktopResumeNetworkBanner,
                     desktopForceRepairBanner,
                     desktopActivity,
                     desktopActivityProgress,
@@ -310,9 +394,10 @@ public sealed partial class SetupWindow
                 Margin = new Thickness(0, 0, 0, 10),
                 Child = guide
             };
+            desktopTopBar.SizeChanged += (_, _) => UpdateDesktopFrameGeometry();
             desktopView.Children.Add(desktopTopBar);
 
-            consoleHost=new NativeConsoleHost{Focusable=true,MinHeight=320,Visibility=Visibility.Collapsed};
+            consoleHost=new NativeConsoleHost{Focusable=true,MinHeight=120,Visibility=Visibility.Collapsed};
             consoleHost.SizeChanged += (_, _) => {
                 if (state.Options.PlatformId is not ("virtualbox" or "hyperv") || consoleHost?.IsAttached != true) return;
                 consoleResizeTimer.Stop();
@@ -323,10 +408,11 @@ public sealed partial class SetupWindow
             idleWizardButton.HorizontalAlignment = HorizontalAlignment.Center;
             consoleIdleOverlay = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Children = { consolePlaceholder, idleWizardButton } };
             var surface=new Grid();surface.Children.Add(consoleIdleOverlay);surface.Children.Add(consoleHost);
-            consoleFrame=new Border{Background=Surface,BorderBrush=Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(16),ClipToBounds=true,Child=surface};
+            consoleFrame=new Border{Name="DesktopConsoleFrame",Background=Surface,BorderBrush=Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(16),ClipToBounds=true,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,Child=surface};
             Grid.SetRow(consoleFrame, 1);
             desktopView.Children.Add(consoleFrame);
-            desktopView.Loaded+=async(_,_)=>{autoConnectDesktop=!desktopConnectionPolicy.Suspended;desktopTimer.Start();UpdateDesktopGuide();if(autoConnectDesktop)await ConnectDesktop();};
+            desktopView.SizeChanged += (_, _) => UpdateDesktopFrameGeometry();
+            desktopView.Loaded+=async(_,_)=>{autoConnectDesktop=!desktopConnectionPolicy.Suspended;desktopTimer.Start();UpdateDesktopGuide();UpdateDesktopFrameGeometry();if(autoConnectDesktop)await ConnectDesktop();};
             desktopView.Unloaded += (_, _) => {
                 desktopTimer.Stop();
                 consoleResizeTimer.Stop();
@@ -374,8 +460,13 @@ public sealed partial class SetupWindow
                         }
                         else if (state.Options.PlatformId == "hyperv")
                         {
-                            // VMConnect can resize its own outer HWND after a mode or DPI change.
-                            if (!fittingHyperVDisplay) consoleHost.Fit();
+                            // VMConnect can resize its outer HWND or restore its titlebar after interrupts/mode changes.
+                            if (!fittingHyperVDisplay && lastConsoleWindow is not null &&
+                                ConsoleWindowLocator.IsAlive(lastConsoleWindow, state.Options.VmName))
+                            {
+                                consoleHost.Fit();
+                                consoleHost.ClipToLiveHyperVSurface();
+                            }
                             await RefreshHyperVClipboardSettings();
                         }
                     }
@@ -434,12 +525,112 @@ public sealed partial class SetupWindow
     {
         UpdateDesktopSidebarLayout(enabled);
         if(desktopGuidePanel is not null)desktopGuidePanel.Visibility=enabled?Visibility.Visible:Visibility.Collapsed;
-        if(shellBody is not null && !IsCenteredConfigSection(section))shellBody.Margin=enabled?new Thickness(20,10,20,10):new Thickness(34,18,34,16);
+        if(shellBody is not null && !IsCenteredConfigSection(section))
+            shellBody.Margin = enabled
+                ? (desktopFullscreen ? new Thickness(6, 4, 6, 4) : new Thickness(20, 10, 20, 10))
+                : new Thickness(34, 18, 34, 16);
         if(shellContentScroll is not null)shellContentScroll.VerticalScrollBarVisibility=enabled?ScrollBarVisibility.Disabled:ScrollBarVisibility.Auto;
     }
     private void FitDesktopViewport()
     {
-        if(section==7 && desktopView is not null && shellContentScroll is not null && shellContentScroll.ActualHeight>0)desktopView.Height=Math.Max(340,shellContentScroll.ActualHeight-6);
+        if (section == 7 && desktopView is not null && shellContentScroll is not null && shellContentScroll.ActualHeight > 0)
+            desktopView.Height = Math.Max(220, shellContentScroll.ActualHeight - (desktopFullscreen ? 2 : 6));
+        UpdateDesktopFrameGeometry();
+    }
+
+    private void UpdateDesktopFrameGeometry()
+    {
+        if (section != 7 || desktopView is null || consoleFrame is null) return;
+        var availW = desktopView.ActualWidth;
+        if (availW <= 0 && shellContentScroll is not null) availW = shellContentScroll.ActualWidth;
+        var totalH = desktopView.ActualHeight;
+        if (totalH <= 0 && !double.IsNaN(desktopView.Height)) totalH = desktopView.Height;
+        var topBarH = desktopTopBar is not null && desktopTopBar.Visibility == Visibility.Visible
+            ? desktopTopBar.ActualHeight + desktopTopBar.Margin.Top + desktopTopBar.Margin.Bottom
+            : 0;
+        var availH = Math.Max(0, totalH - topBarH);
+        if (availW <= 0 || availH <= 0) return;
+
+        var rect = ComputeCentered16By9Frame(availW, availH);
+        if (rect.Width <= 0 || rect.Height <= 0) return;
+
+        if (Math.Abs(consoleFrame.Width - rect.Width) >= 0.5 || double.IsNaN(consoleFrame.Width))
+            consoleFrame.Width = rect.Width;
+        if (Math.Abs(consoleFrame.Height - rect.Height) >= 0.5 || double.IsNaN(consoleFrame.Height))
+            consoleFrame.Height = rect.Height;
+
+        if (consoleHost?.IsAttached == true && state.Options.PlatformId == "hyperv" && !fittingHyperVDisplay)
+        {
+            consoleHost.Fit();
+            if (consoleHost.HasLiveGuestClip)
+                consoleHost.ClipToLiveHyperVSurface();
+        }
+    }
+
+    private void ToggleDesktopTopBar()
+    {
+        desktopTopBarCollapsed = !desktopTopBarCollapsed;
+        ApplyDesktopTopBarState();
+    }
+
+    private void ApplyDesktopTopBarState()
+    {
+        if (desktopTopBarToggle is not null)
+            desktopTopBarToggle.Content = desktopTopBarCollapsed ? "▼ 展开" : "▲ 收起";
+        if (desktopActionCluster is not null)
+            desktopActionCluster.Visibility = desktopTopBarCollapsed ? Visibility.Collapsed : Visibility.Visible;
+        if (desktopTopBar is not null)
+        {
+            desktopTopBar.Padding = desktopTopBarCollapsed ? new Thickness(12, 4, 12, 4) : new Thickness(16, 10, 16, 10);
+            desktopTopBar.Margin = desktopTopBarCollapsed ? new Thickness(0, 0, 0, 4) : new Thickness(0, 0, 0, 10);
+        }
+        UpdateDesktopActivity();
+        desktopTopBar?.UpdateLayout();
+        UpdateDesktopFrameGeometry();
+    }
+
+    private void ToggleDesktopFullscreen() => SetDesktopFullscreen(!desktopFullscreen);
+
+    private void SetDesktopFullscreen(bool enabled)
+    {
+        if (desktopFullscreen == enabled) return;
+        desktopFullscreen = enabled;
+        if (enabled)
+        {
+            savedWindowStyle = WindowStyle;
+            savedWindowState = WindowState;
+            savedResizeMode = ResizeMode;
+            if (shellTopBar is not null) shellTopBar.Visibility = Visibility.Collapsed;
+            if (shellHeading is not null) shellHeading.Visibility = Visibility.Collapsed;
+            if (shellBottomBar is not null) shellBottomBar.Visibility = Visibility.Collapsed;
+            if (shellBody is not null) shellBody.Margin = new Thickness(6, 4, 6, 4);
+            WindowStyle = WindowStyle.None;
+            WindowState = WindowState.Maximized;
+        }
+        else
+        {
+            if (shellTopBar is not null) shellTopBar.Visibility = Visibility.Visible;
+            if (shellHeading is not null) shellHeading.Visibility = Visibility.Visible;
+            if (shellBottomBar is not null) shellBottomBar.Visibility = Visibility.Visible;
+            if (shellBody is not null && !IsCenteredConfigSection(section))
+                shellBody.Margin = section == 7 ? new Thickness(20, 10, 20, 10) : new Thickness(34, 18, 34, 16);
+            WindowStyle = savedWindowStyle;
+            ResizeMode = savedResizeMode;
+            WindowState = savedWindowState;
+        }
+        if (desktopFullscreenButton is not null)
+            desktopFullscreenButton.Content = desktopFullscreen ? "✕ 退出全屏" : "⛶ 全屏";
+        UpdateLayout();
+        FitDesktopViewport();
+    }
+
+    private async Task ReconfigureGuestNetworkWithConfirmation()
+    {
+        if (busy || recoveringDisplay) { Notice("请等待当前操作完成，或先暂停。"); return; }
+        if (MessageBox.Show(this,
+            "将按本任务当前线路重新写入来宾 Clash 配置并重新核验生效配置、防火墙与出口（不会重装 Windows 或清空虚拟机磁盘）。\n\n确认立即重新配置本任务网络吗？",
+            "重新配置本任务网络", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        await StartInstall(reconfigureGuestNetwork: true);
     }
     private void ReleaseDesktopWindow()
     {
@@ -735,20 +926,28 @@ public sealed partial class SetupWindow
             if (!isStale())
             {
                 if (!applied) host.Fit(forceRedraw: true);
+                var clipped = host.ClipToLiveHyperVSurface();
                 stillOverflow = host.HasOverflowScrollbars();
                 if (applied && !stillOverflow)
                 {
                     var zoomText = HyperVConsoleZoom.ZoomLabel(chosenLevel);
                     var modeLabel = synced is not null && !string.IsNullOrWhiteSpace(synced.After) ? $"{synced.After} @ {zoomText}" : $"缩放 {zoomText}";
-                    var actualSurface = host.MeasureActualGuestSurfaceRelativeToContainer();
-                    var fill = NativeConsoleHost.EvaluateEdgeToEdgeFill(actualSurface, host.ViewportPixels);
-                    var statusText = fill.State switch
+                    if (!clipped)
                     {
-                        NativeConsoleHost.DisplayFillState.FullFill => $"已完成 Hyper-V 桌面四边铺满适配（{modeLabel}）。",
-                        NativeConsoleHost.DisplayFillState.MarginsRemaining => $"已消除滚动条，但四边尚未完全贴合（{fill.Detail}；当前 {modeLabel}，可用「独立窗口查看」）。",
-                        _ => $"铺满待核验（已消除滚动条，当前 {modeLabel}，未读取到实际来宾画面四边边界，可用「独立窗口查看」）。"
-                    };
-                    SetDesktopConnectionStatus(statusText);
+                        SetDesktopConnectionStatus($"适配待核验（未能可靠定位来宾渲染面，未盲目裁剪，当前 {modeLabel}，可用「独立窗口查看」）。");
+                    }
+                    else
+                    {
+                        var actualSurface = host.MeasureActualGuestSurfaceRelativeToContainer();
+                        var fill = NativeConsoleHost.EvaluateEdgeToEdgeFill(actualSurface, host.ViewportPixels);
+                        var statusText = fill.State switch
+                        {
+                            NativeConsoleHost.DisplayFillState.FullFill => $"已完成 16:9 桌面铺满适配（{modeLabel}）。",
+                            NativeConsoleHost.DisplayFillState.MarginsRemaining => $"已裁剪原生边框并消除滚动条，但四边尚有留边（{fill.Detail}；当前 {modeLabel}，可用「独立窗口查看」）。",
+                            _ => $"适配待核验（已消除滚动条，当前 {modeLabel}，未读取到实际来宾画面四边边界，可用「独立窗口查看」）。"
+                        };
+                        SetDesktopConnectionStatus(statusText);
+                    }
                 }
                 else
                     SetDesktopConnectionStatus(HyperVZoomFallbackMessage(applied));
@@ -898,12 +1097,23 @@ public sealed partial class SetupWindow
                 !CanEnterDesktopWorkspace() ? "继续去「开始安装」" :
                 ResumePlan.CanResumeBrowser(state) ? "继续配置与验收" : "连接到虚拟机";
         }
+        var networkReviewAction = state.PendingActions.FirstOrDefault(a => a.Id is "resume-network" or "runtime-validation");
+        var showNetworkReview = networkReviewAction is not null && !string.IsNullOrEmpty(state.VmId);
+        if (desktopResumeNetworkBanner is not null)
+            desktopResumeNetworkBanner.Visibility = showNetworkReview ? Visibility.Visible : Visibility.Collapsed;
+        if (desktopResumeNetworkText is not null && networkReviewAction is not null)
+            desktopResumeNetworkText.Text = networkReviewAction.Title + "：" + string.Join(" ", networkReviewAction.Steps);
+        if (desktopRetryNetworkBtn is not null)
+            desktopRetryNetworkBtn.IsEnabled = !busy && !recoveringDisplay;
+        if (desktopReconfigureNetworkBtn is not null)
+            desktopReconfigureNetworkBtn.IsEnabled = !busy && !recoveringDisplay;
         var showActivity = busy || taskFaulted;
         if(desktopActivity is not null){desktopActivity.Text=latestTaskActivity+(busy&&!string.IsNullOrEmpty(latestTaskDownload)?"\n"+latestTaskDownload:"");desktopActivity.Visibility=showActivity&&!string.IsNullOrWhiteSpace(desktopActivity.Text)?Visibility.Visible:Visibility.Collapsed;}
         if(desktopActivityProgress is not null){desktopActivityProgress.Visibility=busy?Visibility.Visible:Visibility.Collapsed;desktopActivityProgress.IsIndeterminate=progress.IsIndeterminate;desktopActivityProgress.Value=progress.Value;}
         if (desktopDetailDrawer is not null)
         {
-            var hasContext = (desktopOobeBanner?.Visibility == Visibility.Visible) || showActivity || offerMultiCoreRecovery || state.Options.ManualAdsPower || showFinish;
+            var hasContext = !desktopTopBarCollapsed &&
+                ((desktopOobeBanner?.Visibility == Visibility.Visible) || showNetworkReview || showActivity || offerMultiCoreRecovery || state.Options.ManualAdsPower || showFinish);
             desktopDetailDrawer.Visibility = hasContext ? Visibility.Visible : Visibility.Collapsed;
         }
     }

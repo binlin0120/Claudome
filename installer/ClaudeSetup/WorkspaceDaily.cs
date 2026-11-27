@@ -171,7 +171,12 @@ public sealed partial class Deployment
         {
             state.Protection.Exit = ProtectionEvidence.GuestExit(result, DateTime.UtcNow);
             if (ProtectionEvidence.IsExitMismatch(result.GetProperty("exitCode").GetString()) || result.GetProperty("runtimeCode").GetString() == "MISMATCH")
-                throw new SetupException("确认当前来宾保护或实际出口与已应用配置不符。");
+            {
+                var detail = result.TryGetProperty("runtimeMismatchDetail", out var md) && md.ValueKind == JsonValueKind.String
+                    ? md.GetString() ?? "" : "";
+                var suffix = string.IsNullOrWhiteSpace(detail) ? "" : $"（差异明细：{detail}）";
+                throw new SetupException($"确认当前来宾保护或实际出口与已应用配置不符{suffix}。可在专属桌面直接点击「重新配置本任务网络」。");
+            }
             throw new GuestCheckPendingException("未得到有效的来宾保护或出口结果，可在检测与修复里重试。");
         }
         await BoundaryRuntime.VerifyCurrent(state, token);

@@ -21,8 +21,9 @@ public sealed partial class SetupWindow
     private readonly TextBlock sectionBadge = new();
     private int section;
     private Appearance appearance = Appearance.Load();
-    private Border? configModalFrame, inlineModalOverlay, inlineModalCard, sectionPillBorder;
-    private Grid? inlineModalSlot;
+    private Border? configModalFrame, inlineModalOverlay, inlineModalCard, sectionPillBorder, shellTopBar;
+    private StackPanel? shellHeading;
+    private Grid? inlineModalSlot, shellBottomBar;
     private Button? desktopShutdown, quickOpacityButton, quickThemeButton, topMoreButton, closeConfigButton;
     private Popup? topMorePopup;
     private TextBlock? downloadFeatureInfo;
@@ -37,6 +38,15 @@ public sealed partial class SetupWindow
         FontFamily = new FontFamily("Microsoft YaHei UI"); FontSize = 14; Foreground = Ink; Background = Canvas;
         Content = ContentRoot; ContentRoot.Background = Brushes.Transparent;
         SourceInitialized += (_, _) => UpdateNativeCaption();
+        SizeChanged += (_, _) => FitDesktopViewport();
+        PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Escape && desktopFullscreen)
+            {
+                SetDesktopFullscreen(false);
+                e.Handled = true;
+            }
+        };
         ContentRoot.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         ContentRoot.RowDefinitions.Add(new RowDefinition());
         ContentRoot.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0) });
@@ -229,6 +239,7 @@ public sealed partial class SetupWindow
             Padding = new Thickness(28, 10, 28, 10),
             Child = topGrid
         };
+        shellTopBar = topBar;
         Grid.SetColumnSpan(topBar, 2);
         ContentRoot.Children.Add(topBar);
 
@@ -259,6 +270,7 @@ public sealed partial class SetupWindow
         headingDock.Children.Add(headingTitles);
 
         var heading = new StackPanel();
+        shellHeading = heading;
         heading.Children.Add(headingDock);
         heading.Children.Add(steps);
         globalUpdateBanner = BuildGlobalUpdateBanner();
@@ -272,6 +284,7 @@ public sealed partial class SetupWindow
         body.Children.Add(scroll);
 
         var bottom = new Grid { Margin = new Thickness(0, 10, 0, 0) };
+        shellBottomBar = bottom;
         bottom.ColumnDefinitions.Add(new ColumnDefinition());
         bottom.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetRow(bottom, 2);
@@ -464,6 +477,7 @@ public sealed partial class SetupWindow
     public void Navigate(int value)
     {
         if (busy && value!=7) return;
+        if (value != 7 && desktopFullscreen) SetDesktopFullscreen(false);
         CloseInlineModal();
         MarkSection(value);
         ApplySectionSurfaceMode(value);

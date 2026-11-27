@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net;
 using System.Net.Http;
 
@@ -455,6 +456,94 @@ public static class ResolverTests
                 singleExpanded.Groups[0].Addresses.SequenceEqual(["1.0.0.1"]) &&
                 singleExpanded.Groups[1].Addresses.SequenceEqual(["1.1.1.1"]),
                 "Single-IP saved hash did not prioritize matching single IP first");
+        });
+
+        await check("p2-probe-cache-reuses-shared-dir-for-uninitialized-and-keeps-workspace-cache", async () => {
+            var probeTestRoot = Path.Combine(Path.GetTempPath(), "claudome-probe-cache-test-" + Guid.NewGuid().ToString("N")[..8]);
+            try
+            {
+                var uninitDir = Path.Combine(probeTestRoot, "p2-uninit-task");
+                var initDir = Path.Combine(probeTestRoot, "p2-init-task");
+                var sharedCache = Path.Combine(probeTestRoot, "p2-shared-probe-cache");
+                Directory.CreateDirectory(uninitDir);
+                Paths.EnsureWorkspace(initDir);
+                var uninitOpts = new SetupOptions { Root = uninitDir };
+                var initOpts = new SetupOptions { Root = initDir };
+
+                var resolvedUninit1 = NodeExitProbe.ResolveProbeArchiveCacheDirectory(uninitOpts, workspaceInitialized: false, sharedCacheOverride: sharedCache);
+                var resolvedUninit2 = NodeExitProbe.ResolveProbeArchiveCacheDirectory(uninitOpts, workspaceInitialized: false, sharedCacheOverride: sharedCache);
+                var resolvedInit = NodeExitProbe.ResolveProbeArchiveCacheDirectory(initOpts, workspaceInitialized: true, sharedCacheOverride: sharedCache);
+                Assert(resolvedUninit1 == sharedCache && resolvedUninit2 == sharedCache &&
+                    !resolvedUninit1.Equals(uninitOpts.Cache, StringComparison.OrdinalIgnoreCase) &&
+                    resolvedInit.Equals(initOpts.Cache, StringComparison.OrdinalIgnoreCase),
+                    "Uninitialized probe cache resolution did not reuse stable shared cache or altered initialized workspace cache");
+
+                // Verify Downloader reuses a verified archive on the 2nd call without HTTP traffic and re-downloads on SHA mismatch.
+                Directory.CreateDirectory(sharedCache);
+                var payloadBytes = System.Text.Encoding.UTF8.GetBytes("verified-mihomo-archive-fixture-v1");
+                var payloadSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payloadBytes)).ToLowerInvariant();
+                var fixture = new Resource("fixture-core", "Fixture Core", "mihomo-fixture-v1.zip", "https://fixture.example/mihomo.zip", payloadSha, payloadBytes.Length, "MIT");
+                var downloads = 0;
+                using var stubClient = new HttpClient(new StubHandler(req => {
+                    downloads++;
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = req, Content = new ByteArrayContent(payloadBytes) });
+                }));
+                using var downloader = new Downloader(stubClient);
+                var firstPath = await downloader.Get(fixture, sharedCache, null, CancellationToken.None);
+                var secondPath = await downloader.Get(fixture, sharedCache, null, CancellationToken.None);
+                Assert(downloads == 1 && firstPath == secondPath && File.Exists(secondPath),
+                    $"Verified archive cache was not reused on 2nd probe (downloads={downloads})");
+
+                // Corrupt cached archive -> must be rejected by strict SHA-256 check (never silently reused).
+                File.WriteAllText(secondPath, "corrupted-content");
+                var rejectedCorrupt = false;
+                try { await downloader.Get(fixture, sharedCache, null, CancellationToken.None); }
+                catch (SetupException ex) when (ex.Message.Contains("校验不匹配")) { rejectedCorrupt = true; }
+                Assert(rejectedCorrupt, "Hash-mismatched cached archive was not rejected");
+
+                // New versioned filename -> downloads fresh archive without reusing v1.
+                var fixtureV2 = fixture with { FileName = "mihomo-fixture-v2.zip" };
+                var v2Path = await downloader.Get(fixtureV2, sharedCache, null, CancellationToken.None);
+                Assert(downloads == 2 && v2Path != firstPath && File.ReadAllBytes(v2Path).SequenceEqual(payloadBytes),
+                    $"Version bump did not download new archive (downloads={downloads})");
+            }
+            finally
+            {
+                try { if (Directory.Exists(probeTestRoot)) Directory.Delete(probeTestRoot, true); } catch { }
+            }
+        });
+
+        await check("p2-live-windows-proxy-evaluation-and-npcap-tun-filter", () => {
+            var target = new Uri("https://api.ip.sb/geoip");
+            var off = NodeEndpointResolver.EvaluateWindowsProxySettings(new(false, "127.0.0.1:7897", "", ""), target);
+            Assert(!off.Enabled && !off.UsesManualProxy && !off.UsesPacScript, "Disabled system proxy should report off");
+
+            var manualOn = NodeEndpointResolver.EvaluateWindowsProxySettings(new(true, "127.0.0.1:7897", "localhost;127.*;<local>", ""), target);
+            Assert(manualOn.Enabled && manualOn.UsesManualProxy && !manualOn.UsesPacScript && manualOn.Label == "HTTP 系统代理",
+                $"Manual HTTP proxy misclassified: {manualOn}");
+
+            var manualBypassed = NodeEndpointResolver.EvaluateWindowsProxySettings(new(true, "127.0.0.1:7897", "*.ip.sb;<local>", ""), target);
+            Assert(!manualBypassed.Enabled && !manualBypassed.UsesManualProxy && manualBypassed.TargetBypassed,
+                $"Bypassed manual proxy should not report enabled for target: {manualBypassed}");
+
+            var pacOnly = NodeEndpointResolver.EvaluateWindowsProxySettings(new(false, "", "", "http://127.0.0.1:7897/pac"), target);
+            Assert(pacOnly.Enabled && !pacOnly.UsesManualProxy && pacOnly.UsesPacScript && pacOnly.Label.Contains("PAC"),
+                $"PAC script misclassified: {pacOnly}");
+
+            var both = NodeEndpointResolver.EvaluateWindowsProxySettings(new(true, "http=127.0.0.1:7897;https=127.0.0.1:7897", "", "http://127.0.0.1:7897/pac"), target);
+            Assert(both.Enabled && both.UsesManualProxy && both.UsesPacScript && both.Label.Contains("HTTP") && both.Label.Contains("PAC"),
+                $"Manual + PAC misclassified: {both}");
+
+            // P2-3: Npcap filter sub-devices must be excluded while real TUN adapters are retained.
+            Assert(NodeEndpointResolver.IsNpcapFilterSubDevice("Meta-Npcap Packet Driver (NPCAP)-0000", "Wintun Userspace Tunnel"),
+                "Meta Npcap filter sub-device was not filtered");
+            Assert(NodeEndpointResolver.IsNpcapFilterSubDevice("Tailscale-Npcap Packet Driver (NPCAP)-0000", "Tailscale Tunnel"),
+                "Tailscale Npcap filter sub-device was not filtered");
+            Assert(!NodeEndpointResolver.IsNpcapFilterSubDevice("Meta", "Mihomo Tunnel"),
+                "Real Meta TUN adapter was erroneously filtered");
+            Assert(!NodeEndpointResolver.IsNpcapFilterSubDevice("Tailscale", "Tailscale Tunnel"),
+                "Real Tailscale TUN adapter was erroneously filtered");
+            return Task.CompletedTask;
         });
     }
 

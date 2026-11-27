@@ -95,5 +95,59 @@ public static class DesktopRecoveryTests
             var secondRecovery = JsonFile.Read<SessionState>(s2.Options.StatePath);
             Assert(secondRecovery.Options.VmName == "Win11Box" && secondRecovery.Completed.Contains("machine"), "second recovery failed after first save");
         }));
+        await check("desktop-16-by-9-frame-computes-centered-max-rect-across-window-sizes", () => Sync(() => {
+            var wide = SetupWindow.ComputeCentered16By9Frame(1920, 900);
+            Assert(wide.Width == 1600 && wide.Height == 900 && wide.X == 160 && wide.Y == 0,
+                $"unexpected wide 16:9 frame: {wide}");
+            var tall = SetupWindow.ComputeCentered16By9Frame(1000, 800);
+            Assert(tall.Width == 1000 && tall.Height == 562 && tall.X == 0 && tall.Y == 119,
+                $"unexpected tall 16:9 frame: {tall}");
+            var exact = SetupWindow.ComputeCentered16By9Frame(1280, 720);
+            Assert(exact.Width == 1280 && exact.Height == 720 && exact.X == 0 && exact.Y == 0,
+                $"unexpected exact 16:9 frame: {exact}");
+            var expandedTop = SetupWindow.ComputeCentered16By9Frame(1400, 620);
+            var collapsedTop = SetupWindow.ComputeCentered16By9Frame(1400, 740);
+            Assert(collapsedTop.Height > expandedTop.Height && collapsedTop.Width > expandedTop.Width &&
+                Math.Abs((collapsedTop.Width / collapsedTop.Height) - (16.0 / 9.0)) < 0.02,
+                $"collapsing top bar did not grow 16:9 frame properly: {expandedTop} -> {collapsedTop}");
+            var invalid = SetupWindow.ComputeCentered16By9Frame(0, 500);
+            Assert(invalid.Width == 0 && invalid.Height == 0, "invalid viewport should produce empty rect");
+        }));
+        await check("hyperv-live-surface-clip-never-blindly-clips-and-fixes-standalone-style", () => Sync(() => {
+            var childBounds = new System.Windows.Rect(0, 0, 1300, 800);
+            var candidates = new NativeConsoleHost.SurfaceCandidate[]
+            {
+                new("WindowsForms10.Window.8.app", new(0, 0, 1300, 800), true, 4242),
+                new("IHWindowClass", new(4, 62, 1280, 720), true, 9999), // wrong PID
+                new("IHWindowClass", new(4, 62, 1280, 720), false, 4242), // hidden
+                new("IHWindowClass", new(4, 68, 1280, 720), true, 4242) // credible live surface (non-hardcoded 68px top)
+            };
+            var selected = NativeConsoleHost.SelectCredibleHyperVGuestSurface(candidates, childBounds, 4242);
+            Assert(selected is { } s && s.Left == 4 && s.Top == 68 && s.Width == 1280 && s.Height == 720,
+                $"failed to select credible guest render surface: {selected}");
+
+            var plan = NativeConsoleHost.ComputeLiveChromeClipPlan(
+                new(1280, 720), new(1300, 818), selected, measuredBottomChromeHeight: 30);
+            Assert(plan is { } p && p.ChildSize.Width == 1288 && p.ChildSize.Height == 818 &&
+                p.ClipRect.Top == 68 && p.OffsetX == -4 && p.OffsetY == -68,
+                $"live chrome clip plan mismatch: {plan}");
+
+            // Missing credible surface must return null (never blindly clip with hardcoded offsets).
+            var noSurface = NativeConsoleHost.SelectCredibleHyperVGuestSurface(
+                [new("WindowsForms10.Window.8.app", new(0, 0, 1300, 800), true, 4242)], childBounds, 4242);
+            Assert(noSurface is null &&
+                NativeConsoleHost.ComputeLiveChromeClipPlan(new(1280, 720), new(1300, 800), noSurface) is null,
+                "missing surface must not produce a blind clip plan");
+
+            // Embedded style strips titlebar/frame/popup and adds WS_CHILD; detached restores WS_OVERLAPPEDWINDOW without WS_CHILD.
+            const long wsOverlappedWindow = 0x00CF0000L;
+            const long wsChild = 0x40000000L;
+            var embedded = NativeConsoleHost.ComputeEmbeddedChildStyle(wsOverlappedWindow);
+            Assert((embedded & wsChild) == wsChild && (embedded & wsOverlappedWindow) == 0,
+                $"embedded style did not strip caption/frame: 0x{embedded:X}");
+            var detached = NativeConsoleHost.ComputeDetachedStandaloneStyle(embedded);
+            Assert((detached & wsChild) == 0 && (detached & wsOverlappedWindow) == wsOverlappedWindow,
+                $"detached style did not restore overlapped window controls: 0x{detached:X}");
+        }));
     }
 }

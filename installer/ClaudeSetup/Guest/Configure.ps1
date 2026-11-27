@@ -4,7 +4,7 @@ $ErrorActionPreference='Stop'
 $progressPreference='SilentlyContinue'
 if([IO.Path]::GetFileName($PayloadPath) -cnotmatch '^payload-([0-9a-f]{32})\.json$'){exit 2}
 $runId=$Matches[1]
-$report=[ordered]@{schema=2;runId=$runId;vmId='';workspaceId='';pendingActions=@();clashConfigured=$false;clashServiceRunning=$false;browserRuntimePassed=$false;browserReopenPassed=$false;translationPassed=$false;browserProfileConfigured=$false;browserWindowOpened=$false;softwareInstalled=$false;regionConfigured=$false;networkConfigured=$false;networkPassed=$false;outagePassed=$false;browserAcceptance='needs-user-action';code='NOT_COMPLETED';step='核对来宾身份';installerExitCode=$null;traceTlsPath='';traceComparison='';bootUtc='';clashRuntimePassed=$false;runtimeCode='';exitCode='';dnsCode='';outageCode='';outageTested=$false;browserExitPassed=$false}
+$report=[ordered]@{schema=2;runId=$runId;vmId='';workspaceId='';pendingActions=@();clashConfigured=$false;clashServiceRunning=$false;browserRuntimePassed=$false;browserReopenPassed=$false;translationPassed=$false;browserProfileConfigured=$false;browserWindowOpened=$false;softwareInstalled=$false;regionConfigured=$false;networkConfigured=$false;networkPassed=$false;outagePassed=$false;browserAcceptance='needs-user-action';code='NOT_COMPLETED';step='核对来宾身份';installerExitCode=$null;traceTlsPath='';traceComparison='';bootUtc='';clashRuntimePassed=$false;runtimeCode='';runtimeMismatchDetail='';exitCode='';dnsCode='';outageCode='';outageTested=$false;browserExitPassed=$false}
 $root='C:\ProgramData\ClaudeEnvironment'
 $reportPath=Join-Path (Split-Path $PayloadPath) ('guest-result-'+$runId+'.json')
 $useChildReport=$false
@@ -129,6 +129,8 @@ try {
         if($payload.resumeNetwork){
             try{Assert-ClashRuntime;$report.clashConfigured=$true;$report.clashServiceRunning=$true;$report.networkConfigured=$true;$report.regionConfigured=$true}
             catch {
+                $mismatch=[string]$script:LastRuntimeMismatchDetail
+                if($mismatch){$report.runtimeMismatchDetail=$mismatch}
                 $detail = switch ($_.Exception.Message) {
                     'CLASH_SERVICE_NOT_RUNNING' { 'Clash 后台服务尚未运行。' }
                     'PERSISTED_PROFILE_CHANGED' { '已保存的专用配置与本任务记录不一致。' }
@@ -139,7 +141,8 @@ try {
                     'CLASH_CONTROLLER_UNAVAILABLE' { 'Clash 本地控制接口暂时不可用。' }
                     default { '来宾未能完整核对已保存的网络配置。' }
                 }
-                Add-Pending '已保存网络配置需要处理' @($detail,'处理后可重试检查。也可选择重新配置本任务网络，再核对生效配置与出口。') 'resume-network'
+                if($mismatch){$detail=$detail+"（差异明细：$mismatch）"}
+                Add-Pending '已保存网络配置需要处理' @($detail,'处理后可重试检查；也可直接点击「重新配置本任务网络」按当前任务线路重写来宾 Clash 配置并重新核验。') 'resume-network'
                 throw 'RESUME_NETWORK_REVIEW_REQUIRED'
             }
         }else{Configure-Clash}
@@ -205,6 +208,7 @@ try {
     $report.code='NEEDS_BROWSER_ACCEPTANCE'
 } catch {
     $report.networkPassed=$false;$report.outagePassed=$false
+    if(-not $report.runtimeMismatchDetail -and $script:LastRuntimeMismatchDetail){$report.runtimeMismatchDetail=[string]$script:LastRuntimeMismatchDetail}
     if($_.Exception.Message -match '^FIREWALL_'){$report.runtimeCode='MISMATCH'}
     if($_.Exception.Message -match '^EXIT_(COUNTRY|IP)_MISMATCH$'){$report.exitCode=$Matches[1]+'_MISMATCH'}
     $known=@('RESUME_NETWORK_REVIEW_REQUIRED','CLASH_CONFIG_REVIEW_REQUIRED','CLASH_CORE_NOT_READY','CLASH_VERSION_REVIEW_REQUIRED','CLASH_SERVICE_INSTALL_REQUIRED','CLASH_TUN_REQUIRED','APPLICATION_INSTALL_WAITING','APPLICATION_INSTALL_FAILED','APPLICATION_READBACK_FAILED','TARGET_VM_IDENTITY_MISMATCH','GUEST_RESOURCE_HASH_MISMATCH','GUEST_RESOURCE_MISSING','REGION_NOT_SUPPORTED','REGION_READBACK_FAILED','CORE_CONFIG_INVALID','FIREWALL_EXPORT_FAILED','FIREWALL_NOT_ENFORCED','UNREVIEWED_OUTBOUND_ALLOW','NO_VERIFIED_ENDPOINT','PHYSICAL_INTERFACE_AMBIGUOUS','DHCP_SERVER_UNKNOWN','CORE_NOT_LISTENING','PROXY_PORT_COLLISION','TRACE_INCOMPLETE','EXIT_COUNTRY_MISMATCH','EXIT_IP_MISMATCH','OUTAGE_PROTECTION_FAILED','RESTORE_EXIT_MISMATCH','ADSPOWER_INSTALL_WAITING','ADSPOWER_INSTALL_FAILED','ADSPOWER_READBACK_FAILED')

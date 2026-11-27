@@ -572,25 +572,40 @@ function Set-HyperVGuestRedirectionPolicy([bool]$AllowClipboard) {
 }
 function Select-PreferredHyperVDisplayMode($Modes, [int]$ViewportWidth, [int]$ViewportHeight) {
     $valid = @($Modes | Where-Object { $_.width -ge 1024 -and $_.height -ge 720 } | Sort-Object @{Expression={$_.width * $_.height};Descending=$true} -Unique)
-    if (-not $valid.Count -or $ViewportWidth -le 0 -or $ViewportHeight -le 0) { return $null }
+    if (-not $valid.Count) { return $null }
+    $fhd = $valid | Where-Object { $_.width -eq 1920 -and $_.height -eq 1080 } | Select-Object -First 1
+    if ($ViewportWidth -le 0 -or $ViewportHeight -le 0) {
+        if ($fhd) { return [pscustomobject]@{ width = 1920; height = 1080; zoom = 1.0; fillRatio = 1.0 } }
+        $widescreen = $valid | Where-Object { [Math]::Abs(($_.width / [double]$_.height) - (16.0 / 9.0)) -le 0.03 } | Select-Object -First 1
+        if ($widescreen) { return [pscustomobject]@{ width = [int]$widescreen.width; height = [int]$widescreen.height; zoom = 1.0; fillRatio = 1.0 } }
+        return $null
+    }
     $zoomFactors = @(1.0, 0.75, 0.5)
     $best = $null
     $bestScore = -1.0
+    $viewportAspect = $ViewportWidth / [double]$ViewportHeight
     foreach ($mode in $valid) {
+        $modeAspect = $mode.width / [double]$mode.height
+        $is16By9 = [Math]::Abs($modeAspect - (16.0 / 9.0)) -le 0.03
         foreach ($zoom in $zoomFactors) {
             $scaledW = [double]$mode.width * $zoom
             $scaledH = [double]$mode.height * $zoom
-            if ($scaledW -le [double]$ViewportWidth -and $scaledH -le [double]$ViewportHeight) {
-                $fillRatio = ($scaledW * $scaledH) / ([double]$ViewportWidth * [double]$ViewportHeight)
-                $widescreenBonus = if ($mode.width / [double]$mode.height -ge 1.55) { 0.15 } else { 0.0 }
-                $zoomPreference = $zoom * 0.05
-                $score = $fillRatio + $widescreenBonus + $zoomPreference
+            if ($scaledW -le ([double]$ViewportWidth + 2.0) -and $scaledH -le ([double]$ViewportHeight + 2.0)) {
+                $fillRatio = [Math]::Min(1.0, ($scaledW * $scaledH) / ([double]$ViewportWidth * [double]$ViewportHeight))
+                $aspectPenalty = [Math]::Min(0.35, [Math]::Abs($modeAspect - $viewportAspect) * 0.45)
+                $widescreenBonus = if ($is16By9) { 0.25 } elseif ($modeAspect -ge 1.55) { 0.12 } else { 0.0 }
+                $fhdBonus = if ($mode.width -eq 1920 -and $mode.height -eq 1080) { 0.12 } else { 0.0 }
+                $zoomPreference = $zoom * 0.04
+                $score = $fillRatio + $widescreenBonus + $fhdBonus + $zoomPreference - $aspectPenalty
                 if ($score -gt $bestScore) {
                     $bestScore = $score
                     $best = [pscustomobject]@{ width = [int]$mode.width; height = [int]$mode.height; zoom = $zoom; fillRatio = [Math]::Round($fillRatio, 3) }
                 }
             }
         }
+    }
+    if (-not $best -and $fhd) {
+        return [pscustomobject]@{ width = 1920; height = 1080; zoom = 0.5; fillRatio = 0.0 }
     }
     return $best
 }

@@ -380,6 +380,16 @@ public static class NodeExitProbe
         return probe is { } hit ? $"{hit.ElapsedMs} ms（{hit.InterfaceLabel}）" : "未能验证";
     }
 
+    internal static string ResolveProbeArchiveCacheDirectory(SetupOptions options, bool workspaceInitialized, string? sharedCacheOverride = null)
+    {
+        if (workspaceInitialized) return options.Cache;
+        if (!string.IsNullOrWhiteSpace(sharedCacheOverride)) return sharedCacheOverride;
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ClaudeEnvironmentSetup",
+            "probe-cache");
+    }
+
     private static async Task<T> ProbeThroughCore<T>(
         SetupOptions options,
         ProxyNode selectedNode,
@@ -397,10 +407,12 @@ public static class NodeExitProbe
         var probeOptions = workspaceInitialized
             ? options
             : new SetupOptions { Root = tempProbeRoot! };
+        var archiveCacheDir = ResolveProbeArchiveCacheDirectory(options, workspaceInitialized);
 
         try
         {
             if (tempProbeRoot is not null) Paths.EnsureWorkspace(tempProbeRoot);
+            Directory.CreateDirectory(archiveCacheDir);
             Directory.CreateDirectory(probeOptions.Cache);
             HostPlatform.Environment.RestrictPrivateDirectory(probeOptions.Private);
 
@@ -446,7 +458,7 @@ public static class NodeExitProbe
                     selectedNode.Server.Equals(upstreamNode.Server, StringComparison.OrdinalIgnoreCase);
                 var exitAddresses = sameServer ? report.Addresses : (secondHopAddresses ?? report.Addresses);
                 var coreConfig = NetworkImport.CoreConfig(selectedNode, report.Addresses, null, upstreamNode, exitAddresses);
-                await using var runtime = await BootstrapCore.Start(probeOptions, coreConfig, token, progress);
+                await using var runtime = await BootstrapCore.Start(probeOptions, coreConfig, token, progress, archiveCacheDir);
                 using var handler = new SocketsHttpHandler
                 {
                     Proxy = new WebProxy($"socks5://127.0.0.1:{runtime.Binding.port}", false, [], new NetworkCredential(runtime.Binding.username, runtime.Binding.password)),

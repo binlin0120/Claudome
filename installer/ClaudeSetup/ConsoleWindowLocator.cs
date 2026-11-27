@@ -156,11 +156,25 @@ public static class ConsoleWindowLocator
         return true;
     }
 
+    [DllImport("user32.dll")]private static extern bool ShowWindow(IntPtr handle, int command);
+    [DllImport("user32.dll", SetLastError = true)]private static extern bool SetWindowPos(IntPtr handle, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")]private static extern bool BringWindowToTop(IntPtr handle);
+
     internal static void RestoreVisible(ConsoleWindow window, bool foreground = false)
     {
         if (!IsAlive(window)) return;
         NativeConsoleHost.EnableWindow(window.Handle, true);
-        if (!IsWindowVisible(window.Handle) || IsIconic(window.Handle)) ShowWindowAsync(window.Handle, 9);
-        if (foreground) SetForegroundWindow(window.Handle);
+        if (!IsWindowVisible(window.Handle) || IsIconic(window.Handle))
+            ShowWindow(window.Handle, 9); // SW_RESTORE
+        else
+            ShowWindow(window.Handle, 5); // SW_SHOW
+        // Ensure non-client frame and Z-order are refreshed so standalone caption/fullscreen bar remain clickable.
+        SetWindowPos(window.Handle, IntPtr.Zero, 0, 0, 0, 0,
+            0x0001 | 0x0002 | 0x0020 | 0x0040 | (foreground ? 0u : 0x0010u));
+        if (foreground)
+        {
+            BringWindowToTop(window.Handle);
+            SetForegroundWindow(window.Handle);
+        }
     }
 }

@@ -128,13 +128,39 @@ function Test-OwnedVmMarker([string]$MarkerPath,[string]$WorkspaceId,[string]$Vm
         return ($marker.schema -eq 1 -and [string]$marker.workspaceId -eq $WorkspaceId -and [string]$marker.vmName -eq $VmName)
     } catch { return $false }
 }
-function Save-OwnedVmMarker([string]$MarkerPath,[string]$WorkspaceId,[string]$VmName,[string]$VmId='') {
+function Save-OwnedVmMarker([string]$MarkerPath,[string]$WorkspaceId,[string]$VmName,[string]$VmId='',[hashtable]$VideoState=$null) {
     $parent=[IO.Path]::GetDirectoryName($MarkerPath)
     $null=Assert-LocalPath $MarkerPath $parent
     $tmp=$MarkerPath+'.new'
-    $json=@{schema=1;workspaceId=$WorkspaceId;vmName=$VmName;vmId=$VmId} | ConvertTo-Json -Compress
+    $doc=[ordered]@{schema=1;workspaceId=$WorkspaceId;vmName=$VmName;vmId=$VmId}
+    if($VideoState){
+        $doc['defaultVideo']=$VideoState
+    }
+    $json=$doc | ConvertTo-Json -Compress -Depth 4
     [IO.File]::WriteAllText($tmp,$json,[Text.UTF8Encoding]::new($false))
     [IO.File]::Move($tmp,$MarkerPath,$true)
+}
+function Set-NewTaskVmDefaultVideo($Vm,[int]$Width=1920,[int]$Height=1080) {
+    $result=[ordered]@{requested="${Width}x${Height}";applied='';resolutionType='';verified=$false}
+    if(-not $Vm -or -not (Get-Command Set-VMVideo -ErrorAction SilentlyContinue)){return $result}
+    foreach($mode in @('Single','Maximum')) {
+        try {
+            Set-VMVideo -VM $Vm -HorizontalResolution $Width -VerticalResolution $Height -ResolutionType $mode -ErrorAction Stop
+            $video=Get-VMVideo -VM $Vm -ErrorAction Stop
+            $actualW=[int]$video.HorizontalResolution
+            $actualH=[int]$video.VerticalResolution
+            $actualType=[string]$video.ResolutionType
+            $result['applied']="${actualW}x${actualH}"
+            $result['resolutionType']=$actualType
+            if($actualW -eq $Width -and $actualH -eq $Height){
+                $result['verified']=$true
+                return $result
+            }
+        } catch {
+            continue
+        }
+    }
+    return $result
 }
 function Resolve-OrCreateTaskVm($Data) {
     if($Data.vmId){return [string](Target-VM $Data).Id}
@@ -163,7 +189,9 @@ function Resolve-OrCreateTaskVm($Data) {
     Save-OwnedVmMarker $marker ([string]$o.WorkspaceId) ([string]$o.VmName) ''
     $vm=New-VM -Name $o.VmName -Path $path -Generation 2 -MemoryStartupBytes ([long]$o.MemoryMb*1MB) -NoVHD
     Get-VMNetworkAdapter -VM $vm | Remove-VMNetworkAdapter
-    Save-OwnedVmMarker $marker ([string]$o.WorkspaceId) ([string]$o.VmName) ([string]$vm.Id)
+    # Apply 16:9 1920x1080 default video mode ONLY for newly created VMs before first boot.
+    $videoState=Set-NewTaskVmDefaultVideo $vm 1920 1080
+    Save-OwnedVmMarker $marker ([string]$o.WorkspaceId) ([string]$o.VmName) ([string]$vm.Id) $videoState
     return [string]$vm.Id
 }
 function Test-VMKeyProtectorPresent($Vm) {

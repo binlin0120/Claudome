@@ -34,12 +34,14 @@ public sealed partial class SetupWindow
         if (action.Id == "resume-network")
         {
             instructions.Add(Row(Action("重试检查原网络", async (_, _) => await StartInstall(checkSavedNetwork: true), true),
-                Action("重新配置本任务网络", async (_, _) =>
-                {
-                    if (MessageBox.Show(this, "将按当前任务已保存的线路重新配置来宾网络，然后重新核对生效设置和出口。是否继续？",
-                        "重新配置本任务网络", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
-                        await StartInstall(reconfigureGuestNetwork: true);
-                })));
+                Action("重新配置本任务网络", async (_, _) => await ReconfigureGuestNetworkWithConfirmation())));
+            return Card(instructions.ToArray());
+        }
+        if (action.Id == "runtime-validation")
+        {
+            instructions.Add(Row(
+                Action("处理后检查现有配置", async (_, _) => await RunValidation(false, false), true),
+                Action("重新配置本任务网络", async (_, _) => await ReconfigureGuestNetworkWithConfirmation())));
             return Card(instructions.ToArray());
         }
         if(state.RestartBootBefore.Length>0 || new[]{"runtime-validation","browser-runtime","browser-reopen","outage-validation"}.Contains(action.Id)) {

@@ -81,16 +81,153 @@ public static class NodeEndpointResolver
         _ => "HTTP_REQUEST_FAILED"
     };
 
-    public static HostNetworkContext InspectHostNetworkContext()
+    internal readonly record struct WindowsProxySettings(bool ProxyEnable, string ProxyServer, string ProxyOverride, string AutoConfigUrl);
+    internal readonly record struct SystemProxyInspection(bool Enabled, bool UsesManualProxy, bool UsesPacScript, bool TargetBypassed, string Label);
+
+    internal static bool IsNpcapFilterSubDevice(string? name, string? description)
     {
-        var proxyEnabled = false;
+        var n = name ?? "";
+        var d = description ?? "";
+        return n.Contains("Npcap Packet Driver", StringComparison.OrdinalIgnoreCase) ||
+            n.Contains("(NPCAP)", StringComparison.OrdinalIgnoreCase) ||
+            d.Contains("Npcap Packet Driver", StringComparison.OrdinalIgnoreCase) ||
+            d.Contains("(NPCAP)", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool MatchesProxyBypassRule(string host, string proxyOverride)
+    {
+        if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(proxyOverride)) return false;
+        var entries = proxyOverride.Split([';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var raw in entries)
+        {
+            if (raw.Equals("<local>", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!host.Contains('.') || host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+                    return true;
+                continue;
+            }
+            var pattern = "^" + System.Text.RegularExpressions.Regex.Escape(raw).Replace("\\*", ".*") + "$";
+            if (System.Text.RegularExpressions.Regex.IsMatch(host, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    internal static bool HasManualProxyForScheme(string proxyServer, string scheme)
+    {
+        if (string.IsNullOrWhiteSpace(proxyServer)) return false;
+        var trimmed = proxyServer.Trim();
+        if (!trimmed.Contains('=')) return true;
+        var parts = trimmed.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var part in parts)
+        {
+            var idx = part.IndexOf('=');
+            if (idx <= 0 || idx >= part.Length - 1) continue;
+            var key = part[..idx].Trim();
+            var value = part[(idx + 1)..].Trim();
+            if (string.IsNullOrWhiteSpace(value)) continue;
+            if (key.Equals(scheme, StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("http", StringComparison.OrdinalIgnoreCase) && scheme.Equals("https", StringComparison.OrdinalIgnoreCase) &&
+                    !parts.Any(p => p.StartsWith("https=", StringComparison.OrdinalIgnoreCase)))
+                return true;
+        }
+        return false;
+    }
+
+    internal static SystemProxyInspection EvaluateWindowsProxySettings(WindowsProxySettings settings, Uri targetUri)
+    {
+        var pac = !string.IsNullOrWhiteSpace(settings.AutoConfigUrl) &&
+            (settings.AutoConfigUrl.Trim().StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+             settings.AutoConfigUrl.Trim().StartsWith("https://", StringComparison.OrdinalIgnoreCase));
+        var manualConfigured = settings.ProxyEnable && HasManualProxyForScheme(settings.ProxyServer, targetUri.Scheme);
+        var bypassed = manualConfigured && MatchesProxyBypassRule(targetUri.Host, settings.ProxyOverride);
+        var manualActive = manualConfigured && !bypassed;
+        var enabled = manualActive || pac;
+        var label = (manualActive, pac) switch
+        {
+            (true, true) => "HTTP 系统代理与 PAC 脚本",
+            (true, false) => "HTTP 系统代理",
+            (false, true) => "PAC 自动代理脚本",
+            _ => ""
+        };
+        return new(enabled, manualActive, pac, bypassed, label);
+    }
+
+    private const uint KeyRead = 0x20019;
+    private const uint RegSz = 1;
+    private const uint RegExpandSz = 2;
+    private const uint RegDword = 4;
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int RegOpenKeyExW(IntPtr hKey, string subKey, uint options, uint samDesired, out IntPtr result);
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int RegQueryValueExW(IntPtr hKey, string valueName, IntPtr reserved, out uint type, byte[]? data, ref uint size);
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll")]
+    private static extern int RegCloseKey(IntPtr hKey);
+
+    private static int? ReadRegDword(IntPtr hKey, string name)
+    {
+        uint size = 4;
+        var buf = new byte[4];
+        if (RegQueryValueExW(hKey, name, IntPtr.Zero, out var type, buf, ref size) == 0 && type == RegDword && size == 4)
+            return BitConverter.ToInt32(buf, 0);
+        return null;
+    }
+
+    private static string ReadRegString(IntPtr hKey, string name)
+    {
+        uint size = 0;
+        if (RegQueryValueExW(hKey, name, IntPtr.Zero, out var type, null, ref size) != 0 || size == 0 || (type != RegSz && type != RegExpandSz))
+            return "";
+        var buf = new byte[size];
+        if (RegQueryValueExW(hKey, name, IntPtr.Zero, out type, buf, ref size) != 0 || (type != RegSz && type != RegExpandSz))
+            return "";
+        return System.Text.Encoding.Unicode.GetString(buf, 0, (int)size).TrimEnd('\0');
+    }
+
+    private static SystemProxyInspection InspectLiveSystemProxy(Uri probeUri)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var hkcu = new IntPtr(unchecked((int)0x80000001));
+            var hKey = IntPtr.Zero;
+            try
+            {
+                if (RegOpenKeyExW(hkcu, @"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, KeyRead, out hKey) == 0 && hKey != IntPtr.Zero)
+                {
+                    var proxyEnable = (ReadRegDword(hKey, "ProxyEnable") ?? 0) != 0;
+                    var proxyServer = ReadRegString(hKey, "ProxyServer");
+                    var proxyOverride = ReadRegString(hKey, "ProxyOverride");
+                    var autoConfigUrl = ReadRegString(hKey, "AutoConfigURL");
+                    return EvaluateWindowsProxySettings(new(proxyEnable, proxyServer, proxyOverride, autoConfigUrl), probeUri);
+                }
+            }
+            catch { }
+            finally
+            {
+                if (hKey != IntPtr.Zero) RegCloseKey(hKey);
+            }
+        }
         try
         {
-            var probeUri = new Uri("https://api.ip.sb/geoip");
             var proxyUri = HttpClient.DefaultProxy?.GetProxy(probeUri);
-            proxyEnabled = proxyUri is not null && !string.Equals(proxyUri.AbsoluteUri, probeUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+            var active = proxyUri is not null && !string.Equals(proxyUri.AbsoluteUri, probeUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+            return new(active, active, false, false, active ? "HTTP 系统代理" : "");
         }
-        catch { }
+        catch
+        {
+            return new(false, false, false, false, "");
+        }
+    }
+
+    public static HostNetworkContext InspectHostNetworkContext()
+    {
+        var probeUri = new Uri("https://api.ip.sb/geoip");
+        var proxyInfo = InspectLiveSystemProxy(probeUri);
+        var proxyEnabled = proxyInfo.Enabled;
+        var proxyLabel = string.IsNullOrEmpty(proxyInfo.Label) ? "HTTP 系统代理" : proxyInfo.Label;
 
         var tunnels = new List<string>();
         try
@@ -98,6 +235,7 @@ public static class NodeEndpointResolver
             foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
             {
                 if (nic.OperationalStatus != OperationalStatus.Up || nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                if (IsNpcapFilterSubDevice(nic.Name, nic.Description)) continue;
                 if (NodeExitProbe.IsVirtualTunnelAdapter(nic.Name, nic.Description, nic.NetworkInterfaceType) &&
                     !nic.Name.StartsWith("vEthernet", StringComparison.OrdinalIgnoreCase) &&
                     !nic.Description.Contains("Hyper-V", StringComparison.OrdinalIgnoreCase))
@@ -112,10 +250,10 @@ public static class NodeEndpointResolver
         var hasTunnel = distinctTunnels.Length > 0;
         var summary = (hasTunnel, proxyEnabled) switch
         {
-            (true, true) => $"检测到宿主 TUN（{string.Join("、", distinctTunnels)}）与 HTTP 系统代理；独立 DoH 已绕过 HTTP 代理，网关 TCP 仍随当前宿主路由",
+            (true, true) => $"检测到宿主 TUN（{string.Join("、", distinctTunnels)}）与 {proxyLabel}；独立 DoH 已绕过 HTTP 代理，网关 TCP 仍随当前宿主路由",
             (true, false) => $"检测到宿主 TUN（{string.Join("、", distinctTunnels)}）；网关出站随当前宿主路由（未自动关闭）",
-            (false, true) => "检测到宿主 HTTP 系统代理；独立 DoH 已显式绕过，网关 TCP 直连宿主默认路由",
-            _ => "未检测到宿主 TUN 或 HTTP 系统代理"
+            (false, true) => $"检测到宿主 {proxyLabel}；独立 DoH 已显式绕过，网关 TCP 直连宿主默认路由",
+            _ => "未检测到宿主 TUN 或系统代理"
         };
         return new(proxyEnabled, hasTunnel, distinctTunnels, summary);
     }

@@ -20,6 +20,7 @@ public sealed class NativeConsoleHost : HwndHost
     private IntPtr pointerHook;
     private PointerHook? pointerCallback;
     private ConsolePixelSize? fittedSize;
+    private bool allowOversizeForClip;
     private IntPtr darkBrush;
     private IntPtr originalClipRegion;
     private Rect? desktopClip;
@@ -39,6 +40,8 @@ public sealed class NativeConsoleHost : HwndHost
     [DllImport("user32.dll")]private static extern IntPtr GetFocus();
     [DllImport("user32.dll")]private static extern IntPtr SetFocus(IntPtr handle);
     [DllImport("user32.dll")]private static extern IntPtr GetAncestor(IntPtr handle, uint flags);
+    [DllImport("user32.dll")]private static extern bool SetForegroundWindow(IntPtr handle);
+    [DllImport("user32.dll")]private static extern bool BringWindowToTop(IntPtr handle);
 
     internal bool OwnsKeyboardFocus(IntPtr handle) =>
         IsAttached && handle != IntPtr.Zero && (handle == child || IsChild(child, handle));
@@ -219,6 +222,19 @@ public sealed class NativeConsoleHost : HwndHost
         if(container==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
         return new(this,container);
     }
+    private const long EmbeddedStyleStripMask = 0x80000000L | 0x00C00000L | 0x00040000L | 0x00080000L | 0x00020000L | 0x00010000L;
+    private const long EmbeddedExStyleStripMask = 0x00040000L | 0x00000004L | 0x00000100L | 0x00000200L | 0x00000001L;
+    private const long StandaloneOverlappedMask = 0x00C00000L | 0x00080000L | 0x00040000L | 0x00020000L | 0x00010000L;
+
+    internal static long ComputeEmbeddedChildStyle(long currentStyle) =>
+        (currentStyle & ~EmbeddedStyleStripMask) | 0x40000000L;
+
+    internal static long ComputeEmbeddedChildExtendedStyle(long currentExStyle) =>
+        currentExStyle & ~EmbeddedExStyleStripMask;
+
+    internal static long ComputeDetachedStandaloneStyle(long savedStyle) =>
+        ((savedStyle & ~0x40000000L & ~0x10000000L) | StandaloneOverlappedMask);
+
     public void Attach(IntPtr handle)
     {
         if(container==IntPtr.Zero||handle==IntPtr.Zero||!IsWindow(handle))throw new SetupException("虚拟机桌面窗口尚未就绪，请重新连接。");
@@ -232,8 +248,8 @@ public sealed class NativeConsoleHost : HwndHost
             DeleteObject(originalClipRegion);
             originalClipRegion = IntPtr.Zero;
         }
-        SetLong(child,StyleIndex,new IntPtr((originalStyle&~(0x80000000L|0x00c00000L|0x00040000L|0x00080000L))|0x40000000L));
-        SetLong(child,ExtendedStyleIndex,new IntPtr(originalExtendedStyle&~(0x00040000L|0x00000004L)));
+        SetLong(child,StyleIndex,new IntPtr(ComputeEmbeddedChildStyle(originalStyle)));
+        SetLong(child,ExtendedStyleIndex,new IntPtr(ComputeEmbeddedChildExtendedStyle(originalExtendedStyle)));
         EnableWindow(child,true);
         SetParent(child,container);
         if(GetParent(child)!=container){Detach();throw new SetupException("原控制台无法嵌入当前窗口，可能存在权限或 DPI 差异。虚拟机仍保留运行，可恢复独立窗口查看。");}
@@ -382,6 +398,148 @@ public sealed class NativeConsoleHost : HwndHost
 
     internal readonly record struct DisplayFillResult(DisplayFillState State, string Detail);
 
+    internal readonly record struct SurfaceCandidate(string ClassName, Rect RelativeBounds, bool IsVisible, uint ProcessId);
+    internal readonly record struct ChromeClipPlan(ConsolePixelSize ChildSize, Rect ClipRect, int OffsetX, int OffsetY);
+
+    internal static Rect? SelectCredibleHyperVGuestSurface(IEnumerable<SurfaceCandidate> candidates, Rect childBounds, uint expectedProcessId)
+    {
+        if (childBounds.Width < 160 || childBounds.Height < 120) return null;
+        Rect? best = null;
+        foreach (var c in candidates)
+        {
+            if (!c.IsVisible || c.ProcessId != expectedProcessId) continue;
+            var isSurfaceClass = c.ClassName.Equals("IHWindowClass", StringComparison.OrdinalIgnoreCase) ||
+                c.ClassName.Equals("OPWindowClass", StringComparison.OrdinalIgnoreCase) ||
+                c.ClassName.Equals("UIMainClass", StringComparison.OrdinalIgnoreCase);
+            if (!isSurfaceClass) continue;
+            var r = c.RelativeBounds;
+            if (r.Width < 160 || r.Height < 120) continue;
+            if (r.Left < -2 || r.Top < -2 || r.Right > childBounds.Width + 2 || r.Bottom > childBounds.Height + 2) continue;
+            if (best is null || r.Width * r.Height > best.Value.Width * best.Value.Height)
+                best = r;
+        }
+        return best;
+    }
+
+    internal static ChromeClipPlan? ComputeLiveChromeClipPlan(
+        ConsolePixelSize viewport,
+        ConsolePixelSize currentChildSize,
+        Rect? measuredSurfaceInChild,
+        int measuredBottomChromeHeight = 0)
+    {
+        if (measuredSurfaceInChild is not { } surface ||
+            viewport.Width < 1 || viewport.Height < 1 ||
+            currentChildSize.Width < 1 || currentChildSize.Height < 1 ||
+            surface.Width < 160 || surface.Height < 120)
+            return null;
+
+        var chromeLeft = Math.Clamp((int)Math.Round(surface.Left), 0, 80);
+        var chromeTop = Math.Clamp((int)Math.Round(surface.Top), 0, 180);
+        var chromeRight = chromeLeft;
+        var chromeBottom = Math.Clamp(measuredBottomChromeHeight, 0, 80);
+        var targetW = Math.Max(viewport.Width, viewport.Width + chromeLeft + chromeRight);
+        var targetH = Math.Max(viewport.Height, viewport.Height + chromeTop + chromeBottom);
+        var clipRect = new Rect(
+            Math.Max(0, Math.Round(surface.Left)),
+            Math.Max(0, Math.Round(surface.Top)),
+            Math.Max(1, Math.Round(surface.Width)),
+            Math.Max(1, Math.Round(surface.Height)));
+        var offsetX = (viewport.Width - (int)clipRect.Width) / 2 - (int)clipRect.X;
+        var offsetY = (viewport.Height - (int)clipRect.Height) / 2 - (int)clipRect.Y;
+        return new(new(targetW, targetH), clipRect, offsetX, offsetY);
+    }
+
+    private (Rect? Surface, int BottomBarHeight, ConsolePixelSize ChildSize) MeasureHyperVSurfaceInChild()
+    {
+        if (!IsAttached || !GetWindowRect(child, out var childRect))
+            return (null, 0, default);
+        var childW = Math.Max(0, childRect.Right - childRect.Left);
+        var childH = Math.Max(0, childRect.Bottom - childRect.Top);
+        if (childW < 160 || childH < 120) return (null, 0, new(childW, childH));
+
+        var candidates = new List<SurfaceCandidate>();
+        var bottomBarHeight = 0;
+        var sb = new System.Text.StringBuilder(64);
+        EnumChildWindows(child, (window, _) =>
+        {
+            if (!IsWindowVisible(window) || GetWindowThreadProcessId(window, out var pid) == 0 || pid != childProcess) return true;
+            if (!GetWindowRect(window, out var r)) return true;
+            var rel = new Rect(r.Left - childRect.Left, r.Top - childRect.Top, r.Right - r.Left, r.Bottom - r.Top);
+            sb.Clear();
+            var cls = GetClassName(window, sb, sb.Capacity) > 0 ? sb.ToString() : "";
+            candidates.Add(new(cls, rel, true, pid));
+            // Live-measure bottom status strip (never hardcoded).
+            if (rel.Height is >= 14 and <= 64 && rel.Width >= childW * 0.65 && rel.Bottom >= childH - 4 &&
+                !cls.Equals("IHWindowClass", StringComparison.OrdinalIgnoreCase) &&
+                !cls.Equals("OPWindowClass", StringComparison.OrdinalIgnoreCase) &&
+                !cls.Equals("UIMainClass", StringComparison.OrdinalIgnoreCase))
+            {
+                bottomBarHeight = Math.Max(bottomBarHeight, (int)Math.Round(rel.Height));
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        var surface = SelectCredibleHyperVGuestSurface(candidates, new Rect(0, 0, childW, childH), childProcess);
+        return (surface, bottomBarHeight, new(childW, childH));
+    }
+
+    internal bool HasLiveGuestClip => desktopClip is not null;
+
+    internal void ClearHyperVChromeClip()
+    {
+        allowOversizeForClip = false;
+        fittedSize = null;
+        RestoreChildClip();
+        Fit(forceRedraw: true);
+    }
+
+    internal bool ClipToLiveHyperVSurface()
+    {
+        if (!IsAttached) return false;
+        var viewport = ViewportPixels;
+        if (viewport.Width < 1 || viewport.Height < 1) return false;
+
+        var (surface, bottomBarH, childSize) = MeasureHyperVSurfaceInChild();
+        var plan = ComputeLiveChromeClipPlan(viewport, childSize, surface, bottomBarH);
+        if (plan is null)
+        {
+            ClearHyperVChromeClip();
+            return false;
+        }
+
+        // First expand child by live-measured chrome insets so VMConnect's inner canvas matches the 16:9 viewport.
+        if (!allowOversizeForClip || fittedSize != plan.Value.ChildSize)
+        {
+            allowOversizeForClip = true;
+            fittedSize = plan.Value.ChildSize;
+            RestoreChildClip();
+            Fit(forceRedraw: false);
+            (surface, bottomBarH, childSize) = MeasureHyperVSurfaceInChild();
+            plan = ComputeLiveChromeClipPlan(viewport, childSize, surface, bottomBarH);
+            if (plan is null)
+            {
+                ClearHyperVChromeClip();
+                return false;
+            }
+        }
+
+        var fit = plan.Value.ClipRect;
+        if (desktopClip != fit)
+        {
+            var region = CreateRectRgn((int)fit.Left, (int)fit.Top, (int)fit.Right, (int)fit.Bottom);
+            if (region == IntPtr.Zero) return false;
+            if (SetWindowRgn(child, region, true) != 0)
+                desktopClip = fit;
+            else
+            {
+                DeleteObject(region);
+                return false;
+            }
+        }
+        Fit(forceRedraw: true);
+        return true;
+    }
+
     internal Rect? MeasureActualGuestSurfaceRelativeToContainer()
     {
         if (!IsAttached || container == IntPtr.Zero || !GetWindowRect(container, out var hostRect))
@@ -518,15 +676,29 @@ public sealed class NativeConsoleHost : HwndHost
         if (!IsAttached) return;
         var viewport = ViewportPixels;
         if (viewport.Width < 1 || viewport.Height < 1) return;
-        var width = Math.Min(viewport.Width, fittedSize?.Width ?? viewport.Width);
-        var height = Math.Min(viewport.Height, fittedSize?.Height ?? viewport.Height);
+        var width = allowOversizeForClip && fittedSize is { } overW
+            ? Math.Max(viewport.Width, overW.Width)
+            : Math.Min(viewport.Width, fittedSize?.Width ?? viewport.Width);
+        var height = allowOversizeForClip && fittedSize is { } overH
+            ? Math.Max(viewport.Height, overH.Height)
+            : Math.Min(viewport.Height, fittedSize?.Height ?? viewport.Height);
         var position = EmbeddedBounds;
         if (position.Width != width || position.Height != height) RestoreChildClip();
         var x = desktopClip is { } frame ? (viewport.Width - (int)frame.Width) / 2 - (int)frame.X : (viewport.Width - width) / 2;
         var y = desktopClip is { } visible ? (viewport.Height - (int)visible.Height) / 2 - (int)visible.Y : (viewport.Height - height) / 2;
 
-        SetLong(child, StyleIndex, new IntPtr((GetLong(child, StyleIndex).ToInt64() & ~(0x80000000L | 0x00c00000L | 0x00040000L | 0x00080000L)) | 0x40000000L));
-        if (position != new Rect(x, y, width, height))
+        var currentStyle = GetLong(child, StyleIndex).ToInt64();
+        var targetStyle = ComputeEmbeddedChildStyle(currentStyle);
+        var styleChanged = currentStyle != targetStyle;
+        if (styleChanged) SetLong(child, StyleIndex, new IntPtr(targetStyle));
+        var currentExStyle = GetLong(child, ExtendedStyleIndex).ToInt64();
+        var targetExStyle = ComputeEmbeddedChildExtendedStyle(currentExStyle);
+        if (currentExStyle != targetExStyle)
+        {
+            SetLong(child, ExtendedStyleIndex, new IntPtr(targetExStyle));
+            styleChanged = true;
+        }
+        if (styleChanged || position != new Rect(x, y, width, height))
         {
             SetWindowPos(child, IntPtr.Zero, x, y, width, height, 0x0014 | 0x0020);
         }
@@ -545,16 +717,27 @@ public sealed class NativeConsoleHost : HwndHost
         if(HasOriginalChild) {
             ReleaseGuestInputCapture();
             var keepVisible = showOriginal && originalVisible;
+            // Always restore the window region BEFORE re-parenting so caption/fullscreen hit-testing is never clipped.
+            RestoreChildClip();
             if (!keepVisible) EnableWindow(child, false);
-            // Remove visibility before restoring popup styles and detaching from the WPF owner.
             ShowWindow(child, 0);
             SetParent(child, originalParent);
-            SetLong(child, StyleIndex, new(originalStyle & ~0x10000000L));
+            SetLong(child, StyleIndex, new(ComputeDetachedStandaloneStyle(originalStyle)));
             SetLong(child, ExtendedStyleIndex, new(originalExtendedStyle));
-            SetWindowPos(child, new IntPtr(1), (int)originalBounds.X, (int)originalBounds.Y,
-                (int)originalBounds.Width, (int)originalBounds.Height, 0x0090 | 0x0020);
-            RestoreChildClip();
-            if (keepVisible) { EnableWindow(child, true); ShowWindow(child, 4); }
+            if (keepVisible)
+            {
+                EnableWindow(child, true);
+                SetWindowPos(child, IntPtr.Zero, (int)originalBounds.X, (int)originalBounds.Y,
+                    (int)originalBounds.Width, (int)originalBounds.Height, 0x0040 | 0x0020);
+                ShowWindow(child, 1); // SW_SHOWNORMAL
+                BringWindowToTop(child);
+                SetForegroundWindow(child);
+            }
+            else
+            {
+                SetWindowPos(child, new IntPtr(1), (int)originalBounds.X, (int)originalBounds.Y,
+                    (int)originalBounds.Width, (int)originalBounds.Height, 0x0090 | 0x0020);
+            }
         }
         if (originalClipRegion != IntPtr.Zero) DeleteObject(originalClipRegion);
         originalClipRegion = IntPtr.Zero;
@@ -562,6 +745,7 @@ public sealed class NativeConsoleHost : HwndHost
         child=IntPtr.Zero;
         childProcess=0;
         fittedSize=null;
+        allowOversizeForClip=false;
     }
     protected override void OnRenderSizeChanged(SizeChangedInfo info){base.OnRenderSizeChanged(info);Fit();}
     protected override void DestroyWindowCore(HandleRef handle)

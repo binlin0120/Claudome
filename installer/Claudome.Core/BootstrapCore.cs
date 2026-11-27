@@ -43,10 +43,12 @@ public sealed class BootstrapCore : IAsyncDisposable
         config["rules"]=new JsonArray("MATCH,Claude");
         return config.ToJsonString(JsonFile.Format);
     }
-    public static async Task<BootstrapCore> Start(SetupOptions options,string selectedConfig,CancellationToken token,IProgress<DownloadProgress>? progress=null)
+    public static async Task<BootstrapCore> Start(SetupOptions options,string selectedConfig,CancellationToken token,IProgress<DownloadProgress>? progress=null,string? archiveCacheDirectory=null)
     {
         var resource=Catalog.Resources.Single(x=>x.Id=="bootstrap-core");
-        using var downloader=new Downloader();var archive=await downloader.Get(resource,options.Cache,progress,token);
+        var cacheDir=string.IsNullOrWhiteSpace(archiveCacheDirectory)?options.Cache:archiveCacheDirectory;
+        Directory.CreateDirectory(cacheDir);
+        using var downloader=new Downloader();var archive=await downloader.Get(resource,cacheDir,progress,token);
         var folder=Paths.Under(options.Private,"bootstrap-core-1.19.34");HostPlatform.Environment.RestrictPrivateDirectory(options.Private);HostRuntime.ExtractVerified(archive,folder);
         var files=Directory.GetFiles(folder,"*.exe",SearchOption.TopDirectoryOnly);
         if(files.Length!=1)throw new SetupException("安装网络组件内容不匹配。");

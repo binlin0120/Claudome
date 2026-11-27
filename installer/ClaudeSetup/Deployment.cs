@@ -780,7 +780,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                     "VC_RUNTIME_INSTALL_FAILED" => "来宾微软 VC++ x64 运行库安装失败",
                     "VC_RUNTIME_READBACK_FAILED" => "来宾微软 VC++ x64 安装已返回，但运行库回读仍未通过",
                     "CLASH_SERVICE_INSTALL_WAITING" => "Clash 后台服务登记尚未结束，请检查虚拟机内的提示",
-                    "RESUME_NETWORK_REVIEW_REQUIRED" => "已保存的来宾网络需要检查，请查看待办中的具体原因",
+                    "RESUME_NETWORK_REVIEW_REQUIRED" => "已保存的来宾网络需要检查，请查看差异明细并可选择「重新配置本任务网络」",
                     "CLASH_SERVICE_INSTALLER_MISSING" => "已检测到 Clash Verge，但其后台服务安装组件缺失",
                     "CLASH_SERVICE_INSTALL_REQUIRED" => "应用安装已完成，Clash 后台服务登记失败",
                     "CLASH_SERVICE_START_FAILED" or "CLASH_SERVICE_NOT_RUNNING" => "Clash 后台服务未进入运行状态",
@@ -810,6 +810,12 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                     "EXIT_COUNTRY_MISMATCH" or "EXIT_IP_MISMATCH" => "来宾可访问出口检测网页，但实际出口与任务设置不一致",
                     _ => "来宾配置未完成"
                 };
+                if (result.TryGetProperty("runtimeMismatchDetail", out var mismatchField) &&
+                    mismatchField.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrWhiteSpace(mismatchField.GetString()))
+                {
+                    reason += "（差异明细：" + mismatchField.GetString() + "）";
+                }
                 if (guestCode == "TRACE_TLS_FAILED" && result.TryGetProperty("traceTlsPath", out var tracePath) &&
                     tracePath.ValueKind == JsonValueKind.String)
                     reason += tracePath.GetString() switch

@@ -9,7 +9,7 @@ if(-not $isAdmin -and -not $Quick) {
     foreach($arg in @('-NoLogo','-NoProfile','-File',$PSCommandPath,'-PayloadPath',$PayloadPath)){$start.ArgumentList.Add($arg)}
     try{$child=[Diagnostics.Process]::Start($start);$child.WaitForExit();exit $child.ExitCode}catch{exit 20}
 }
-$report=[ordered]@{schema=2;runId='';vmId='';workspaceId='';bootUtc='';networkPassed=$false;clashRuntimePassed=$false;browserRuntimePassed=$false;browserReopenPassed=$false;browserReopenTested=$false;translationPassed=$false;outagePassed=$false;outageTested=$false;pendingActions=@();code='NOT_COMPLETED';runtimeCode='';exitCode='';dnsCode='';blockAuditCode='';outageCode='';browserExitPassed=$false;browserOpened=$false;measurement=$null}
+$report=[ordered]@{schema=2;runId='';vmId='';workspaceId='';bootUtc='';networkPassed=$false;clashRuntimePassed=$false;browserRuntimePassed=$false;browserReopenPassed=$false;browserReopenTested=$false;translationPassed=$false;outagePassed=$false;outageTested=$false;pendingActions=@();code='NOT_COMPLETED';runtimeCode='';runtimeMismatchDetail='';exitCode='';dnsCode='';blockAuditCode='';outageCode='';browserExitPassed=$false;browserOpened=$false;measurement=$null}
 $root='C:\ProgramData\ClaudeEnvironment'
 $reportPath=Join-Path (Split-Path $PayloadPath) 'validation-result.json'
 function Add-Pending([string]$Title,[string[]]$Steps,[string]$Id){$report.pendingActions+=@{title=$Title;steps=$Steps;id=$Id}}
@@ -56,6 +56,7 @@ try {
         }
         $report.clashRuntimePassed=$true
     }catch{
+        if($script:LastRuntimeMismatchDetail){$report.runtimeMismatchDetail=[string]$script:LastRuntimeMismatchDetail}
         if($_.Exception.Message -match '^(PERSISTED_PROFILE_|CLASH_(TUN|SERVICE)|RUNTIME_|FIREWALL_|UNREVIEWED_|REGION_READBACK|PHYSICAL_INTERFACE_AMBIGUOUS)'){$report.runtimeCode='MISMATCH'}
         throw
     }
@@ -111,7 +112,10 @@ try {
     $report.code='CHECKED'
 }catch{
     $report.code='VALIDATION_FAILED'
-    Add-Pending '持久配置或网络回读未通过' @('本次先检查了当前配置，没有自动重写。保持助手开启，在虚拟机查看服务模式、TUN、所选专用配置、地区和时区。','需要修复时再点继续部署；修复后要重新执行重启验收，旧结果不会计为通过。') 'runtime-validation'
+    $steps=@('本次先检查了当前配置，没有自动重写。保持助手开启，在虚拟机查看服务模式、TUN、所选专用配置、地区和时区。')
+    if($report.runtimeMismatchDetail){$steps=@("差异明细：$($report.runtimeMismatchDetail)")+$steps}
+    $steps+='需要修复时可直接点击「重新配置本任务网络」；修复后要重新执行重启验收，旧结果不会计为通过。'
+    Add-Pending '持久配置或网络回读未通过' $steps 'runtime-validation'
 }finally{
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8NoBOM
     if(Test-Path -LiteralPath $PayloadPath){Remove-Item -LiteralPath $PayloadPath -Force}

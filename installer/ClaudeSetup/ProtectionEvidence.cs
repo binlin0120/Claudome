@@ -87,8 +87,12 @@ public sealed partial class Deployment
         string Code(string key) => report.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.String
             ? field.GetString() ?? "" : "";
         var runtimeCode = Code("runtimeCode");
+        var runtimeMismatchDetail = Code("runtimeMismatchDetail");
         p.Boundary = Flag("clashRuntimePassed") ? new(CheckStatus.Passed, now, "外层与来宾有效策略已回读")
-            : new(runtimeCode == "MISMATCH" ? CheckStatus.Failed : CheckStatus.Unverified, now, "来宾有效策略待核对");
+            : new(runtimeCode == "MISMATCH" ? CheckStatus.Failed : CheckStatus.Unverified, now,
+                runtimeCode == "MISMATCH" && !string.IsNullOrEmpty(runtimeMismatchDetail)
+                    ? "来宾有效策略不符：" + runtimeMismatchDetail
+                    : "来宾有效策略待核对");
         p.Exit = ProtectionEvidence.GuestExit(report, now);
         if (!state.Options.ManualAdsPower && !guestOnly)
         {

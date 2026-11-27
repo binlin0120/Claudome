@@ -663,6 +663,11 @@ public sealed partial class SetupWindow : Window
             SetDesktopConnectionStatus(section == 7 && installationNetworkFailed ? "安装网络未连通，可继续操作原桌面。" : message);
             log.AppendText(message + Environment.NewLine);
             var guestNetworkProbeFailed = state.PendingActions.Any(ResumePlan.IsGuestNetworkProbe);
+            if (section == 7 && state.PendingActions.Any(a => a.Id is "resume-network" or "runtime-validation") && desktopTopBarCollapsed)
+            {
+                desktopTopBarCollapsed = false;
+                ApplyDesktopTopBarState();
+            }
             if (!closeAfterPause && !(section == 7 && (installationNetworkFailed || signInNetwork || guestNetworkProbeFailed))) Notice(message);
         }
         finally { busy = false; if (!string.IsNullOrEmpty(state.VmId)) { updatingCpuRecommendation = true; try { cpu.Text = state.Options.CpuCount.ToString(); memory.Text = state.Options.MemoryMb.ToString(); useCustomVmConfig.IsChecked = state.Options.ManualCpuConfirmed; } finally { updatingCpuRecommendation = false; } } SaveCurrentTask();progress.IsIndeterminate=false; AllowEditing(true); cancellation?.Dispose(); cancellation = null; RefreshHost(); RefreshPending(); CompleteCloseAfterPause(); }
@@ -969,7 +974,8 @@ public sealed partial class SetupWindow : Window
         finally { updatingCpuRecommendation = false; }
         chain.IsChecked=o.ChainEnabled&&!o.ChainFromImport;upstreamSource.SelectedItem=o.UpstreamSource;
         if(WindowsMedia.Saved(o) is { } media) ApplyMedia(media,o.WindowsImageIndex);
-        desktopTimer.Stop();autoConnectDesktop=false;desktopConnectionPolicy.ResumeExplicitly();lastConsoleWindow=null;pendingConsole=null;desktopView=null;consoleHost=null;desktopTopBar=null;desktopDetailDrawer=null;desktopGuidePanel=null;consoleIdleOverlay=null;idleWizardButton=null;desktopClipboardPopup=null;desktopMaintenancePopup=null;desktopMaintenanceExpander=null;desktopStepGuideExpander=null;guideStepChoice=null;guideStepText=null;guidePhase="";
+        SetDesktopFullscreen(false);
+        desktopTimer.Stop();autoConnectDesktop=false;desktopConnectionPolicy.ResumeExplicitly();lastConsoleWindow=null;pendingConsole=null;desktopView=null;consoleHost=null;desktopTopBar=null;desktopDetailDrawer=null;desktopActionCluster=null;desktopTopBarToggle=null;desktopFullscreenButton=null;desktopTopBarCollapsed=false;desktopResumeNetworkBanner=null;desktopResumeNetworkText=null;desktopRetryNetworkBtn=null;desktopReconfigureNetworkBtn=null;desktopGuidePanel=null;consoleIdleOverlay=null;idleWizardButton=null;desktopClipboardPopup=null;desktopMaintenancePopup=null;desktopMaintenanceExpander=null;desktopStepGuideExpander=null;guideStepChoice=null;guideStepText=null;guidePhase="";
         RefreshCreationFields();taskFaulted=false;latestTaskActivity="";latestTaskDownload="";
         consent.IsChecked = false; license.IsChecked = false;
         secretsLoaded = !o.Remember || loadSecrets;

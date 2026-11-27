@@ -1074,6 +1074,60 @@ public sealed partial class SetupWindow
         state.Options = savedOptsSnapshot;
         if (!oobeBannerVisible) failed++;
         rows.Add(new { name = "stage4-desktop-oobe-banner-standalone-button-and-zoom-thresholds", passed = oobeBannerVisible });
+
+        // Verify 16:9 desktop frame, collapsible top bar arrow, embedded fullscreen, and desktop resume-network recovery banner
+        Navigate(7);
+        state.VmId = "88888888-8888-8888-8888-888888888888";
+        state.Options.PlatformId = "hyperv";
+        state.PendingActions.Add(new("已保存网络配置需要处理",
+            ["Clash 生效的端口、模式或 TUN 配置与本任务要求不符。（差异明细：tun.strict-route: 期望 true，实际 false）",
+             "可直接点击「重新配置本任务网络」。"],
+            "resume-network"));
+        UpdateDesktopActivity();
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        UpdateLayout();
+        FitDesktopViewport();
+        var expandedFrameH = consoleFrame?.Height ?? 0;
+        var expandedFrameW = consoleFrame?.Width ?? 0;
+        var expandedAspectOk = expandedFrameH > 0 && Math.Abs((expandedFrameW / expandedFrameH) - (16.0 / 9.0)) < 0.03;
+        var resumeBannerOk = desktopResumeNetworkBanner?.Visibility == Visibility.Visible &&
+            desktopResumeNetworkText?.Text.Contains("tun.strict-route") == true &&
+            desktopReconfigureNetworkBtn?.IsEnabled == true;
+        ToggleDesktopTopBar();
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        UpdateLayout();
+        var collapsedFrameH = consoleFrame?.Height ?? 0;
+        var collapsedFrameW = consoleFrame?.Width ?? 0;
+        var collapsedOk = desktopTopBarCollapsed &&
+            desktopActionCluster?.Visibility == Visibility.Collapsed &&
+            desktopDetailDrawer?.Visibility == Visibility.Collapsed &&
+            desktopTopBarToggle?.Visibility == Visibility.Visible &&
+            desktopFullscreenButton?.Visibility == Visibility.Visible &&
+            collapsedFrameH >= expandedFrameH &&
+            collapsedFrameH > 0 && Math.Abs((collapsedFrameW / collapsedFrameH) - (16.0 / 9.0)) < 0.03;
+        ToggleDesktopFullscreen();
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        UpdateLayout();
+        var fullscreenEntered = desktopFullscreen &&
+            shellTopBar?.Visibility == Visibility.Collapsed &&
+            shellHeading?.Visibility == Visibility.Collapsed &&
+            shellBottomBar?.Visibility == Visibility.Collapsed &&
+            WindowStyle == WindowStyle.None;
+        SetDesktopFullscreen(false);
+        ToggleDesktopTopBar();
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        UpdateLayout();
+        var fullscreenRestored = !desktopFullscreen &&
+            !desktopTopBarCollapsed &&
+            shellTopBar?.Visibility == Visibility.Visible &&
+            shellHeading?.Visibility == Visibility.Visible &&
+            shellBottomBar?.Visibility == Visibility.Visible;
+        state.PendingActions.RemoveAll(a => a.Id == "resume-network");
+        state.VmId = savedVmForP1;
+        state.Options = savedOptsSnapshot;
+        var desktop16By9UiOk = expandedAspectOk && resumeBannerOk && collapsedOk && fullscreenEntered && fullscreenRestored;
+        if (!desktop16By9UiOk) failed++;
+        rows.Add(new { name = "desktop-16by9-frame-collapsible-topbar-embedded-fullscreen-and-resume-network-banner", passed = desktop16By9UiOk, expandedAspectOk, resumeBannerOk, collapsedOk, fullscreenEntered, fullscreenRestored });
         Navigate(0);
 
         Directory.Delete(autoRestoreDir, true);
