@@ -36,6 +36,12 @@ Check 'validator-cannot-reuse-installation-payload-or-foreign-path' {
 Check 'guest-interactive-rejects-command-injection-and-extra-switch' {
     Reject-Plan $exe @('-Command','-File',($root+'\Configure.ps1'),'-PayloadPath',$currentInput)
     Reject-Plan $exe @('-NoProfile','-File',($root+'\Configure.ps1'),'-PayloadPath',$currentInput,'-Command','anything')
+    Reject-Plan $exe @('-NoProfile','-File',($root+'\Configure.ps1'),'-PayloadPath',$currentInput,'-Quick')
+    Reject-Plan $exe @('-NoProfile','-File',($root+'\Validate.ps1'),'-PayloadPath',($root+'\validation-input.json'),'-Other')
+}
+Check 'guest-interactive-accepts-validate-quick-switch' {
+    $p=Get-GuestInteractivePlan $exe @('-NoProfile','-File',($root+'\Validate.ps1'),'-PayloadPath',($root+'\validation-input.json'),'-Quick') $user $vm $workspace
+    if($p.arguments.Count -ne 6 -or $p.arguments[5] -ne '-Quick'){throw 'VALID_QUICK_PLAN_REJECTED'}
 }
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null
 $failed=@($rows | Where-Object {-not $_.passed}).Count

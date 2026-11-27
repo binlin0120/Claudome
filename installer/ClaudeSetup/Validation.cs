@@ -93,13 +93,23 @@ public sealed partial class Deployment
             await box.CopyTo(state,secrets,script.FileName,guestRoot+"\\"+name,token);
         }
         await box.CopyTo(state,secrets,input.FileName,guestRoot+@"\validation-input.json",token);
+        SetupException? guestRunFailure = null;
         try{_=await box.GuestRun(state,secrets,guestRoot+@"\pwsh\pwsh.exe",["-NoProfile","-File",guestRoot+@"\Validate.ps1","-PayloadPath",guestRoot+@"\validation-input.json" , ..(quick && !elevate ? new[] { "-Quick" } : [])],token,quick && !elevate ? 125 : 600);}
-        catch(HandoffException){throw;}catch(SetupException){ /* Only a fresh identity-bound report is accepted below. */ }
+        catch(HandoffException){throw;}catch(SetupException ex){ guestRunFailure = ex; /* Only a fresh identity-bound report is accepted below. */ }
         var path=Paths.Under(o.Private,"validation-result.json");if(File.Exists(path))File.Delete(path);
-        await box.CopyFrom(state,secrets,guestRoot+@"\validation-result.json",path,token);
+        try { await box.CopyFrom(state,secrets,guestRoot+@"\validation-result.json",path,token); }
+        catch (SetupException) when (guestRunFailure is not null) { throw guestRunFailure; }
         if(new FileInfo(path).Length>128*1024)throw new SetupException("来宾检查报告过大，未接受。");
         var report=JsonDocument.Parse(File.ReadAllText(path));
-        try{GuestEvidence.RequireCurrent(report.RootElement,state,runId);return report;}catch{report.Dispose();throw;}
+        try{GuestEvidence.RequireCurrent(report.RootElement,state,runId);return report;}
+        catch (SetupException staleError)
+        {
+            report.Dispose();
+            if (guestRunFailure is not null)
+                throw new SetupException($"{staleError.Message}（来宾命令错误：{Redaction.SafeError(guestRunFailure)}）");
+            throw;
+        }
+        catch{report.Dispose();throw;}
     }
     private static void ApplyValidation(SessionState state,JsonElement result)
     {

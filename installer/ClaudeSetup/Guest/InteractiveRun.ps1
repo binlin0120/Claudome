@@ -8,11 +8,12 @@ function Get-GuestInteractivePlan($Executable,$Arguments,$UserName,$VmId,$Worksp
     $root='C:\Users\'+$UserName+'\AppData\Local\ClaudeEnvironmentSetup'
     if([IO.Path]::GetFullPath($Executable) -ne ($root+'\pwsh\pwsh.exe')){throw 'VM_SCOPE'}
     $index=[array]::IndexOf($Arguments,'-File')
-    if($index -notin @(1,2) -or $Arguments.Count -ne $index+4){throw 'VM_SCOPE'}
+    if($index -notin @(1,2) -or ($Arguments.Count -ne $index+4 -and $Arguments.Count -ne $index+5)){throw 'VM_SCOPE'}
     foreach($prefix in $Arguments[0..($index-1)]){if($prefix -notin @('-NoProfile','-NoLogo')){throw 'VM_SCOPE'}}
     $script=[IO.Path]::GetFullPath([string]$Arguments[$index+1]);$name=[IO.Path]::GetFileName($script)
     $files=@{'Configure.ps1'=@('-PayloadPath','');'BridgeInstall.ps1'=@('-InputPath','bridge-input.json');'Rollback.ps1'=@('-PayloadPath','rollback-input.json');'Validate.ps1'=@('-PayloadPath','validation-input.json')}
     if(-not $files.ContainsKey($name) -or $script -ne ($root+'\'+$name) -or $Arguments[$index+2] -ne $files[$name][0]){throw 'VM_SCOPE'}
+    if($Arguments.Count -eq $index+5 -and ($name -ne 'Validate.ps1' -or $Arguments[$index+4] -ne '-Quick')){throw 'VM_SCOPE'}
     $inputPath=[IO.Path]::GetFullPath([string]$Arguments[$index+3])
     $inputName=[IO.Path]::GetFileName($inputPath)
     if($inputPath -ne ($root+'\'+$inputName)){throw 'VM_SCOPE'}
