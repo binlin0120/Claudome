@@ -11,9 +11,9 @@ public static class CustomerGuide
     private const string ManualFingerprint = "将 WebRTC 选为「禁用」。核对时区、地理位置和「语言」均为「基于 IP」，地理位置权限为「每次询问」。注意：「语言」与「界面语言」是两个不同设置，「语言」决定网页检测到的浏览器语言，「界面语言」可保持「基于语言」（不要只改界面语言而漏改「语言」）。分辨率及其后的 Canvas、WebGL、WebGPU 和硬件噪音等设置保留原样。点击「确定」保存。";
 
     internal static UserAction ManualAdsPower() => new("手动配置与检查 AdsPower", [
-        "1. 打开浏览器并选择环境：在虚拟机中打开 AdsPower Browser 并登录，找到现有环境（如 Default Profile），点「打开」旁边的「⋮ → 编辑」。",
-        "2. 按当前任务指引核对配置：操作系统选「Windows」、User-Agent 选「全部」；代理信息保持 No Proxy（流量经已核验的 Clash TUN 转发），IP 查询渠道选 ip-api；WebRTC 选「禁用」，时区、地理位置和「语言」均为「基于 IP」（界面语言保持「基于语言」），点击确定保存。",
-        "3. 打开检测页并确认出口：打开该环境访问 https://ip.net.coffee/claude/ 核对实际出口、时区与语言，确认一致后回助手点击「确认浏览器出口」。切勿在虚拟机内 Clash Verge 切换配置或测速。"
+        "打开浏览器并选择环境：在虚拟机中打开 AdsPower Browser 并登录，找到现有环境（如 Default Profile），点「打开」旁边的「⋮ → 编辑」。",
+        "按当前任务指引核对配置：操作系统选「Windows」、User-Agent 选「全部」；代理信息保持 No Proxy（流量经已核验的 Clash TUN 转发），IP 查询渠道选 ip-api；WebRTC 选「禁用」，时区、地理位置和「语言」均为「基于 IP」（界面语言保持「基于语言」），点击确定保存。",
+        "打开检测页并确认出口：打开该环境访问 https://ip.net.coffee/claude/ 核对实际出口、时区与语言，确认一致后回助手点击「确认浏览器出口」。切勿在虚拟机内 Clash Verge 切换配置或测速。"
     ], ManualAdsPowerId);
 
     public static string Country(string code)=>RegionCatalog.All.FirstOrDefault(r=>r.Code.Equals(code,StringComparison.OrdinalIgnoreCase))?.Label??"所选节点的实际出口地区";

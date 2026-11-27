@@ -593,7 +593,7 @@ function Test-NetworkOutage([string]$Id) {
     try {
         $script:LastOutageStage = 'precheck-trace'
         if($Id){$connection=Open-AdsCdp $Id;$tab=New-AuditTab $connection}
-        Assert-ExpectedTrace (Trace-Request)
+        Assert-ExpectedTrace (Read-GuestTrace)
         if($tab){Assert-ExpectedTrace (Read-BrowserTrace $connection $tab)}
         $desktopBlocked=$false;$browserBlocked=-not $tab;$direct='UNVERIFIED'
         try {
