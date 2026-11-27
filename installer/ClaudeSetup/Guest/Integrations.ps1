@@ -193,6 +193,10 @@ function Stop-Core {
 function Start-Core {
     try{
         $service=Get-Service -Name 'clash_verge_service' -ErrorAction Stop
+        if($service.Status -eq 'StopPending'){
+            $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(15))
+            $service.Refresh()
+        }
         if($service.Status -eq 'Stopped'){
             Start-Service -InputObject $service -ErrorAction Stop
             $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(20))
@@ -209,6 +213,7 @@ function Start-Core {
     }
     $clock=[Diagnostics.Stopwatch]::StartNew()
     $restartedGuiForSidecar=$false
+    $failure='CLASH_CORE_NOT_READY'
     do{
         try{
             $process=Get-VerifiedClashListener
@@ -222,7 +227,7 @@ function Start-Core {
             $failure='CLASH_TUN_REQUIRED'
         }catch{
             $failure=$_.Exception.Message
-            if($failure -eq 'CLASH_SERVICE_CORE_REQUIRED' -and -not $restartedGuiForSidecar -and $clock.Elapsed.TotalSeconds -ge 6){
+            if($failure -eq 'CLASH_SERVICE_CORE_REQUIRED' -and -not $restartedGuiForSidecar -and $clock.Elapsed.TotalSeconds -ge 8){
                 $restartedGuiForSidecar=$true
                 try{
                     Get-Process -Name 'clash-verge','Clash Verge' -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $script:ClashExe} | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -231,7 +236,9 @@ function Start-Core {
                     Start-Process -FilePath $script:ClashExe -WindowStyle Minimized -ErrorAction Stop | Out-Null
                 }catch{}
             }
-            elseif($failure -notin @('CLASH_CORE_NOT_READY','CLASH_SERVICE_CORE_REQUIRED')){throw}
+            elseif($failure -eq 'CLASH_CORE_HASH_MISMATCH'){throw}
+            # Transient port/handle/socket overlap while clash-verge and verge-mihomo finish starting:
+            # retry until the 75s startup budget expires rather than aborting on the first tick.
         }
         Start-Sleep -Seconds 1
     }while($clock.Elapsed.TotalSeconds -lt 75)

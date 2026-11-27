@@ -142,9 +142,11 @@ public sealed partial class Deployment
                 "recovery-trace" => "重启后出口回读失败",
                 _ => ""
             };
+            var outageError = Code("outageError");
+            var errPart = string.IsNullOrEmpty(outageError) ? "" : $" · 码={outageError}";
             var blockedOk = Flag("outageBlockedVerified");
             var recoveryOk = Flag("outageRecoveryVerified");
-            var stageSuffix = string.IsNullOrEmpty(stageLabel) ? "" : $"（阶段：{stageLabel} · 阻断={(blockedOk ? "通过" : "未过")} · 恢复={(recoveryOk ? "通过" : "未过")}）";
+            var stageSuffix = string.IsNullOrEmpty(stageLabel) ? "" : $"（阶段：{stageLabel}{errPart} · 阻断={(blockedOk ? "通过" : "未过")} · 恢复={(recoveryOk ? "通过" : "未过")}）";
             p.Outage = Flag("outagePassed")
                 ? new(CheckStatus.Passed, now, state.Options.ManualAdsPower
                     ? "来宾停核阻断及恢复通过 · AdsPower 停核待手动验收"

@@ -9,7 +9,7 @@ if(-not $isAdmin -and -not $Quick) {
     foreach($arg in @('-NoLogo','-NoProfile','-File',$PSCommandPath,'-PayloadPath',$PayloadPath)){$start.ArgumentList.Add($arg)}
     try{$child=[Diagnostics.Process]::Start($start);$child.WaitForExit();exit $child.ExitCode}catch{exit 20}
 }
-$report=[ordered]@{schema=2;runId='';vmId='';workspaceId='';bootUtc='';networkPassed=$false;clashRuntimePassed=$false;browserRuntimePassed=$false;browserReopenPassed=$false;browserReopenTested=$false;translationPassed=$false;outagePassed=$false;outageTested=$false;pendingActions=@();code='NOT_COMPLETED';runtimeCode='';runtimeMismatchDetail='';exitCode='';dnsCode='';blockAuditCode='';outageCode='';outageStage='';outageBlockedVerified=$false;outageRecoveryVerified=$false;browserExitPassed=$false;browserOpened=$false;measurement=$null}
+$report=[ordered]@{schema=2;runId='';vmId='';workspaceId='';bootUtc='';networkPassed=$false;clashRuntimePassed=$false;browserRuntimePassed=$false;browserReopenPassed=$false;browserReopenTested=$false;translationPassed=$false;outagePassed=$false;outageTested=$false;pendingActions=@();code='NOT_COMPLETED';runtimeCode='';runtimeMismatchDetail='';exitCode='';dnsCode='';blockAuditCode='';outageCode='';outageStage='';outageError='';outageBlockedVerified=$false;outageRecoveryVerified=$false;browserExitPassed=$false;browserOpened=$false;measurement=$null}
 $root='C:\ProgramData\ClaudeEnvironment'
 $reportPath=Join-Path (Split-Path $PayloadPath) 'validation-result.json'
 function Add-Pending([string]$Title,[string[]]$Steps,[string]$Id){$report.pendingActions+=@{title=$Title;steps=$Steps;id=$Id}}
@@ -23,10 +23,13 @@ function Invoke-ReportedOutage([string]$Id) {
     }
     catch{
         $report.outageStage=[string]$script:LastOutageStage
+        $errMsg=[string]$_.Exception.Message
+        if($errMsg -cmatch '^[A-Z][A-Z0-9_]{2,48}$'){$report.outageError=$errMsg}
+        else{$report.outageError=$_.Exception.GetType().Name}
         $report.outageBlockedVerified=[bool]$script:LastOutageBlockedVerified
         $report.outageRecoveryVerified=[bool]$script:LastOutageRecoveryVerified
         if($script:LastRuntimeMismatchDetail -and -not $report.runtimeMismatchDetail){$report.runtimeMismatchDetail=[string]$script:LastRuntimeMismatchDetail}
-        $report.outageCode=if($_.Exception.Message -eq 'OUTAGE_UNVERIFIED'){'UNVERIFIED'}else{'FAILED'}
+        $report.outageCode=if($errMsg -eq 'OUTAGE_UNVERIFIED'){'UNVERIFIED'}else{'FAILED'}
         try{Wait-ClashRecoveryReady 20;Assert-ExpectedTrace (Read-GuestTrace)}catch{$report.networkPassed=$false;$report.outageCode='FAILED'}
     }
 }

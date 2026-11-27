@@ -20,7 +20,7 @@ public sealed partial class Deployment
         using var workspaceLock=WorkspaceLock.Acquire(state);
         messages.Report("先检查当前来宾配置与实际运行参数；本步骤不会重新配置 Clash 或 AdsPower。");
         if(restart||state.RestartBootBefore.Length>0)state.RestartPassed=false;
-        if(outageTest)state.OutagePassed=false;
+        if(outageTest){state.OutagePassed=false;state.Protection.Outage=new(CheckStatus.NotTested);}
         state.Save();
         try {
             using var initial=await ReadValidation(box,state,secrets,outageTest,token);

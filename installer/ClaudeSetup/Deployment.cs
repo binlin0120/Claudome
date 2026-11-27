@@ -713,7 +713,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 var readResult = validation.RootElement;
                 ApplyValidation(state, readResult);
                 ApplyProtection(state, readResult, DateTime.UtcNow, guestOnly: true);
-                state.PendingActions.RemoveAll(a => a.Id is "resume-network" or "runtime-validation" or "manual-adspower");
+                state.PendingActions.RemoveAll(a => a.Id is "resume-network" or "runtime-validation" or CustomerGuide.ManualAdsPowerId);
                 if (state.NetworkPassed)
                 {
                     state.PendingActions.Add(CustomerGuide.ManualAdsPower());

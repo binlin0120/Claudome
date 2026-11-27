@@ -800,7 +800,7 @@ public sealed partial class SetupWindow
     private void DrawRecovery()
     {
         subtitle.Text = "一键顺序完成 4 项自动网络验真，再由本人确认浏览器出口。";
-        foreach (var action in state.PendingActions) main.Children.Add(PendingCard(action));
+        foreach (var action in state.PendingActions.DistinctBy(a => a.Id)) main.Children.Add(PendingCard(action));
         main.Children.Add(BuildProtectionCard());
         var host = Machine.Read();
         if (!ProductProfile.IsHyperVStandalone)
