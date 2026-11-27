@@ -1,14 +1,14 @@
-# Claudome · Claude 独立安全工作区
+# Claudome · Windows 11 独立安全工作区
 
 Claudome 是 Claude 与 Dome（穹顶）的组合名，寓意为 Claude 提供一个独立安全空间。Windows 程序为 `Claudome.exe`，开发者为李诗恩、林琛，交流群 1129410798。
 
-**Windows 11 x64 Hyper-V 专线版 `0.5.0`（2026-11-27，主力维护）** · [专线发布页](https://github.com/binlin0120/Claudome/releases/tag/hyperv-v0.5.0) · [全部发布记录](https://github.com/binlin0120/Claudome/releases)
+**Windows 11 x64 专线版 `0.5.0`（2026-11-27，主力维护）** · [专线发布页](https://github.com/binlin0120/Claudome/releases/tag/hyperv-v0.5.0) · [全部发布记录](https://github.com/binlin0120/Claudome/releases)
 
-- **发行政策**：Windows 后续只维护和发布 Hyper-V 专线版（Windows 11 x64 专业版 / 企业版 / 教育版），历史多线路版与 Windows 家庭版保留 `v0.4.10`（`/releases/latest/download/latest.json`）供原环境继续使用或回退。
-- **B 路线内嵌/独立桌面与直贴剪贴板**：内置 16:9 连续缩放内嵌桌面、独立窗口模式与原生 `VMConnect` 显式回退，支持无弹窗双向纯文本剪贴板同步（禁用磁盘/USB/设备重定向）。
+- **发行政策**：Windows 后续只维护和发布 Windows 11 硬件隔离专线版（Windows 11 x64 专业版 / 企业版 / 教育版），历史多线路版与 Windows 家庭版保留 `v0.4.10`（`/releases/latest/download/latest.json`）供原环境继续使用或回退。
+- **16:9 内嵌/独立桌面与直贴剪贴板**：内置 16:9 连续缩放内嵌桌面、独立窗口模式与原生控制台显式回退，支持无弹窗双向纯文本剪贴板同步（禁用磁盘/USB/设备重定向）。
 - **一键四维安全验真与重启持久复核**：顺序核验外层边界与来宾有效策略、出口、DoH/DNS 防旁路、断线阻断恢复以及正常重启持久复核。
-- **旧多线路版一键迁移**：下载解压新版 `Claudome-HyperV_0.5.0_win-x64.zip` 到单独目录后，运行新版 `Claudome.exe` 选择「从旧版升级到专线版」（或 `--migrate-legacy`），预检宿主机通过后完整备份旧版再原地升级；旧 VirtualBox / VMware 任务可通过备份目录中的独立多线路版继续打开。
-- **独立在线自更新**：专线版使用独立清单 `hyperv-latest.json`（与旧版 `latest.json` 严格隔离）。
+- **旧多线路版一键迁移**：下载解压新版 ZIP 到单独目录后，运行新版 `Claudome.exe` 选择「从旧版升级到专线版」（或 `--migrate-legacy`），预检宿主机通过后完整备份旧版再原地升级；旧 VirtualBox / VMware 任务可通过备份目录中的独立多线路版继续打开。
+- **独立在线自更新**：专线版使用专属在线更新通道（与旧版 `latest.json` 严格隔离）。
 
 **Windows x64 历史多线路版 `0.4.10`（2026-11-23，维护冻结）** · [v0.4.10 发布页](https://github.com/binlin0120/Claudome/releases/tag/v0.4.10)
 
