@@ -1,5 +1,7 @@
-# Claudome · Windows 11 独立安全工作区
+# Claudome · 给 Claude 一个独立的空间
 
+> **Claudome = Claude + Dome（穹顶），给 Claude 一个独立的安全空间，与日常主机环境互不打扰。**
+>
 > **最新动态（2026-11-27）：Windows 正式发布 `Claudome 0.5.0 专线版`！**
 > - **Windows 桌面端发版政策**：Windows 后续**只维护和发布 Windows 11 硬件隔离专线版**（面向 Windows 11 x64 专业版 / 企业版 / 教育版，内置 16:9 连续缩放内嵌桌面、无弹窗双向纯文本剪贴板、一键四维安全验真与重启持久复核）。Windows 家庭版与旧多线路版停止发功能更新，但保留 `v0.4.10` 及 `/releases/latest/download/latest.json` 供原环境继续使用或回退。
 > - **全新安装**：前往 [Claudome v0.5.0 发布页](https://github.com/binlin0120/Claudome/releases/tag/hyperv-v0.5.0) 下载最新版 ZIP 安装包，完整解压到**单独的本地目录**，双击 `Claudome.exe` 启动（免装 Go / .NET / Codex）。

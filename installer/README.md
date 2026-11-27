@@ -1,6 +1,6 @@
-# Claudome · Windows 11 独立安全工作区
+# Claudome · 给 Claude 一个独立的空间
 
-Claudome 是 Claude 与 Dome（穹顶）的组合名，寓意为 Claude 提供一个独立安全空间。Windows 程序为 `Claudome.exe`，开发者为李诗恩、林琛，交流群 1129410798。
+Claudome 是 Claude 与 Dome（穹顶）的组合名，寓意给 Claude 一个独立的安全空间，与日常主机环境互不打扰。Windows 程序为 `Claudome.exe`，开发者为李诗恩、林琛，交流群 1129410798。
 
 **Windows 11 x64 专线版 `0.5.0`（2026-11-27，主力维护）** · [专线发布页](https://github.com/binlin0120/Claudome/releases/tag/hyperv-v0.5.0) · [全部发布记录](https://github.com/binlin0120/Claudome/releases)
 
