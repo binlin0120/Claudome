@@ -73,24 +73,47 @@ function Assert-ClashServiceCommand([string]$Command,[string]$RuntimePath,[strin
     $actualPipe=if($Matches[1]){$Matches[1]}else{$Matches[2]}
     if($actualPipe -ne ('\\.\pipe\'+$Pipe)){throw 'CLASH_CONTROLLER_UNAVAILABLE'}
 }
-function Format-ClashAuditScalar($Container, [string]$PropertyName) {
-    if ($null -eq $Container) { return @{ present = $false; value = $null; text = '缺失' } }
-    $hasProp = $false
-    $val = $null
+function Get-ClashAuditRawValue($Container, [string]$PropertyName) {
+    if ($null -eq $Container) { return @{ present = $false; value = $null } }
     if ($Container -is [Collections.IDictionary]) {
-        if ($Container.Contains($PropertyName)) { $hasProp = $true; $val = $Container[$PropertyName] }
-    } else {
-        $p = $Container.PSObject.Properties[$PropertyName]
-        if ($null -ne $p) { $hasProp = $true; $val = $p.Value }
+        if ($Container.Contains($PropertyName) -and $null -ne $Container[$PropertyName]) {
+            return @{ present = $true; value = $Container[$PropertyName] }
+        }
+        return @{ present = $false; value = $null }
     }
-    if (-not $hasProp -or $null -eq $val) { return @{ present = $false; value = $null; text = '缺失' } }
-    if ($val -is [bool]) { return @{ present = $true; value = $val; text = $(if ($val) { 'true' } else { 'false' }) } }
-    if ($val -is [int] -or $val -is [long] -or $val -is [double] -or $val -is [decimal]) {
-        return @{ present = $true; value = $val; text = [string]$val }
+    $p = $Container.PSObject.Properties[$PropertyName]
+    if ($null -ne $p -and $null -ne $p.Value) {
+        return @{ present = $true; value = $p.Value }
     }
-    $s = [string]$val
-    if ($s.Length -gt 32) { $s = $s.Substring(0, 32) + '…' }
-    return @{ present = $true; value = $s; text = $s }
+    return @{ present = $false; value = $null }
+}
+function Test-ClashStrictBool($Entry, [bool]$Expected) {
+    if (-not $Entry.present) { return @{ ok = $false; actual = '缺失' } }
+    if ($Entry.value -isnot [bool]) { return @{ ok = $false; actual = '类型异常' } }
+    $b = [bool]$Entry.value
+    if ($b -ne $Expected) { return @{ ok = $false; actual = $(if ($b) { 'true' } else { 'false' }) } }
+    return @{ ok = $true; actual = $(if ($b) { 'true' } else { 'false' }) }
+}
+function Test-ClashStrictInt($Entry, [int]$Expected) {
+    if (-not $Entry.present) { return @{ ok = $false; actual = '缺失' } }
+    if ($Entry.value -is [bool] -or ($Entry.value -isnot [int] -and $Entry.value -isnot [long] -and $Entry.value -isnot [int16] -and $Entry.value -isnot [byte])) {
+        return @{ ok = $false; actual = '类型异常' }
+    }
+    $num = [long]$Entry.value
+    if ($num -ne [long]$Expected) { return @{ ok = $false; actual = [string]$num } }
+    return @{ ok = $true; actual = [string]$num }
+}
+function Test-ClashApprovedEnum($Entry, [string]$Expected, [string[]]$ApprovedValues, [switch]$CaseSensitive) {
+    if (-not $Entry.present) { return @{ ok = $false; actual = '缺失' } }
+    if ($Entry.value -isnot [string]) { return @{ ok = $false; actual = '类型异常' } }
+    $raw = [string]$Entry.value
+    $matched = if ($CaseSensitive) { $raw -ceq $Expected } else { $raw -ieq $Expected }
+    if ($matched) { return @{ ok = $true; actual = $Expected } }
+    foreach ($allowed in $ApprovedValues) {
+        $isKnown = if ($CaseSensitive) { $raw -ceq $allowed } else { $raw -ieq $allowed }
+        if ($isKnown) { return @{ ok = $false; actual = $allowed } }
+    }
+    return @{ ok = $false; actual = '未知值' }
 }
 function Get-ClashRuntimeSettingMismatches($Active) {
     $mismatches = [Collections.Generic.List[string]]::new()
@@ -98,29 +121,25 @@ function Get-ClashRuntimeSettingMismatches($Active) {
         $mismatches.Add('/configs: 期望 对象，实际 缺失')
         return @($mismatches)
     }
-    $mixed = Format-ClashAuditScalar $Active 'mixed-port'
-    if (-not $mixed.present -or ([string]$mixed.value -ne '17897')) { $mismatches.Add("mixed-port: 期望 17897，实际 $($mixed.text)") }
-    $allowLan = Format-ClashAuditScalar $Active 'allow-lan'
-    if ($allowLan.present -and [bool]$allowLan.value) { $mismatches.Add("allow-lan: 期望 false，实际 $($allowLan.text)") }
-    $ipv6 = Format-ClashAuditScalar $Active 'ipv6'
-    if ($ipv6.present -and [bool]$ipv6.value) { $mismatches.Add("ipv6: 期望 false，实际 $($ipv6.text)") }
-    $mode = Format-ClashAuditScalar $Active 'mode'
-    if (-not $mode.present -or ([string]$mode.value -ine 'rule')) { $mismatches.Add("mode: 期望 rule，实际 $($mode.text)") }
+    $mixed = Test-ClashStrictInt (Get-ClashAuditRawValue $Active 'mixed-port') 17897
+    if (-not $mixed.ok) { $mismatches.Add("mixed-port: 期望 17897，实际 $($mixed.actual)") }
+    $allowLan = Test-ClashStrictBool (Get-ClashAuditRawValue $Active 'allow-lan') $false
+    if (-not $allowLan.ok) { $mismatches.Add("allow-lan: 期望 false，实际 $($allowLan.actual)") }
+    $ipv6 = Test-ClashStrictBool (Get-ClashAuditRawValue $Active 'ipv6') $false
+    if (-not $ipv6.ok) { $mismatches.Add("ipv6: 期望 false，实际 $($ipv6.actual)") }
+    $mode = Test-ClashApprovedEnum (Get-ClashAuditRawValue $Active 'mode') 'rule' @('rule','global','direct','script')
+    if (-not $mode.ok) { $mismatches.Add("mode: 期望 rule，实际 $($mode.actual)") }
 
-    $tun = $null
-    if ($Active -is [Collections.IDictionary]) {
-        if ($Active.Contains('tun')) { $tun = $Active['tun'] }
-    } elseif ($null -ne $Active.PSObject.Properties['tun']) {
-        $tun = $Active.PSObject.Properties['tun'].Value
-    }
-    $tunEnable = Format-ClashAuditScalar $tun 'enable'
-    if (-not $tunEnable.present -or -not [bool]$tunEnable.value) { $mismatches.Add("tun.enable: 期望 true，实际 $($tunEnable.text)") }
-    $tunDevice = Format-ClashAuditScalar $tun 'device'
-    if (-not $tunDevice.present -or ([string]$tunDevice.value -cne 'ClaudeTun')) { $mismatches.Add("tun.device: 期望 ClaudeTun，实际 $($tunDevice.text)") }
-    $tunAutoRoute = Format-ClashAuditScalar $tun 'auto-route'
-    if (-not $tunAutoRoute.present -or -not [bool]$tunAutoRoute.value) { $mismatches.Add("tun.auto-route: 期望 true，实际 $($tunAutoRoute.text)") }
-    $tunStrictRoute = Format-ClashAuditScalar $tun 'strict-route'
-    if (-not $tunStrictRoute.present -or -not [bool]$tunStrictRoute.value) { $mismatches.Add("tun.strict-route: 期望 true，实际 $($tunStrictRoute.text)") }
+    $tunEntry = Get-ClashAuditRawValue $Active 'tun'
+    $tun = if ($tunEntry.present -and ($tunEntry.value -is [Collections.IDictionary] -or $tunEntry.value -is [pscustomobject])) { $tunEntry.value } else { $null }
+    $tunEnable = Test-ClashStrictBool (Get-ClashAuditRawValue $tun 'enable') $true
+    if (-not $tunEnable.ok) { $mismatches.Add("tun.enable: 期望 true，实际 $($tunEnable.actual)") }
+    $tunDevice = Test-ClashApprovedEnum (Get-ClashAuditRawValue $tun 'device') 'ClaudeTun' @('ClaudeTun','Meta','utun','Clash') -CaseSensitive
+    if (-not $tunDevice.ok) { $mismatches.Add("tun.device: 期望 ClaudeTun，实际 $($tunDevice.actual)") }
+    $tunAutoRoute = Test-ClashStrictBool (Get-ClashAuditRawValue $tun 'auto-route') $true
+    if (-not $tunAutoRoute.ok) { $mismatches.Add("tun.auto-route: 期望 true，实际 $($tunAutoRoute.actual)") }
+    $tunStrictRoute = Test-ClashStrictBool (Get-ClashAuditRawValue $tun 'strict-route') $true
+    if (-not $tunStrictRoute.ok) { $mismatches.Add("tun.strict-route: 期望 true，实际 $($tunStrictRoute.actual)") }
     return @($mismatches)
 }
 function Assert-ClashRuntime {
@@ -131,7 +150,7 @@ function Assert-ClashRuntime {
     if((Get-FileHash -LiteralPath $profile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $wantedHash){$script:LastRuntimeMismatchDetail='profiles/claude-environment-setup.yaml 哈希与任务记录不一致';throw 'PERSISTED_PROFILE_CHANGED'}
     $selected=Read-LocalYaml $profile
     $profiles=Read-LocalYaml (Join-Path $clashHome 'profiles.yaml')
-    if($profiles['current'] -ne 'claude-environment-setup'){$cur=[string]$profiles['current'];if($cur.Length -gt 32){$cur=$cur.Substring(0,32)+'…'};$script:LastRuntimeMismatchDetail="profiles.current: 期望 claude-environment-setup，实际 $(if($cur){$cur}else{'缺失'})";throw 'PERSISTED_PROFILE_NOT_SELECTED'}
+    if($profiles['current'] -ne 'claude-environment-setup'){$script:LastRuntimeMismatchDetail="profiles.current: 期望 claude-environment-setup，实际 $(if($profiles['current']){'未知值'}else{'缺失'})";throw 'PERSISTED_PROFILE_NOT_SELECTED'}
     $service=Get-CimInstance Win32_Service -Filter "Name='clash_verge_service'"
     if($service.State -ne 'Running' -or $service.ProcessId -le 0){$script:LastRuntimeMismatchDetail="clash_verge_service: 期望 Running，实际 $($service.State)";throw 'CLASH_SERVICE_NOT_RUNNING'}
     $script:ClashExe=Get-ClashExecutable

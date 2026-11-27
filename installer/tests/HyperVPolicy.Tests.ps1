@@ -858,7 +858,7 @@ Check 'new-vm-default-video-sets-1920x1080-with-maximum-fallback-and-preserves-e
 Check 'clash-runtime-settings-mismatch-reports-sanitized-8-field-diff-without-secrets' {
     $auditPath = Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\NetworkAudit.ps1'
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($auditPath, [ref]$null, [ref]$null)
-    foreach ($fnName in @('Format-ClashAuditScalar', 'Get-ClashRuntimeSettingMismatches')) {
+    foreach ($fnName in @('Get-ClashAuditRawValue', 'Test-ClashStrictBool', 'Test-ClashStrictInt', 'Test-ClashApprovedEnum', 'Get-ClashRuntimeSettingMismatches')) {
         $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true) | Select-Object -First 1
         Assert-Case ($null -ne $fn)
         . ([scriptblock]::Create($fn.Extent.Text))
@@ -880,31 +880,59 @@ Check 'clash-runtime-settings-mismatch-reports-sanitized-8-field-diff-without-se
     $okDiff = @(Get-ClashRuntimeSettingMismatches $validActive)
     Assert-Case ($okDiff.Count -eq 0)
 
-    $badActive = [pscustomobject]@{
+    # Probe 1: Missing allow-lan / ipv6 MUST be reported as missing (never zero mismatches).
+    $missingFalseActive = [pscustomobject]@{
+        'mixed-port' = 17897
+        mode = 'rule'
+        tun = [pscustomobject]@{ enable = $true; device = 'ClaudeTun'; 'auto-route' = $true; 'strict-route' = $true }
+    }
+    $missingFalseDiff = @(Get-ClashRuntimeSettingMismatches $missingFalseActive)
+    $missingFalseText = $missingFalseDiff -join '；'
+    Assert-Case ($missingFalseDiff.Count -eq 2 -and $missingFalseText.Contains('allow-lan: 期望 false，实际 缺失') -and $missingFalseText.Contains('ipv6: 期望 false，实际 缺失'))
+
+    # Probe 2: String "false" on required-true TUN booleans MUST be rejected as type anomaly (never truthy).
+    $stringBoolActive = [pscustomobject]@{
+        'mixed-port' = '17897'
+        'allow-lan' = 'false'
+        ipv6 = $false
+        mode = 'rule'
+        tun = [pscustomobject]@{ enable = 'false'; device = 'ClaudeTun'; 'auto-route' = 'false'; 'strict-route' = 'false' }
+    }
+    $stringBoolDiff = @(Get-ClashRuntimeSettingMismatches $stringBoolActive)
+    $stringBoolText = $stringBoolDiff -join '；'
+    Assert-Case ($stringBoolDiff.Count -eq 5)
+    Assert-Case ($stringBoolText.Contains('mixed-port: 期望 17897，实际 类型异常'))
+    Assert-Case ($stringBoolText.Contains('allow-lan: 期望 false，实际 类型异常'))
+    Assert-Case ($stringBoolText.Contains('tun.enable: 期望 true，实际 类型异常'))
+    Assert-Case ($stringBoolText.Contains('tun.auto-route: 期望 true，实际 类型异常'))
+    Assert-Case ($stringBoolText.Contains('tun.strict-route: 期望 true，实际 类型异常'))
+
+    # Probe 3: Untrusted/unknown scalar strings MUST collapse to 未知值 (never printed or truncated raw).
+    $untrustedActive = [pscustomobject]@{
         'mixed-port' = 7897
         'allow-lan' = $true
         ipv6 = $true
-        mode = 'global'
+        mode = 'SECRET_MODE_TOKEN_XYZ'
         secret = 'SUPER-SECRET-TOKEN-999'
         subscription = 'https://secret.sub.example/token=abc123'
         tun = [pscustomobject]@{
             enable = $false
-            device = 'Meta'
+            device = 'SENSITIVE_CUSTOM_ADAPTER_NAME'
             'auto-route' = $false
         }
     }
-    $badDiff = @(Get-ClashRuntimeSettingMismatches $badActive)
+    $badDiff = @(Get-ClashRuntimeSettingMismatches $untrustedActive)
     $joined = $badDiff -join '；'
     Assert-Case ($badDiff.Count -eq 8)
     Assert-Case ($joined.Contains('mixed-port: 期望 17897，实际 7897'))
     Assert-Case ($joined.Contains('allow-lan: 期望 false，实际 true'))
     Assert-Case ($joined.Contains('ipv6: 期望 false，实际 true'))
-    Assert-Case ($joined.Contains('mode: 期望 rule，实际 global'))
+    Assert-Case ($joined.Contains('mode: 期望 rule，实际 未知值'))
     Assert-Case ($joined.Contains('tun.enable: 期望 true，实际 false'))
-    Assert-Case ($joined.Contains('tun.device: 期望 ClaudeTun，实际 Meta'))
+    Assert-Case ($joined.Contains('tun.device: 期望 ClaudeTun，实际 未知值'))
     Assert-Case ($joined.Contains('tun.auto-route: 期望 true，实际 false'))
     Assert-Case ($joined.Contains('tun.strict-route: 期望 true，实际 缺失'))
-    Assert-Case (-not $joined.Contains('SUPER-SECRET') -and -not $joined.Contains('secret.sub.example'))
+    Assert-Case (-not $joined.Contains('SECRET_MODE_TOKEN') -and -not $joined.Contains('SENSITIVE_CUSTOM') -and -not $joined.Contains('SUPER-SECRET') -and -not $joined.Contains('secret.sub.example'))
 }
 
 # Call the real .NET file API directly; the mock registry provider remains scoped
