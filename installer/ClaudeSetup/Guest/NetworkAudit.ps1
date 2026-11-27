@@ -562,25 +562,89 @@ function Test-AdsBrowserExit([string]$Id) {
     }
 }
 
+function Wait-ClashRecoveryReady([int]$TimeoutSeconds = 30) {
+    $transient = @(
+        'CLASH_CORE_NOT_READY',
+        'CLASH_SERVICE_CORE_REQUIRED',
+        'CLASH_CONTROLLER_UNAVAILABLE',
+        'CLASH_TUN_REQUIRED',
+        'RUNTIME_ROUTE_MISMATCH',
+        'RUNTIME_NETWORK_SETTINGS_MISMATCH'
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            Assert-ClashRuntime
+            return
+        } catch {
+            if ([DateTime]::UtcNow -ge $deadline -or $_.Exception.Message -notin $transient) { throw }
+            Start-Sleep -Seconds 2
+        }
+    } while ($true)
+}
+
 function Test-NetworkOutage([string]$Id) {
+    $script:LastOutageStage = ''
+    $script:LastOutageBlockedVerified = $false
+    $script:LastOutageRecoveryVerified = $false
     $connection=$null;$tab=$null
     try {
+        $script:LastOutageStage = 'precheck-trace'
         if($Id){$connection=Open-AdsCdp $Id;$tab=New-AuditTab $connection}
         Assert-ExpectedTrace (Trace-Request)
         if($tab){Assert-ExpectedTrace (Read-BrowserTrace $connection $tab)}
         $desktopBlocked=$false;$browserBlocked=-not $tab;$direct='UNVERIFIED'
         try {
-            Stop-Core;Assert-CoreStopped
+            $script:LastOutageStage = 'stop-core'
+            Stop-Core
+            $stopDeadline = [DateTime]::UtcNow.AddSeconds(6)
+            do {
+                try { Assert-CoreStopped; break }
+                catch {
+                    if ([DateTime]::UtcNow -ge $stopDeadline) { throw }
+                    Start-Sleep -Milliseconds 500
+                }
+            } while ($true)
+            $script:LastOutageStage = 'outage-block-check'
             try{$null=Trace-Request}catch{$desktopBlocked=$true}
             if($tab){try{$null=Read-BrowserTrace $connection $tab}catch{$browserBlocked=$true}}
             $direct=Test-PhysicalProbe
             Assert-CoreStopped
-        }finally{Start-Core}
-        Assert-ClashRuntime
-        Assert-ExpectedTrace (Read-GuestTrace)
-        if($tab){Assert-ExpectedTrace (Read-BrowserTrace $connection $tab)}
-        if(-not $desktopBlocked -or -not $browserBlocked -or $direct -eq 'BYPASS'){throw 'OUTAGE_PROTECTION_FAILED'}
-        if($direct -ne 'DENIED'){throw 'OUTAGE_UNVERIFIED'}
+            if($desktopBlocked -and $browserBlocked -and $direct -eq 'DENIED'){
+                $script:LastOutageBlockedVerified = $true
+            }
+        }finally{
+            $script:LastOutageStage = 'restart-core'
+            Start-Core
+        }
+        $script:LastOutageStage = 'recovery-runtime'
+        Wait-ClashRecoveryReady 30
+        $script:LastOutageStage = 'recovery-trace'
+        $traceOk = $false
+        for($attempt = 0; $attempt -lt 3; $attempt++) {
+            try {
+                Assert-ExpectedTrace (Read-GuestTrace)
+                if($tab){Assert-ExpectedTrace (Read-BrowserTrace $connection $tab)}
+                $traceOk = $true
+                break
+            } catch {
+                if($attempt -ge 2){throw}
+                Start-Sleep -Seconds 2
+            }
+        }
+        $script:LastOutageRecoveryVerified = $traceOk
+        if(-not $desktopBlocked -or -not $browserBlocked -or $direct -eq 'BYPASS'){
+            $script:LastOutageStage = 'outage-block-check'
+            throw 'OUTAGE_PROTECTION_FAILED'
+        }
+        if($direct -ne 'DENIED'){
+            $script:LastOutageStage = 'outage-unverified'
+            throw 'OUTAGE_UNVERIFIED'
+        }
+        if(-not $script:LastOutageBlockedVerified -or -not $script:LastOutageRecoveryVerified){
+            throw 'OUTAGE_PROTECTION_FAILED'
+        }
+        $script:LastOutageStage = 'passed'
         return $true
     }finally {
         if($tab){try{$null=Invoke-Cdp $connection 'Target.closeTarget' @{targetId=$tab.target}}catch{}}

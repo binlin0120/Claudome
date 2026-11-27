@@ -149,5 +149,35 @@ public static class DesktopRecoveryTests
             Assert((detached & wsChild) == 0 && (detached & wsOverlappedWindow) == wsOverlappedWindow,
                 $"detached style did not restore overlapped window controls: 0x{detached:X}");
         }));
+        await check("hyperv-route-b-profile-locks-basic-vmrdp-isolation-and-source-aspect-geometry", () => Sync(() => {
+            var badRejected = false;
+            try { HyperVRdpConnectionProfile.CreateVerifiedBasic("not-a-guid"); }
+            catch (SetupException) { badRejected = true; }
+            Assert(badRejected, "Route B profile must reject unverified non-GUID VM ID");
+
+            var p = HyperVRdpConnectionProfile.CreateVerifiedBasic(id);
+            Assert(p.Server == "localhost" && p.Port == 2179 && p.Pcb == id && !p.Pcb.Contains("EnhancedMode") &&
+                p.AuthenticationLevel == 0 && !p.NegotiateSecurityLayer && p.EnableCredSspSupport &&
+                p.DisableCredentialsDelegation && p.SmartSizing &&
+                !p.RedirectDrives && !p.RedirectPrinters && !p.RedirectPorts && !p.RedirectSmartCards &&
+                !p.RedirectPosDevices && !p.RedirectDevices && !p.RedirectDynamicDevices && !p.RedirectDynamicDrives &&
+                p.AudioRedirectionMode == 2 && !p.AudioCaptureRedirectionMode && !p.RedirectClipboard,
+                $"Route B Basic VMRDP isolation profile violated: {p}");
+
+            Assert(HyperVRdpDisplayGeometry.ShouldUseRouteB("hyperv", guestReady: true, explicitFallbackToA: false) &&
+                !HyperVRdpDisplayGeometry.ShouldUseRouteB("hyperv", guestReady: false, explicitFallbackToA: false) &&
+                !HyperVRdpDisplayGeometry.ShouldUseRouteB("hyperv", guestReady: true, explicitFallbackToA: true) &&
+                !HyperVRdpDisplayGeometry.ShouldUseRouteB("virtualbox", guestReady: true, explicitFallbackToA: false),
+                "Route B vs Route A selection policy mismatch");
+
+            var fhd = HyperVRdpDisplayGeometry.ComputeForSource(1920, 900, 1920, 1080);
+            Assert(fhd.IsSource16By9 && fhd.Bounds.Width == 1600 && fhd.Bounds.Height == 900 && fhd.StatusText.Contains("16:9"),
+                $"16:9 source geometry mismatch: {fhd}");
+
+            var non16By9 = HyperVRdpDisplayGeometry.ComputeForSource(1600, 900, 1024, 768);
+            Assert(!non16By9.IsSource16By9 && non16By9.Bounds.Width == 1200 && non16By9.Bounds.Height == 900 &&
+                non16By9.StatusText.Contains("非 16:9"),
+                $"4:3 source geometry did not preserve full aspect ratio: {non16By9}");
+        }));
     }
 }

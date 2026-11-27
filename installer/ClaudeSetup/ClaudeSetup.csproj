@@ -3,6 +3,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
@@ -28,6 +29,8 @@
     <Description>Claude 独立环境部署助手（Hyper-V 独立版）</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
     <ProjectReference Include="..\Claudome.Core\Claudome.Core.csproj" />
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
     <PackageReference Include="System.Management" Version="10.0.0" />

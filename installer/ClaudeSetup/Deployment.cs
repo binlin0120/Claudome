@@ -496,7 +496,7 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
             var settingsStamp = ResumePlan.SettingsStamp(o, state.CoreConfigSha256);
             var resumeNetwork = !reconfigureGuestNetwork && !state.DeferCheckpoint && state.ClashConfigured && state.GuestSettingsStamp == settingsStamp;
             var resumeBrowser = state.BrowserProfileConfigured && state.GuestSettingsStamp == settingsStamp;
-            if (checkSavedNetwork && (!browserCheckpoint || !resumeNetwork))
+            if (checkSavedNetwork && (!resumeNetwork || (!o.ManualAdsPower && !browserCheckpoint)))
                 throw new SetupException("本任务缺少可回读的网络检查点，请使用「重新配置本任务网络」。");
             var continueBrowser = browserCheckpoint && resumeNetwork;
             var refreshGuestScripts = continueBrowser || state.GuestFilesStamp != resourceStamp || !state.Completed.Contains("guest-files");

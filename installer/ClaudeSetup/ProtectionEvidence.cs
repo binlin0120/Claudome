@@ -130,12 +130,27 @@ public sealed partial class Deployment
         };
         if (Flag("outageTested"))
         {
+            var outageStage = Code("outageStage");
+            var stageLabel = outageStage switch
+            {
+                "precheck-trace" => "断线前基准出口检查失败",
+                "stop-core" => "停核确认超时或核心被拉起",
+                "outage-block-check" => "停核期间阻断校验未通过",
+                "outage-unverified" => "停核期间未取得物理旁路拒绝证据",
+                "restart-core" => "停核后重启 Clash 核心失败",
+                "recovery-runtime" => "重启后 Clash 运行配置回读未就绪",
+                "recovery-trace" => "重启后出口回读失败",
+                _ => ""
+            };
+            var blockedOk = Flag("outageBlockedVerified");
+            var recoveryOk = Flag("outageRecoveryVerified");
+            var stageSuffix = string.IsNullOrEmpty(stageLabel) ? "" : $"（阶段：{stageLabel} · 阻断={(blockedOk ? "通过" : "未过")} · 恢复={(recoveryOk ? "通过" : "未过")}）";
             p.Outage = Flag("outagePassed")
                 ? new(CheckStatus.Passed, now, state.Options.ManualAdsPower
                     ? "来宾停核阻断及恢复通过 · AdsPower 停核待手动验收"
                     : "来宾和 AdsPower 停核阻断及恢复通过")
                 : new(Code("outageCode") == "FAILED" ? CheckStatus.Failed : CheckStatus.Unverified, now,
-                    "未取得足够的阻断或恢复证据");
+                    "未取得足够的阻断或恢复证据" + stageSuffix);
         }
         state.NetworkPassed = p.Boundary.Status == CheckStatus.Passed && p.Exit.Status == CheckStatus.Passed &&
             p.Dns.Status != CheckStatus.Failed;

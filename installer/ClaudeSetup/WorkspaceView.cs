@@ -131,6 +131,12 @@ public sealed partial class SetupWindow
     private string latestTaskActivity="",latestTaskDownload="";
     private bool taskFaulted, installationNetworkFailed;
     private NativeConsoleHost? consoleHost;
+    private HyperVRdpConsoleHost? hyperVRdpHost;
+    private HyperVStandaloneRdpWindow? standaloneRdpWindow;
+    private HyperVDesktopMode hyperVDesktopMode = HyperVDesktopMode.None;
+    private bool explicitHyperVFallbackToA;
+    private readonly SemaphoreSlim desktopHandoffGate = new(1, 1);
+    private Button? fallbackVmConnectMenuItem;
     private bool fittingVBoxDisplay;
     private readonly HyperVDisplayFitTracker hyperVDisplayFit = new();
     private bool fittingHyperVDisplay => hyperVDisplayFit.IsBusy;
@@ -212,7 +218,7 @@ public sealed partial class SetupWindow
             desktopView.RowDefinitions.Add(new RowDefinition{Height=new GridLength(1,GridUnitType.Star)});
 
             var guide=new StackPanel();desktopGuidePanel=guide;
-            consoleStatus=Text("待连接虚拟机",13,false);consoleStatus.Margin=new Thickness(0,0,12,0);consoleStatus.VerticalAlignment=VerticalAlignment.Center;
+            consoleStatus=Text("待连接虚拟机",12,false);consoleStatus.Margin=new Thickness(0,0,10,0);consoleStatus.VerticalAlignment=VerticalAlignment.Center;
             consoleGuide=Text("",11.5);consoleGuide.Margin=new Thickness(0,0,0,6);
             softwareChecklist=Text("",11);softwareChecklist.Margin=new Thickness(0);desktopActivity=Text("",11.5);desktopActivity.Margin=new Thickness(0,4,0,0);
             var safetyBadgeBox=new Border{Background=Pale,BorderBrush=Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(10),Padding=new Thickness(10,8,10,8),Margin=new Thickness(0,4,0,8),Child=new StackPanel{Children={consoleGuide,softwareChecklist}}};
@@ -220,12 +226,13 @@ public sealed partial class SetupWindow
             desktopContinue=Action("连接到虚拟机",async(_,_)=>await ResumeDesktopTask(),true);
             desktopSyncAuth=Action("同步虚拟机密码",async(_,_)=>await SyncGuestCredentialsDialog());
             desktopManualAdsPower = Action("手动使用 AdsPower", (_, _) => SelectManualAdsPower());
-            desktopManualAdsGuide = Text("", 12);
+            desktopManualAdsGuide = Text("", 11.5);
             desktopConfirmAdsExit = Action("确认 AdsPower 出口", (_, _) => ConfirmBrowserExit());
-            desktopFinish = Action("完成设置", (_, _) => FinishWorkspace(), true);
+            desktopFinish = Action("完成设置", (_, _) => { if (IsProtectionReadyForFinish()) FinishWorkspace(); else Navigate(5); }, true);
             desktopFinishHint = Text("", 11);
-            openStandaloneHyperV = Action("在独立窗口查看 Hyper-V 桌面", (_, _) => ShowStandaloneHyperV());
-            topStandaloneHyperV = Action("独立窗口查看", (_, _) => ShowStandaloneHyperV());
+            openStandaloneHyperV = Action("在独立窗口查看 Hyper-V 桌面", async (_, _) => await ShowStandaloneHyperVAsync());
+            topStandaloneHyperV = Action("独立窗口查看", async (_, _) => await ShowStandaloneHyperVAsync());
+            fallbackVmConnectMenuItem = Action("回退原生控制台 (VMConnect)", async (_, _) => { if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = false; await FallbackToNativeVmConnectAsync(); });
             desktopRecoverDisplay = Action("保存状态并恢复显示", async (_, _) => await RecoverVirtualBoxDisplay(), true);
             desktopRecoverDisplay.Visibility = Visibility.Collapsed;
             desktopForceRepair = Action("强制关闭并恢复 1 核", async (_, _) => await ForceRepairVirtualBoxDialog(), true);
@@ -279,9 +286,10 @@ public sealed partial class SetupWindow
                         Action("重新配置本任务网络", async (_, _) => { if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = false; await ReconfigureGuestNetworkWithConfirmation(); }),
                         Action("备用线路", async (_, _) => await PickSavedRoute()),
                         Action("防护结果", (_, _) => { if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = false; Navigate(5); }),
-                        Action("重新连接桌面", async (_, _) => { desktopConnectionPolicy.ResumeExplicitly(); autoConnectDesktop = true; await ConnectDesktop(requested: true); }, true),
+                        Action("重新连接桌面", async (_, _) => { if (desktopMaintenancePopup is not null) desktopMaintenancePopup.IsOpen = false; explicitHyperVFallbackToA = false; desktopConnectionPolicy.ResumeExplicitly(); autoConnectDesktop = true; await ConnectDesktop(requested: true); }, true),
                         Action("适配显示区域", async (_, _) => await FitConnectedConsole(true)),
                         openStandaloneHyperV,
+                        fallbackVmConnectMenuItem,
                         Action("同步虚拟机账号密码", async (_, _) => await SyncGuestCredentialsDialog()),
                         desktopRecoverDisplayMenuItem,
                         desktopForceRepairMenuItem,
@@ -389,9 +397,9 @@ public sealed partial class SetupWindow
                 Background = Surface,
                 BorderBrush = Line,
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(14),
-                Padding = new Thickness(16, 10, 16, 10),
-                Margin = new Thickness(0, 0, 0, 10),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(12, 6, 12, 6),
+                Margin = new Thickness(0, 0, 0, 6),
                 Child = guide
             };
             desktopTopBar.SizeChanged += (_, _) => UpdateDesktopFrameGeometry();
@@ -403,12 +411,45 @@ public sealed partial class SetupWindow
                 consoleResizeTimer.Stop();
                 consoleResizeTimer.Start();
             };
+            hyperVRdpHost = new HyperVRdpConsoleHost();
+            hyperVRdpHost.View.Visibility = Visibility.Collapsed;
+            hyperVRdpHost.SourceSizeChanged += (sw, sh) =>
+            {
+                if (hyperVDesktopMode != HyperVDesktopMode.EmbeddedRdp || section != 7) return;
+                var avail = GetDesktopFrameAvailableArea();
+                var layout = HyperVRdpDisplayGeometry.ComputeForSource(avail.Width, avail.Height, sw, sh);
+                SetDesktopConnectionStatus(layout.StatusText);
+                UpdateDesktopFrameGeometry();
+            };
+            hyperVRdpHost.Connected += _ =>
+            {
+                if (hyperVDesktopMode != HyperVDesktopMode.EmbeddedRdp || section != 7) return;
+                var avail = GetDesktopFrameAvailableArea();
+                var layout = HyperVRdpDisplayGeometry.ComputeForSource(avail.Width, avail.Height, hyperVRdpHost.SourceWidth, hyperVRdpHost.SourceHeight);
+                SetDesktopConnectionStatus(layout.StatusText);
+                UpdateDesktopFrameGeometry();
+                UpdateDesktopActivity();
+                UpdateNativeClipboardControl();
+            };
+            hyperVRdpHost.Disconnected += (expected, code, desc) =>
+            {
+                if (expected || closingDesktop || shuttingDownVm) return;
+                if (hyperVDesktopMode == HyperVDesktopMode.EmbeddedRdp)
+                {
+                    hyperVDesktopMode = HyperVDesktopMode.None;
+                    hyperVRdpHost.View.Visibility = Visibility.Collapsed;
+                    if (consoleFrame is not null) consoleFrame.Background = Surface;
+                    var detail = string.IsNullOrWhiteSpace(desc) ? $"连接码 {code}" : desc;
+                    SetDesktopConnectionStatus($"B 路线桌面连接已断开（{detail}）。可点击「重新连接桌面」或「回退原生控制台 (VMConnect)」。");
+                    UpdateDesktopActivity();
+                }
+            };
             consolePlaceholder=new TextBlock{Text="当前还没有运行中的虚拟机",MaxWidth=640,TextAlignment=TextAlignment.Center,HorizontalAlignment=HorizontalAlignment.Center,Foreground=Ink,FontSize=16,FontWeight=FontWeights.SemiBold,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,8)};
             idleWizardButton = Action("前往安装向导  →", (_, _) => Navigate(1), true);
             idleWizardButton.HorizontalAlignment = HorizontalAlignment.Center;
             consoleIdleOverlay = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Children = { consolePlaceholder, idleWizardButton } };
-            var surface=new Grid();surface.Children.Add(consoleIdleOverlay);surface.Children.Add(consoleHost);
-            consoleFrame=new Border{Name="DesktopConsoleFrame",Background=Surface,BorderBrush=Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(16),ClipToBounds=true,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,Child=surface};
+            var surface=new Grid();surface.Children.Add(consoleIdleOverlay);surface.Children.Add(consoleHost);surface.Children.Add(hyperVRdpHost.View);
+            consoleFrame=new Border{Name="DesktopConsoleFrame",Background=Surface,BorderBrush=Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(14),ClipToBounds=true,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,Child=surface};
             Grid.SetRow(consoleFrame, 1);
             desktopView.Children.Add(consoleFrame);
             desktopView.SizeChanged += (_, _) => UpdateDesktopFrameGeometry();
@@ -440,6 +481,10 @@ public sealed partial class SetupWindow
                 desktopTimer.Tick += async (_, _) => {
                     UpdateDesktopGuide();
                     if (shuttingDownVm) return;
+                    if (hyperVDesktopMode == HyperVDesktopMode.EmbeddedRdp && hyperVRdpHost?.IsConnected == true)
+                        return;
+                    if (hyperVDesktopMode == HyperVDesktopMode.StandaloneRdp && standaloneRdpWindow?.IsVisible == true)
+                        return;
                     if(lastConsoleWindow is not null && !ConsoleWindowLocator.IsAlive(lastConsoleWindow, state.Options.VmName))
                     {
                         ReleaseDesktopWindow();
@@ -538,9 +583,9 @@ public sealed partial class SetupWindow
         UpdateDesktopFrameGeometry();
     }
 
-    private void UpdateDesktopFrameGeometry()
+    private Size GetDesktopFrameAvailableArea()
     {
-        if (section != 7 || desktopView is null || consoleFrame is null) return;
+        if (desktopView is null) return new Size(0, 0);
         var availW = desktopView.ActualWidth;
         if (availW <= 0 && shellContentScroll is not null) availW = shellContentScroll.ActualWidth;
         var totalH = desktopView.ActualHeight;
@@ -549,9 +594,21 @@ public sealed partial class SetupWindow
             ? desktopTopBar.ActualHeight + desktopTopBar.Margin.Top + desktopTopBar.Margin.Bottom
             : 0;
         var availH = Math.Max(0, totalH - topBarH);
-        if (availW <= 0 || availH <= 0) return;
+        return new Size(Math.Max(0, availW), availH);
+    }
 
-        var rect = ComputeCentered16By9Frame(availW, availH);
+    private void UpdateDesktopFrameGeometry()
+    {
+        if (section != 7 || desktopView is null || consoleFrame is null) return;
+        var avail = GetDesktopFrameAvailableArea();
+        if (avail.Width <= 0 || avail.Height <= 0) return;
+
+        Rect rect;
+        if (hyperVDesktopMode == HyperVDesktopMode.EmbeddedRdp && hyperVRdpHost is not null)
+            rect = HyperVRdpDisplayGeometry.ComputeForSource(avail.Width, avail.Height, hyperVRdpHost.SourceWidth, hyperVRdpHost.SourceHeight).Bounds;
+        else
+            rect = ComputeCentered16By9Frame(avail.Width, avail.Height);
+
         if (rect.Width <= 0 || rect.Height <= 0) return;
 
         if (Math.Abs(consoleFrame.Width - rect.Width) >= 0.5 || double.IsNaN(consoleFrame.Width))
@@ -581,8 +638,8 @@ public sealed partial class SetupWindow
             desktopActionCluster.Visibility = desktopTopBarCollapsed ? Visibility.Collapsed : Visibility.Visible;
         if (desktopTopBar is not null)
         {
-            desktopTopBar.Padding = desktopTopBarCollapsed ? new Thickness(12, 4, 12, 4) : new Thickness(16, 10, 16, 10);
-            desktopTopBar.Margin = desktopTopBarCollapsed ? new Thickness(0, 0, 0, 4) : new Thickness(0, 0, 0, 10);
+            desktopTopBar.Padding = desktopTopBarCollapsed ? new Thickness(10, 3, 10, 3) : new Thickness(12, 6, 12, 6);
+            desktopTopBar.Margin = desktopTopBarCollapsed ? new Thickness(0, 0, 0, 2) : new Thickness(0, 0, 0, 6);
         }
         UpdateDesktopActivity();
         desktopTopBar?.UpdateLayout();
@@ -610,10 +667,10 @@ public sealed partial class SetupWindow
         else
         {
             if (shellTopBar is not null) shellTopBar.Visibility = Visibility.Visible;
-            if (shellHeading is not null) shellHeading.Visibility = Visibility.Visible;
+            if (shellHeading is not null) shellHeading.Visibility = section == 7 ? Visibility.Collapsed : Visibility.Visible;
             if (shellBottomBar is not null) shellBottomBar.Visibility = Visibility.Visible;
             if (shellBody is not null && !IsCenteredConfigSection(section))
-                shellBody.Margin = section == 7 ? new Thickness(20, 10, 20, 10) : new Thickness(34, 18, 34, 16);
+                shellBody.Margin = section == 7 ? new Thickness(20, 8, 20, 8) : new Thickness(34, 18, 34, 16);
             WindowStyle = savedWindowStyle;
             ResizeMode = savedResizeMode;
             WindowState = savedWindowState;
@@ -635,6 +692,18 @@ public sealed partial class SetupWindow
     private void ReleaseDesktopWindow()
     {
         CancelPendingHyperVDisplayFit(resetViewport: true);
+        if (hyperVRdpHost is not null)
+        {
+            _ = hyperVRdpHost.DisconnectAndWaitAsync(TimeSpan.FromSeconds(2));
+            hyperVRdpHost.View.Visibility = Visibility.Collapsed;
+        }
+        if (standaloneRdpWindow is { } standalone)
+        {
+            standaloneRdpWindow = null;
+            _ = standalone.CloseCleanlyAsync();
+        }
+        if (hyperVDesktopMode is HyperVDesktopMode.EmbeddedRdp or HyperVDesktopMode.StandaloneRdp)
+            hyperVDesktopMode = HyperVDesktopMode.None;
         // A VMware frontend can switch to a different VM within its existing window.
         var switched = lastConsoleWindow is { } window &&
             !ConsoleWindowLocator.IsAlive(window, state.Options.VmName);
@@ -716,6 +785,54 @@ public sealed partial class SetupWindow
             }
             framebufferConflictVm = "";
             var (executable, vmName, vmConfig) = DesktopConsoleTarget(o);
+            if (o.PlatformId == "hyperv" &&
+                HyperVRdpDisplayGeometry.ShouldUseRouteB(o.PlatformId, state.Completed.Contains("guest-ready"), explicitHyperVFallbackToA) &&
+                hyperVRdpHost is not null)
+            {
+                await desktopHandoffGate.WaitAsync(token);
+                try
+                {
+                    if (standaloneRdpWindow is { } activeStandalone)
+                    {
+                        standaloneRdpWindow = null;
+                        await activeStandalone.CloseCleanlyAsync();
+                    }
+                    if (consoleHost.IsAttached) consoleHost.Detach(showOriginal: false);
+                    consoleHost.Visibility = Visibility.Collapsed;
+                    // Ensure no lingering VMConnect holds the single basic console session for this VM.
+                    var existingVmConnect = await Task.Run(() => ConsoleWindowLocator.Find(connectingVm, executable, vmName, vmConfig), token);
+                    if (existingVmConnect is not null)
+                        ConsoleWindowLocator.Hide(existingVmConnect, o.VmName, connectingVm);
+                    lastConsoleWindow = null;
+
+                    hyperVRdpHost.View.Visibility = Visibility.Visible;
+                    if (consoleIdleOverlay is not null) consoleIdleOverlay.Visibility = Visibility.Collapsed;
+                    if (consoleFrame is not null) consoleFrame.Background = Brush("#0E151C");
+                    hyperVDesktopMode = HyperVDesktopMode.EmbeddedRdp;
+                    SetDesktopConnectionStatus("正在通过 B 路线（Basic VMRDP + SmartSizing）连接桌面…");
+                    await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle, token);
+                    UpdateDesktopFrameGeometry();
+
+                    var connectedRdp = await hyperVRdpHost.ConnectAsync(connectingVm, token);
+                    if (connectedRdp && !closingDesktop && section == 7 && state.VmId == connectingVm)
+                    {
+                        desktopConnectionPolicy.ObserveWindow();
+                        var avail = GetDesktopFrameAvailableArea();
+                        var layout = HyperVRdpDisplayGeometry.ComputeForSource(avail.Width, avail.Height, hyperVRdpHost.SourceWidth, hyperVRdpHost.SourceHeight);
+                        SetDesktopConnectionStatus(layout.StatusText);
+                        UpdateDesktopFrameGeometry();
+                        UpdateDesktopActivity();
+                        UpdateNativeClipboardControl();
+                        return;
+                    }
+                    // Route B failed -> clean up and fall back to Route A VMConnect automatically.
+                    await hyperVRdpHost.DisconnectAndWaitAsync(TimeSpan.FromSeconds(2));
+                    hyperVRdpHost.View.Visibility = Visibility.Collapsed;
+                    hyperVDesktopMode = HyperVDesktopMode.None;
+                    SetDesktopConnectionStatus("B 路线未能连通，正在自动回退至 A 路线原生控制台（VMConnect）…");
+                }
+                finally { desktopHandoffGate.Release(); }
+            }
             if (backend is VirtualBox preparingDisplay)
             {
                 await VirtualBoxDisplayFit.Prepare(preparingDisplay, connectingVm, token);
@@ -723,14 +840,16 @@ public sealed partial class SetupWindow
             }
             var lookup=await Task.Run(()=>{var found=ConsoleWindowLocator.Find(connectingVm,executable,out var exists,vmName,vmConfig);return(Window:found,FrontendExists:exists);},token);
             token.ThrowIfCancellationRequested();
+            var launchedFreshFrontend = false;
             if(lookup.Window is null&&!lookup.FrontendExists&&desktopConnectionPolicy.TryLaunchFrontend()) {
                 // One frontend request per explicit task continuation; never loop launches.
                 if(!await backend.IsRunning(state,token)){desktopConnectionPolicy.Suspend();return;}
                 pendingConsole = new(connectingVm, executable, vmName, vmConfig);
+                launchedFreshFrontend = true;
                 if(o.PlatformId=="virtualbox")new VmConsole().Attach(Path.GetDirectoryName(executable)!,connectingVm);
                 else {
                     var start=new ProcessStartInfo(executable){UseShellExecute=true};
-                    if(o.PlatformId=="hyperv"){start.ArgumentList.Add("localhost");start.ArgumentList.Add(o.VmName);}
+                    if(o.PlatformId=="hyperv"){start.ArgumentList.Add("localhost");start.ArgumentList.Add("-G");start.ArgumentList.Add(connectingVm);}
                     else {start.ArgumentList.Add("-n");start.ArgumentList.Add(vmConfig!);}
                     Process.Start(start);
                 }
@@ -741,10 +860,12 @@ public sealed partial class SetupWindow
                 window=await Task.Run(()=>ConsoleWindowLocator.Find(connectingVm,executable,vmName,vmConfig),token);
             }
             if(window is null){SetDesktopConnectionStatus("正在等待原控制台窗口准备，不会重复打开。请处理虚拟机组件的首次提示。");return;}
+            if (launchedFreshFrontend && o.PlatformId == "hyperv") await Task.Delay(450, token);
             if (closingDesktop) { ConsoleWindowLocator.Hide(window, o.VmName, connectingVm); pendingConsole = null; return; }
             token.ThrowIfCancellationRequested();if(section!=7||state.VmId!=connectingVm||desktopConnectionPolicy.Suspended)return;
             pendingConsole = null;
             lastConsoleWindow = window;
+            if (o.PlatformId == "hyperv") hyperVDesktopMode = HyperVDesktopMode.FallbackVmConnect;
             var lastVmInfo = "";
             if (backend is VirtualBox vbox)
             {
@@ -752,12 +873,14 @@ public sealed partial class SetupWindow
                 if (!state.Completed.Contains("guest-ready") && VirtualBoxDisplayFit.ReadAdditionsRunLevel(lastVmInfo) < 2)
                     _ = await vbox.EnsureGuestAdditionsMounted(state, lastVmInfo, token);
             }
+            if (hyperVRdpHost is not null) hyperVRdpHost.View.Visibility = Visibility.Collapsed;
             consoleHost.Visibility=Visibility.Visible;
             if (consoleFrame is not null) consoleFrame.Background = Brush("#0E151C");
             await Dispatcher.InvokeAsync(()=>{},DispatcherPriority.ApplicationIdle,token);UpdateLayout();
             lastVBoxLayout = null;
             token.ThrowIfCancellationRequested();
             if (closingDesktop || section != 7 || state.VmId != connectingVm) return;
+            consoleHost.ClearHyperVChromeClip();
             consoleHost.SetFittedSize(null);
             consoleHost.Attach(window.Handle);
             consoleHost.Fit(forceRedraw: true);
@@ -978,21 +1101,142 @@ public sealed partial class SetupWindow
         ? "Hyper-V 基本会话当前仍存在画面滚动条，请最大化窗口，或点击「独立窗口查看」。"
         : "未能调整 Hyper-V 控制台缩放。请最大化窗口、在内嵌控制台选「查看 → 缩放级别 → 75%」，或点击「独立窗口查看」。";
 
-    private void ShowStandaloneHyperV()
-    {
-        if (connectingConsole || shuttingDownVm || state.Options.PlatformId != "hyperv" ||
-            lastConsoleWindow is not { } window || !ConsoleWindowLocator.IsAlive(window)) return;
+    private bool IsProtectionReadyForFinish() =>
+        state.Protection.Boundary.Status == CheckStatus.Passed &&
+        state.Protection.Exit.Status == CheckStatus.Passed &&
+        state.Protection.Dns.Status == CheckStatus.Passed &&
+        state.Protection.Browser.Status == CheckStatus.Passed &&
+        BoundaryRuntime.BackendFor(state) is not null;
 
-        desktopConnectionPolicy.Suspend();
-        autoConnectDesktop = false;
-        CancelPendingHyperVDisplayFit(resetViewport: true);
-        desktopConnectionCancellation?.Cancel();
-        consoleHost?.Detach(showOriginal: true);
-        if (consoleHost is not null) consoleHost.Visibility = Visibility.Collapsed;
-        if (consoleFrame is not null) consoleFrame.Background = Surface;
-        ConsoleWindowLocator.RestoreVisible(window, foreground: true);
-        SetDesktopConnectionStatus("已在独立窗口显示原 Hyper-V 桌面。选择「重新连接桌面」可返回内嵌显示。");
-        UpdateDesktopActivity();
+    private async Task ShowStandaloneHyperVAsync()
+    {
+        if (connectingConsole || shuttingDownVm || state.Options.PlatformId != "hyperv" || string.IsNullOrEmpty(state.VmId)) return;
+        await desktopHandoffGate.WaitAsync();
+        try
+        {
+            // Route B standalone window (Basic VMRDP + SmartSizing, continuous 16:9 & native fullscreen)
+            if (hyperVDesktopMode == HyperVDesktopMode.EmbeddedRdp ||
+                (hyperVRdpHost?.IsConnected == true) ||
+                HyperVRdpDisplayGeometry.ShouldUseRouteB("hyperv", state.Completed.Contains("guest-ready"), explicitHyperVFallbackToA))
+            {
+                desktopConnectionPolicy.Suspend();
+                autoConnectDesktop = false;
+                CancelPendingHyperVDisplayFit(resetViewport: true);
+                desktopConnectionCancellation?.Cancel();
+                if (hyperVRdpHost is not null)
+                {
+                    await hyperVRdpHost.DisconnectAndWaitAsync(TimeSpan.FromSeconds(3));
+                    hyperVRdpHost.View.Visibility = Visibility.Collapsed;
+                }
+                if (consoleHost?.IsAttached == true)
+                {
+                    consoleHost.Detach(showOriginal: false);
+                    consoleHost.Visibility = Visibility.Collapsed;
+                }
+                if (standaloneRdpWindow is { } existing)
+                {
+                    standaloneRdpWindow = null;
+                    await existing.CloseCleanlyAsync();
+                }
+                if (consoleFrame is not null) consoleFrame.Background = Surface;
+                hyperVDesktopMode = HyperVDesktopMode.StandaloneRdp;
+
+                var vmId = state.VmId;
+                var vmName = state.Options.VmName;
+                var standalone = new HyperVStandaloneRdpWindow(vmName, vmId, async () =>
+                {
+                    standaloneRdpWindow = null;
+                    hyperVDesktopMode = HyperVDesktopMode.None;
+                    explicitHyperVFallbackToA = false;
+                    desktopConnectionPolicy.ResumeExplicitly();
+                    autoConnectDesktop = true;
+                    await ConnectDesktop(requested: true);
+                });
+                standalone.Closed += (_, _) =>
+                {
+                    if (ReferenceEquals(standaloneRdpWindow, standalone))
+                    {
+                        standaloneRdpWindow = null;
+                        if (hyperVDesktopMode == HyperVDesktopMode.StandaloneRdp)
+                            hyperVDesktopMode = HyperVDesktopMode.None;
+                        SetDesktopConnectionStatus("独立桌面窗口已关闭。点击「重新连接桌面」可恢复内嵌显示。");
+                        UpdateDesktopActivity();
+                    }
+                };
+                standaloneRdpWindow = standalone;
+                standalone.Show();
+                SetDesktopConnectionStatus("已在独立窗口显示 Hyper-V 桌面（支持连续缩放与全屏）。点击独立窗「返回内嵌桌面」可回到程序内。");
+                UpdateDesktopActivity();
+                return;
+            }
+
+            // Route A fallback standalone (VMConnect)
+            if (lastConsoleWindow is not { } window || !ConsoleWindowLocator.IsAlive(window)) return;
+            desktopConnectionPolicy.Suspend();
+            autoConnectDesktop = false;
+            CancelPendingHyperVDisplayFit(resetViewport: true);
+            desktopConnectionCancellation?.Cancel();
+            consoleHost?.Detach(showOriginal: true);
+            if (consoleHost is not null) consoleHost.Visibility = Visibility.Collapsed;
+            if (consoleFrame is not null) consoleFrame.Background = Surface;
+            ConsoleWindowLocator.RestoreVisible(window, foreground: true);
+            SetDesktopConnectionStatus("已在独立窗口显示原 Hyper-V 桌面。选择「重新连接桌面」可返回内嵌显示。");
+            UpdateDesktopActivity();
+        }
+        finally { desktopHandoffGate.Release(); }
+    }
+
+    private async Task FallbackToNativeVmConnectAsync()
+    {
+        if (connectingConsole || shuttingDownVm || state.Options.PlatformId != "hyperv" || string.IsNullOrEmpty(state.VmId)) return;
+        await desktopHandoffGate.WaitAsync();
+        try
+        {
+            explicitHyperVFallbackToA = true;
+            desktopConnectionPolicy.Suspend();
+            autoConnectDesktop = false;
+            CancelPendingHyperVDisplayFit(resetViewport: true);
+            desktopConnectionCancellation?.Cancel();
+
+            if (standaloneRdpWindow is { } standalone)
+            {
+                standaloneRdpWindow = null;
+                await standalone.CloseCleanlyAsync();
+            }
+            if (hyperVRdpHost is not null)
+            {
+                await hyperVRdpHost.DisconnectAndWaitAsync(TimeSpan.FromSeconds(3));
+                hyperVRdpHost.View.Visibility = Visibility.Collapsed;
+            }
+            if (consoleHost?.IsAttached == true)
+            {
+                consoleHost.Detach(showOriginal: true);
+                consoleHost.Visibility = Visibility.Collapsed;
+            }
+            if (consoleFrame is not null) consoleFrame.Background = Surface;
+
+            var (executable, vmName, vmConfig) = DesktopConsoleTarget(state.Options);
+            var existing = await Task.Run(() => ConsoleWindowLocator.Find(state.VmId, executable, vmName, vmConfig));
+            if (existing is not null)
+            {
+                ConsoleWindowLocator.RestoreVisible(existing, foreground: true);
+                lastConsoleWindow = existing;
+            }
+            else
+            {
+                var start = new ProcessStartInfo(executable) { UseShellExecute = true };
+                start.ArgumentList.Add("localhost");
+                start.ArgumentList.Add("-G");
+                start.ArgumentList.Add(state.VmId);
+                Process.Start(start);
+            }
+            hyperVDesktopMode = HyperVDesktopMode.FallbackVmConnect;
+            SetDesktopConnectionStatus("已串行切回 A 路线原生控制台（VMConnect）。点击「重新连接桌面」可切回 B 路线连续铺满桌面。");
+            UpdateDesktopActivity();
+            UpdateNativeClipboardControl();
+        }
+        catch (Exception ex) { SetDesktopConnectionStatus(Redaction.SafeError(ex)); }
+        finally { desktopHandoffGate.Release(); }
     }
 
     private string DesktopConnectedStatus() => !busy && state.Status.Contains("暂停")
@@ -1000,12 +1244,13 @@ public sealed partial class SetupWindow
         : "已连接到虚拟机";
     private const string VmOffStatus = "虚拟机已关机，可直接重新连接。";
     private string DesktopWaitingText()=>taskFaulted?latestTaskActivity:shuttingDownVm?"正在等待虚拟机正常关机…":busy?
-        (consoleHost?.IsAttached == true ? "虚拟机已连接，正在配置运行环境…" : "正在准备虚拟机与安装网络…"):
+        ((consoleHost?.IsAttached == true || hyperVRdpHost?.IsConnected == true) ? "虚拟机已连接，正在配置运行环境…" : "正在准备虚拟机与安装网络…"):
         string.IsNullOrEmpty(state.VmId)?"当前还没有运行中的虚拟机":state.Status == VmOffStatus ? VmOffStatus : state.Status.Contains("暂停")||desktopConnectionPolicy.Suspended?"任务已暂停 · 点击「继续任务并连接」恢复":"虚拟机待机中 · 点击「连接到虚拟机」启动";
     private void SetDesktopConnectionStatus(string message)
     {
         if(consoleStatus is not null)consoleStatus.Text=message;
-        if(consolePlaceholder is not null){consolePlaceholder.Text=message;if(consoleIdleOverlay is not null)consoleIdleOverlay.Visibility=consoleHost?.IsAttached==true?Visibility.Collapsed:Visibility.Visible;}
+        var hasDesktopSurface = consoleHost?.IsAttached == true || hyperVRdpHost?.IsConnected == true;
+        if(consolePlaceholder is not null){consolePlaceholder.Text=message;if(consoleIdleOverlay is not null)consoleIdleOverlay.Visibility=hasDesktopSurface?Visibility.Collapsed:Visibility.Visible;}
         if(idleWizardButton is not null) idleWizardButton.Visibility = string.IsNullOrEmpty(state.VmId) && !busy ? Visibility.Visible : Visibility.Collapsed;
     }
     private void RecordTaskActivity(string message){latestTaskActivity=message;latestTaskDownload="";UpdateDesktopActivity();}
@@ -1017,15 +1262,21 @@ public sealed partial class SetupWindow
     {
         UpdateShutdownCommand(section == 7);
         if (desktopGuidePanel is not null) desktopGuidePanel.IsEnabled = !shuttingDownVm;
+        var hyperVActive = (consoleHost?.IsAttached == true || hyperVRdpHost?.IsConnected == true) && !connectingConsole && !shuttingDownVm;
         if (openStandaloneHyperV is not null)
         {
             openStandaloneHyperV.Visibility = state.Options.PlatformId == "hyperv" ? Visibility.Visible : Visibility.Collapsed;
-            openStandaloneHyperV.IsEnabled = consoleHost?.IsAttached == true && !connectingConsole && !shuttingDownVm;
+            openStandaloneHyperV.IsEnabled = hyperVActive;
         }
         if (topStandaloneHyperV is not null)
         {
             topStandaloneHyperV.Visibility = state.Options.PlatformId == "hyperv" ? Visibility.Visible : Visibility.Collapsed;
-            topStandaloneHyperV.IsEnabled = consoleHost?.IsAttached == true && !connectingConsole && !shuttingDownVm;
+            topStandaloneHyperV.IsEnabled = hyperVActive;
+        }
+        if (fallbackVmConnectMenuItem is not null)
+        {
+            fallbackVmConnectMenuItem.Visibility = state.Options.PlatformId == "hyperv" ? Visibility.Visible : Visibility.Collapsed;
+            fallbackVmConnectMenuItem.IsEnabled = !string.IsNullOrEmpty(state.VmId) && !connectingConsole && !shuttingDownVm;
         }
         var showOobeBanner = state.Options.PlatformId == "hyperv" && !string.IsNullOrEmpty(state.VmId) &&
             !state.Completed.Contains("guest-ready") && (busy || state.Completed.Contains("windows-started"));
@@ -1079,6 +1330,7 @@ public sealed partial class SetupWindow
         {
             desktopFinish.Visibility = showFinish ? Visibility.Visible : Visibility.Collapsed;
             desktopFinish.IsEnabled = !busy && !recoveringDisplay;
+            desktopFinish.Content = IsProtectionReadyForFinish() ? "完成设置" : "去「安全验真」";
         }
         if (desktopFinishHint is not null)
         {

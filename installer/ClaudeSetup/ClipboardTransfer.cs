@@ -107,7 +107,7 @@ public sealed partial class SetupWindow
         nativeClipboardStatus = Text("", 11);
         var manual = new Expander
         {
-            Header = "手动传送纯文本", Foreground = Ink, Background = Surface,
+            Header = "手动传送纯文本", IsExpanded = state.Options.PlatformId == "hyperv", Foreground = Ink, Background = Surface,
             Content = new StackPanel
             {
                 Children =
@@ -136,6 +136,13 @@ public sealed partial class SetupWindow
         var visible = platformId is "virtualbox" or "hyperv";
         nativeClipboardButton.Visibility = nativeClipboardStatus.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (!visible) return;
+        if (platformId == "hyperv" && (hyperVDesktopMode is HyperVDesktopMode.EmbeddedRdp or HyperVDesktopMode.StandaloneRdp ||
+            HyperVRdpDisplayGeometry.ShouldUseRouteB("hyperv", state.Completed.Contains("guest-ready"), explicitHyperVFallbackToA)))
+        {
+            nativeClipboardButton.Visibility = Visibility.Collapsed;
+            nativeClipboardStatus.Text = status ?? "B 路线基本控制台已保持磁盘、设备与文件剪贴板隔离（不改宿主全局增强会话）。请直接使用下方「手动传送纯文本」双向复制粘贴。";
+            return;
+        }
         var allowed = WantsNativeClipboard(state);
         nativeClipboardButton.Content = allowed ? "关闭双向剪贴板" : "启用双向剪贴板";
         nativeClipboardStatus.Text = status ?? (platformId == "hyperv"

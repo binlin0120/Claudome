@@ -482,6 +482,8 @@ public sealed partial class SetupWindow
         MarkSection(value);
         ApplySectionSurfaceMode(value);
         SetDesktopSidebar(value==7);
+        if (shellHeading is not null && !desktopFullscreen)
+            shellHeading.Visibility = value == 7 ? Visibility.Collapsed : Visibility.Visible;
         subtitle.Visibility = value == 7 ? Visibility.Collapsed : Visibility.Visible;
         main.Children.Clear(); steps.Visibility = Visibility.Collapsed; footer.Visibility = Visibility.Collapsed;
         banner.Text = mediaBusy ? "⬇ 后台正在准备 Windows 镜像 · 您可先配置网络节点或账号资料" : "资料保存在本机，随时可以回来继续。";

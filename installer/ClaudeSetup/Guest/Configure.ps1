@@ -4,7 +4,7 @@ $ErrorActionPreference='Stop'
 $progressPreference='SilentlyContinue'
 if([IO.Path]::GetFileName($PayloadPath) -cnotmatch '^payload-([0-9a-f]{32})\.json$'){exit 2}
 $runId=$Matches[1]
-$report=[ordered]@{schema=2;runId=$runId;vmId='';workspaceId='';pendingActions=@();clashConfigured=$false;clashServiceRunning=$false;browserRuntimePassed=$false;browserReopenPassed=$false;translationPassed=$false;browserProfileConfigured=$false;browserWindowOpened=$false;softwareInstalled=$false;regionConfigured=$false;networkConfigured=$false;networkPassed=$false;outagePassed=$false;browserAcceptance='needs-user-action';code='NOT_COMPLETED';step='核对来宾身份';installerExitCode=$null;traceTlsPath='';traceComparison='';bootUtc='';clashRuntimePassed=$false;runtimeCode='';runtimeMismatchDetail='';exitCode='';dnsCode='';outageCode='';outageTested=$false;browserExitPassed=$false}
+$report=[ordered]@{schema=2;runId=$runId;vmId='';workspaceId='';pendingActions=@();clashConfigured=$false;clashServiceRunning=$false;browserRuntimePassed=$false;browserReopenPassed=$false;translationPassed=$false;browserProfileConfigured=$false;browserWindowOpened=$false;softwareInstalled=$false;regionConfigured=$false;networkConfigured=$false;networkPassed=$false;outagePassed=$false;browserAcceptance='needs-user-action';code='NOT_COMPLETED';step='核对来宾身份';installerExitCode=$null;traceTlsPath='';traceComparison='';bootUtc='';clashRuntimePassed=$false;runtimeCode='';runtimeMismatchDetail='';exitCode='';dnsCode='';outageCode='';outageStage='';outageBlockedVerified=$false;outageRecoveryVerified=$false;outageTested=$false;browserExitPassed=$false}
 $root='C:\ProgramData\ClaudeEnvironment'
 $reportPath=Join-Path (Split-Path $PayloadPath) ('guest-result-'+$runId+'.json')
 $useChildReport=$false
@@ -189,10 +189,18 @@ try {
             if($report.browserProfileConfigured){try{$report.browserExitPassed=[bool](Test-AdsBrowserExit (Read-OwnedBrowserId))}catch{}}
             if($payload.testOutage -and $report.browserProfileConfigured){
                 $report.outageTested=$true
-                try{$report.outagePassed=[bool](Test-NetworkOutage (Read-OwnedBrowserId))}
+                try{
+                    $report.outagePassed=[bool](Test-NetworkOutage (Read-OwnedBrowserId))
+                    $report.outageStage=[string]$script:LastOutageStage
+                    $report.outageBlockedVerified=[bool]$script:LastOutageBlockedVerified
+                    $report.outageRecoveryVerified=[bool]$script:LastOutageRecoveryVerified
+                }
                 catch{
+                    $report.outageStage=[string]$script:LastOutageStage
+                    $report.outageBlockedVerified=[bool]$script:LastOutageBlockedVerified
+                    $report.outageRecoveryVerified=[bool]$script:LastOutageRecoveryVerified
                     $report.outageCode=if($_.Exception.Message -eq 'OUTAGE_UNVERIFIED'){'UNVERIFIED'}else{'FAILED'}
-                    try{Assert-ClashRuntime;Assert-ExpectedTrace (Trace-Request)}catch{$report.networkPassed=$false;$report.outageCode='FAILED'}
+                    try{Wait-ClashRecoveryReady 15;Assert-ExpectedTrace (Trace-Request)}catch{$report.networkPassed=$false;$report.outageCode='FAILED'}
                     Add-Pending '断线与恢复检查未通过' @('保存虚拟机中的在线工作后，使用助手的断线与恢复检查。桌面请求和同一专用浏览器都必须断网，并在恢复后再次核对出口。') 'outage-validation'}
             }
         }

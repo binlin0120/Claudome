@@ -935,6 +935,54 @@ Check 'clash-runtime-settings-mismatch-reports-sanitized-8-field-diff-without-se
     Assert-Case (-not $joined.Contains('SECRET_MODE_TOKEN') -and -not $joined.Contains('SENSITIVE_CUSTOM') -and -not $joined.Contains('SUPER-SECRET') -and -not $joined.Contains('secret.sub.example'))
 }
 
+Check 'outage-test-retries-transient-recovery-and-requires-both-block-and-recovery-segments' {
+    $auditPath = Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\NetworkAudit.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($auditPath, [ref]$null, [ref]$null)
+    foreach ($fnName in @('Wait-ClashRecoveryReady', 'Test-NetworkOutage')) {
+        $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true) | Select-Object -First 1
+        Assert-Case ($null -ne $fn)
+        . ([scriptblock]::Create($fn.Extent.Text))
+    }
+
+    $script:coreStopped = $false
+    $script:runtimeCalls = 0
+    $script:mockDirectProbe = 'DENIED'
+    try {
+        function Start-Sleep([int]$Seconds = 0, [int]$Milliseconds = 0) { }
+        function Trace-Request { if ($script:coreStopped) { throw 'BLOCKED' }; return @{ ip = '1.2.3.4'; loc = 'KR' } }
+        function Read-GuestTrace { return Trace-Request }
+        function Assert-ExpectedTrace($t) { if ($t.loc -ne 'KR') { throw 'EXIT_MISMATCH' } }
+        function Stop-Core { $script:coreStopped = $true }
+        function Start-Core { $script:coreStopped = $false; $script:runtimeCalls = 0 }
+        function Assert-CoreStopped { if (-not $script:coreStopped) { throw 'CORE_RESTARTED_DURING_OUTAGE' } }
+        function Test-PhysicalProbe { return $script:mockDirectProbe }
+        function Assert-ClashRuntime {
+            $script:runtimeCalls++
+            if ($script:runtimeCalls -lt 3) { throw 'CLASH_CONTROLLER_UNAVAILABLE' }
+        }
+
+        # 1. Transient controller unavailability after Start-Core recovers via bounded retry -> both segments pass.
+        $passed = Test-NetworkOutage ''
+        Assert-Case ($passed -eq $true -and $script:runtimeCalls -eq 3 -and $script:LastOutageStage -eq 'passed' -and $script:LastOutageBlockedVerified -eq $true -and $script:LastOutageRecoveryVerified -eq $true)
+
+        # 2. Physical probe BYPASS during outage fails strictly with stage=outage-block-check even if recovery passes.
+        $script:mockDirectProbe = 'BYPASS'
+        $threwBypass = $false
+        try { $null = Test-NetworkOutage '' } catch { $threwBypass = ($_.Exception.Message -eq 'OUTAGE_PROTECTION_FAILED') }
+        Assert-Case ($threwBypass -and $script:LastOutageStage -eq 'outage-block-check' -and $script:LastOutageBlockedVerified -eq $false)
+
+        # 3. Physical probe UNVERIFIED throws OUTAGE_UNVERIFIED with stage=outage-unverified.
+        $script:mockDirectProbe = 'UNVERIFIED'
+        $threwUnverified = $false
+        try { $null = Test-NetworkOutage '' } catch { $threwUnverified = ($_.Exception.Message -eq 'OUTAGE_UNVERIFIED') }
+        Assert-Case ($threwUnverified -and $script:LastOutageStage -eq 'outage-unverified' -and $script:LastOutageBlockedVerified -eq $false)
+    } finally {
+        foreach ($mockFn in @('Start-Sleep','Trace-Request','Read-GuestTrace','Assert-ExpectedTrace','Stop-Core','Start-Core','Assert-CoreStopped','Test-PhysicalProbe','Assert-ClashRuntime')) {
+            Remove-Item ("function:$mockFn") -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # Call the real .NET file API directly; the mock registry provider remains scoped
 # to this test process, not the user's PowerShell session or machine.
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null

@@ -1120,15 +1120,30 @@ public sealed partial class SetupWindow
         var fullscreenRestored = !desktopFullscreen &&
             !desktopTopBarCollapsed &&
             shellTopBar?.Visibility == Visibility.Visible &&
-            shellHeading?.Visibility == Visibility.Visible &&
+            shellHeading?.Visibility == Visibility.Collapsed &&
             shellBottomBar?.Visibility == Visibility.Visible;
+        state.Completed.Add("guest-ready");
+        state.Completed.Add("software");
+        state.SetupFinished = false;
+        UpdateDesktopActivity();
+        UpdateNativeClipboardControl();
+        var finishLinksToSafetyWhenIncomplete = desktopFinish?.Visibility == Visibility.Visible &&
+            desktopFinish.Content as string == "去「安全验真」";
+        var routeBClipboardSafe = nativeClipboardButton?.Visibility == Visibility.Collapsed &&
+            nativeClipboardStatus?.Text.Contains("手动传送纯文本") == true;
+        state.Completed.Remove("guest-ready");
+        state.Completed.Remove("software");
         state.PendingActions.RemoveAll(a => a.Id == "resume-network");
         state.VmId = savedVmForP1;
         state.Options = savedOptsSnapshot;
-        var desktop16By9UiOk = expandedAspectOk && resumeBannerOk && collapsedOk && fullscreenEntered && fullscreenRestored;
+        var desktop16By9UiOk = expandedAspectOk && resumeBannerOk && collapsedOk && fullscreenEntered &&
+            fullscreenRestored && finishLinksToSafetyWhenIncomplete && routeBClipboardSafe;
         if (!desktop16By9UiOk) failed++;
-        rows.Add(new { name = "desktop-16by9-frame-collapsible-topbar-embedded-fullscreen-and-resume-network-banner", passed = desktop16By9UiOk, expandedAspectOk, resumeBannerOk, collapsedOk, fullscreenEntered, fullscreenRestored });
+        rows.Add(new { name = "desktop-16by9-frame-collapsible-topbar-embedded-fullscreen-and-resume-network-banner", passed = desktop16By9UiOk, expandedAspectOk, resumeBannerOk, collapsedOk, fullscreenEntered, fullscreenRestored, finishLinksToSafetyWhenIncomplete, routeBClipboardSafe });
         Navigate(0);
+        var headingRestoredOnOverview = shellHeading?.Visibility == Visibility.Visible;
+        if (!headingRestoredOnOverview) failed++;
+        rows.Add(new { name = "desktop-hides-redundant-heading-and-restores-on-other-sections", passed = headingRestoredOnOverview });
 
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);
