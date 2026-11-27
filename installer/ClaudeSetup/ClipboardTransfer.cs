@@ -172,7 +172,11 @@ public sealed partial class SetupWindow
         try
         {
             var backend = BoundaryRuntime.BackendFor(target) as HyperV;
-            if (backend is null || !backend.HasManagementConnection || !ReferenceEquals(state, target)) return;
+            if (backend is null || !backend.HasManagementConnection || !ReferenceEquals(state, target))
+            {
+                UpdateNativeClipboardControl("外层受控网络尚未激活：请先点「一键连接网络」激活受控通道后，直贴纯文本剪贴板将自动连通（也可先用下方手动传送纯文本）。");
+                return;
+            }
             var credentials = new Secrets { VmPassword = CurrentGuestPassword(), VmMicrosoftAddress = guestMicrosoftAddress };
             bool HasLogin() => target.Options.HasUsableGuestPassword(credentials.VmPassword) &&
                 (!target.Options.UsesMicrosoftGuestAccount || SetupOptions.IsMicrosoftGuestAddress(credentials.VmMicrosoftAddress));
@@ -181,11 +185,19 @@ public sealed partial class SetupWindow
                 credentials.VmPassword = saved.VmPassword;
                 credentials.VmMicrosoftAddress = saved.VmMicrosoftAddress;
             }
-            if (!HasLogin()) return;
+            if (!HasLogin())
+            {
+                UpdateNativeClipboardControl("缺少已保存的虚拟机登录密码，请先同步虚拟机账号密码以自动启用直贴纯文本剪贴板。");
+                return;
+            }
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
             await HyperVClipboardDirectSync.LaunchGuestAgentAsync(backend, target, credentials, serviceId, key, generation, timeout.Token);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            if (ReferenceEquals(state, target))
+                UpdateNativeClipboardControl($"来宾直贴剪贴板代理启动未完成（{Redaction.SafeError(ex)}），可使用下方手动传送纯文本。");
+        }
         finally { Interlocked.Exchange(ref hyperVDirectClipboardLaunching, 0); }
     }
 

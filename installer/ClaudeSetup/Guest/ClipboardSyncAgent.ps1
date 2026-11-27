@@ -43,19 +43,10 @@ if ($Interactive) {
     $keyBytes = [Convert]::FromBase64String([string]$cfg.key)
     $generation = [long]$cfg.generation
 
-    Add-Type -Language CSharp -ReferencedAssemblies @(
-        'System.Runtime',
-        'System.Net.Sockets',
-        'System.Net.Primitives',
-        'System.Security.Cryptography',
-        'System.Windows.Forms',
-        'System.Drawing',
-        'System.ComponentModel.Primitives',
-        'System.Memory',
-        'System.Buffers'
-    ) -TypeDefinition @'
+    Add-Type -Language CSharp -TypeDefinition @'
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -64,19 +55,62 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 
 public static class ClaudomeGuestClipboardBridge
 {
-    private const int WM_CLIPBOARDUPDATE = 0x031D;
+    private const uint WM_CLIPBOARDUPDATE = 0x031D;
+    private const uint WM_APP_APPLY = 0x8001;
+    private const uint WM_APP_QUIT = 0x8002;
     private const uint CF_UNICODETEXT = 13;
     private const uint CF_HDROP = 15;
     private const uint GMEM_MOVEABLE = 0x0002;
     private const int MaxTextLength = 16384;
     private const int MaxPayloadBytes = 65536;
+    private static readonly IntPtr HWND_MESSAGE = new IntPtr(-3);
     private static readonly byte[] Magic = Encoding.ASCII.GetBytes("CLDCLP01");
     private static readonly Guid ParentVmId = new Guid("a42e7cda-d03f-480c-9cc2-a4de20abb878");
 
+    private delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct WNDCLASSEXW
+    {
+        public uint cbSize;
+        public uint style;
+        public WndProcDelegate lpfnWndProc;
+        public int cbClsExtra;
+        public int cbWndExtra;
+        public IntPtr hInstance;
+        public IntPtr hIcon;
+        public IntPtr hCursor;
+        public IntPtr hbrBackground;
+        public string lpszMenuName;
+        public string lpszClassName;
+        public IntPtr hIconSm;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public int pt_x;
+        public int pt_y;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string lpModuleName);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern ushort RegisterClassExW(ref WNDCLASSEXW lpwcx);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern IntPtr CreateWindowExW(uint exStyle, string className, string windowName, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool DestroyWindow(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr DefWindowProcW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetMessageW(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+    [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG lpMsg);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr DispatchMessageW(ref MSG lpMsg);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern void PostQuitMessage(int nExitCode);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool AddClipboardFormatListener(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
@@ -105,39 +139,6 @@ public static class ClaudomeGuestClipboardBridge
         public override AddressFamily AddressFamily => (AddressFamily)34;
         public override SocketAddress Serialize() => addr;
         public override EndPoint Create(SocketAddress socketAddress) => this;
-    }
-
-    private sealed class ListenerWindow : Form
-    {
-        private readonly Action onUpdate;
-        public ListenerWindow(Action onUpdate)
-        {
-            this.onUpdate = onUpdate;
-            ShowInTaskbar = false;
-            WindowState = FormWindowState.Minimized;
-            FormBorderStyle = FormBorderStyle.None;
-            Opacity = 0;
-            Width = 1;
-            Height = 1;
-        }
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            AddClipboardFormatListener(Handle);
-        }
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            try { RemoveClipboardFormatListener(Handle); } catch { }
-            base.OnHandleDestroyed(e);
-        }
-        protected override void WndProc(ref Message m)
-        {
-            if (m.Msg == WM_CLIPBOARDUPDATE)
-            {
-                try { onUpdate(); } catch { }
-            }
-            base.WndProc(ref m);
-        }
     }
 
     private static string HashText(string text) =>
@@ -281,37 +282,91 @@ public static class ClaudomeGuestClipboardBridge
 
         var sendLock = new object();
         var stateLock = new object();
+        var incoming = new ConcurrentQueue<string>();
         uint lastObservedSeq = GetClipboardSequenceNumber();
         uint lastAppliedSeq = 0;
         string lastAppliedHash = "";
         DateTime lastAppliedUtc = DateTime.MinValue;
         long outSeq = 0;
+        IntPtr hwnd = IntPtr.Zero;
 
-        using var form = new ListenerWindow(() =>
+        WndProcDelegate proc = (h, msg, wp, lp) =>
         {
-            uint seq = GetClipboardSequenceNumber();
-            string text;
-            if (!TryReadPlainText(out text)) return;
-            string hash = HashText(text);
-            bool shouldSend;
-            lock (stateLock)
+            if (msg == WM_CLIPBOARDUPDATE)
             {
-                if (seq != 0 && seq == lastObservedSeq) return;
-                lastObservedSeq = seq;
-                if (seq != 0 && seq == lastAppliedSeq) return;
-                if (!string.IsNullOrEmpty(lastAppliedHash) && hash == lastAppliedHash && (DateTime.UtcNow - lastAppliedUtc) <= TimeSpan.FromSeconds(2))
-                    return;
-                shouldSend = true;
+                uint seq = GetClipboardSequenceNumber();
+                string text;
+                if (TryReadPlainText(out text))
+                {
+                    string hash = HashText(text);
+                    bool shouldSend = false;
+                    lock (stateLock)
+                    {
+                        if (seq == 0 || seq != lastObservedSeq)
+                        {
+                            lastObservedSeq = seq;
+                            if ((seq == 0 || seq != lastAppliedSeq) &&
+                                (string.IsNullOrEmpty(lastAppliedHash) || hash != lastAppliedHash || (DateTime.UtcNow - lastAppliedUtc) > TimeSpan.FromSeconds(2)))
+                            {
+                                shouldSend = true;
+                            }
+                        }
+                    }
+                    if (shouldSend)
+                    {
+                        try { WriteFrame(stream, sendLock, 1, Interlocked.Increment(ref outSeq), generation, text); }
+                        catch { PostQuitMessage(0); }
+                    }
+                }
+                return IntPtr.Zero;
             }
-            if (shouldSend)
+            if (msg == WM_APP_APPLY)
             {
-                try { WriteFrame(stream, sendLock, 1, Interlocked.Increment(ref outSeq), generation, text); }
-                catch { try { form.BeginInvoke((Action)(() => form.Close())); } catch { } }
+                while (incoming.TryDequeue(out var text))
+                {
+                    var hash = HashText(text);
+                    lock (stateLock)
+                    {
+                        lastAppliedHash = hash;
+                        lastAppliedUtc = DateTime.UtcNow;
+                    }
+                    if (TryWritePlainText(text))
+                    {
+                        uint newSeq = GetClipboardSequenceNumber();
+                        lock (stateLock)
+                        {
+                            lastAppliedSeq = newSeq;
+                            lastObservedSeq = newSeq;
+                            lastAppliedHash = hash;
+                            lastAppliedUtc = DateTime.UtcNow;
+                        }
+                    }
+                }
+                return IntPtr.Zero;
             }
-        });
+            if (msg == WM_APP_QUIT)
+            {
+                PostQuitMessage(0);
+                return IntPtr.Zero;
+            }
+            return DefWindowProcW(h, msg, wp, lp);
+        };
 
-        form.Shown += (_, _) => form.Hide();
-        Task.Run(() =>
+        var className = "ClaudomeClipMsg_" + Guid.NewGuid().ToString("N");
+        var hInst = GetModuleHandleW(null);
+        var wc = new WNDCLASSEXW
+        {
+            cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
+            lpfnWndProc = proc,
+            hInstance = hInst,
+            lpszClassName = className
+        };
+        if (RegisterClassExW(ref wc) == 0) throw new InvalidOperationException("CLIPBOARD_WNDCLASS_FAILED");
+        hwnd = CreateWindowExW(0, className, "", 0, 0, 0, 0, 0, HWND_MESSAGE, IntPtr.Zero, hInst, IntPtr.Zero);
+        if (hwnd == IntPtr.Zero) throw new InvalidOperationException("CLIPBOARD_WND_FAILED");
+
+        AddClipboardFormatListener(hwnd);
+        var reader = Task.Run(() =>
         {
             try
             {
@@ -335,39 +390,34 @@ public static class ClaudomeGuestClipboardBridge
                     if (frameGen != generation) continue;
                     var text = Encoding.UTF8.GetString(payload, 16, len - 16);
                     if (string.IsNullOrEmpty(text) || text.Length > MaxTextLength || text.IndexOf('\0') >= 0) continue;
-                    var hash = HashText(text);
-                    if (!form.IsDisposed && form.IsHandleCreated)
-                    {
-                        form.BeginInvoke((Action)(() =>
-                        {
-                            lock (stateLock)
-                            {
-                                lastAppliedHash = hash;
-                                lastAppliedUtc = DateTime.UtcNow;
-                            }
-                            if (TryWritePlainText(text))
-                            {
-                                uint newSeq = GetClipboardSequenceNumber();
-                                lock (stateLock)
-                                {
-                                    lastAppliedSeq = newSeq;
-                                    lastObservedSeq = newSeq;
-                                    lastAppliedHash = hash;
-                                    lastAppliedUtc = DateTime.UtcNow;
-                                }
-                            }
-                        }));
-                    }
+                    incoming.Enqueue(text);
+                    PostMessageW(hwnd, WM_APP_APPLY, IntPtr.Zero, IntPtr.Zero);
                 }
             }
             catch { }
             finally
             {
-                try { if (!form.IsDisposed && form.IsHandleCreated) form.BeginInvoke((Action)(() => form.Close())); } catch { }
+                PostMessageW(hwnd, WM_APP_QUIT, IntPtr.Zero, IntPtr.Zero);
             }
         });
 
-        Application.Run(form);
+        try
+        {
+            MSG m;
+            while (GetMessageW(out m, IntPtr.Zero, 0, 0) > 0)
+            {
+                TranslateMessage(ref m);
+                DispatchMessageW(ref m);
+            }
+        }
+        finally
+        {
+            RemoveClipboardFormatListener(hwnd);
+            DestroyWindow(hwnd);
+            GC.KeepAlive(proc);
+            try { socket.Shutdown(SocketShutdown.Both); } catch { }
+            try { reader.Wait(500); } catch { }
+        }
     }
 }
 '@

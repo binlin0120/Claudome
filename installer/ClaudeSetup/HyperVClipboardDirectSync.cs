@@ -268,6 +268,7 @@ internal sealed class HyperVClipboardDirectSync : IAsyncDisposable
             generation
         }), ".json");
 
+        await ((IVmBackend)backend).EnsureGuestDirectory(state, secrets, guestDir, token);
         await backend.CopyTo(state, secrets, scriptFile.FileName, guestScript, token);
         await backend.CopyTo(state, secrets, bootFile.FileName, guestBootstrap, token);
         await backend.GuestRun(state, secrets, guestPwsh,

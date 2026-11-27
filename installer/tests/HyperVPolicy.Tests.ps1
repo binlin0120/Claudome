@@ -998,6 +998,12 @@ Check 'clipboard-sync-agent-parses-and-enforces-unicode-only-isolation' {
     Assert-Case ($raw.Contains('CLDCLP01'))
     Assert-Case ($raw.Contains('a42e7cda-d03f-480c-9cc2-a4de20abb878'))
     Assert-Case ($raw.Contains('[IO.File]::Delete($bootstrapFile)'))
+    Assert-Case (-not $raw.Contains('System.Windows.Forms'))
+    # Compile the embedded C# bridge directly in pwsh 7 to guarantee zero assembly/type errors on guest.
+    $m = [regex]::Match($raw, "(?s)Add-Type -Language CSharp -TypeDefinition @'\r?\n(.*?)\r?\n'@")
+    Assert-Case ($m.Success)
+    $uniqueCode = $m.Groups[1].Value.Replace('ClaudomeGuestClipboardBridge', 'ClaudomeGuestClipboardBridgeTest_' + [guid]::NewGuid().ToString('N'))
+    Add-Type -Language CSharp -TypeDefinition $uniqueCode
 }
 
 Check 'hyperv-worker-clipboard-service-path-verifies-task-scoped-element-name' {
