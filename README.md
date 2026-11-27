@@ -1,17 +1,22 @@
-# Claudome · Claude 独立环境
+# Claudome · Claude 独立安全工作区
 
-> **最新动态（2026-11-23）：** 仓库已正式命名为 **Claudome**（原名 `claude-environment-deploy` / `virtual-pc-setup`）。
-> - **Windows 桌面端（`v0.4.10`）**：前往 [GitHub Releases](https://github.com/binlin0120/Claudome/releases) 下载 `Claudome_*_win-x64.zip`，解压后直接双击 `Claudome.exe` 启动（免装 Go / .NET / Codex）；首页「概览」内置「检查在线更新 / 从本地 ZIP 更新」与「存储与备份清理」管理页（双端事务登记、三件完整回退组保护与首启 SHA-256 核验恢复）。
+> **最新动态（2026-11-27）：Windows 正式发布 `Claudome Hyper-V 专线版 v0.5.0`！**
+> - **Windows 桌面端发版政策**：Windows 后续**只维护和发布 Hyper-V 专线版**（面向 Windows 11 x64 专业版 / 企业版 / 教育版，内置硬件隔离 B 路线 16:9 连续缩放内嵌桌面、无弹窗纯文本直贴剪贴板、一键四维安全验真与重启持久复核）。Windows 家庭版与旧多线路版停止发功能更新，但保留 `v0.4.10` 及 `/releases/latest/download/latest.json` 供原环境继续使用或回退。
+> - **全新安装**：前往 [Claudome Hyper-V v0.5.0 发布页](https://github.com/binlin0120/Claudome/releases/tag/hyperv-v0.5.0) 下载 `Claudome-HyperV_0.5.0_win-x64.zip`，完整解压到**单独的本地目录**，双击 `Claudome.exe` 启动（免装 Go / .NET / Codex）。
+> - **旧多线路版（如 `v0.4.10`）一键迁移到专线版**：已发布的 `v0.4.10` 客户端本身不含迁移按钮。请先下载并完整解压 `Claudome-HyperV_0.5.0_win-x64.zip` 到**单独目录**，运行解压后的**新版 `Claudome.exe`**，在概览页或顶部「设置」点击 **「从旧版升级到专线版」**（或命令行运行新版 `Claudome.exe --migrate-legacy`），再选择旧版程序所在目录：
+>   - **合格宿主（Win11 专业/企业/教育版）**：先完整备份旧版再原地升级；已有 Hyper-V 任务校验身份后无缝续用；已有 VirtualBox / VMware 任务的磁盘、快照与记录完整保留，并可通过备份目录中的独立多线路版（`legacy-multi-route-backup-*\Claudome.exe`）继续打开。
+>   - **Windows 家庭版或其他不合格宿主**：在任何文件替换前自动停止并说明原因，零改动保留旧版与原任务。
+> - **独立在线自更新**：Hyper-V 专线版使用专属更新清单 `hyperv-latest.json`（与旧客户端公共 `latest.json` 严格隔离），后续可在软件内点击「检查在线更新」或「从本地 ZIP 更新」原地升级。
 > - **Mac 跨平台桌面端开发中**：源码已拆分跨平台核心 [Claudome.Core](installer/Claudome.Core/Claudome.Core.csproj)、`darwin/arm64` & `darwin/amd64` Go 网关及 [Claudome.Mac](installer/Claudome.Mac/Claudome.Mac.csproj) Avalonia 控制台骨架；待补全来宾一键编排并完成 Mac 真机联调后再发布 Mac 成品。
 > - **V11 Agent 辅助教程与脚本**：下方原有的 V11 中文填写模板、Codex Skill 及测试脚本继续完整保留（路径仍兼容 `skills/claude-environment-deploy/`）。先读 [第11版使用方法](docs/第11版使用方法.md) 与 [Claudome 开发说明](installer/README.md)。
 
 > **执行提醒：** 若采用 V11 脚本方式，可把本仓库交给 Codex、DeepSeek Harness 等 Agent（Claude / Claude Code 除外），严格按本包脚本及配套步骤执行，不自行更换方案、跳过步骤或增加无关任务。
 
-`Claudome`（原仓库名 `claude-environment-deploy` / `virtual-pc-setup`）提供双层网络隔离下的独立 Windows 环境搭建方案，用来配置网络、AdsPower 专用浏览器和所选 Claude 客户端。Windows 桌面端已接入 VirtualBox、Hyper-V 与 VMware Workstation 三条路线（另有 V11 Codex 辅助部署教程与脚本）；Mac 端按芯片提供 Fusion / UTM 教程与正在推进中的 `Claudome.Mac` 桌面端源码。
+`Claudome`（原仓库名 `claude-environment-deploy` / `virtual-pc-setup`）提供双层网络隔离下的独立 Windows 环境搭建方案，用来配置网络、AdsPower 专用浏览器和所选 Claude 客户端。Windows 桌面端当前主力维护 **Hyper-V 专线版（`v0.5.0`）**，历史多线路版（VirtualBox / Hyper-V / VMware Workstation，最后兼容版 `v0.4.10`）继续保留下载与旧任务运行；另有 V11 Codex 辅助部署教程与脚本，以及推进中的 `Claudome.Mac` 桌面端源码。
 
-**交付形态说明：** Windows x64 桌面端安装包已在 [Releases](https://github.com/binlin0120/Claudome/releases) 发布 **`v0.4.10`**（本版修复 Hyper-V 虚拟机初始化与暂停续装，并细化失败提示。其中 VirtualBox 路线已完成多轮实机与 0.4.5 修复验收；Hyper-V 已于 `v0.4.6` 放开双向剪贴板开关并保留来宾磁盘/设备隔离策略；`v0.4.9` 补齐 Windows & Mac 存储/备份统一清理控制台与事务级原地更新首启核验/本地恢复闭环，三平台完整新机闭环及 Mac 路线仍在持续完善验收中）。Claude 模型仍在服务商处运行。
+**交付形态说明：** Windows 11 x64 Hyper-V 专线版已在 [Releases](https://github.com/binlin0120/Claudome/releases/tag/hyperv-v0.5.0) 发布 **`hyperv-v0.5.0`**（完成实机 1080p B 路线内嵌/独立桌面、双向纯文本剪贴板直贴、一键四维安全验真、断线阻断恢复、正常重启持久复核及真实 `v0.4.10` 原地升级/失败回退验收）；历史多线路版 `v0.4.10` 保留于 [v0.4.10 Release](https://github.com/binlin0120/Claudome/releases/tag/v0.4.10) 供 Windows 家庭版及旧 VirtualBox / VMware 任务使用。Claude 模型仍在服务商处运行。
 
-**开源整理与最新基线：2026-11-22（V11 基线 2026-11-15）；许可证：[MIT](LICENSE)。** 桌面端详情见 [Claudome 开发说明](installer/README.md)；V11 中文流程首次使用读 [用户须知](01_用户须知.md)，准备工具读 [采购清单](02_采购清单与工具入口.md)，历史核验见 [首次发布核验](docs/发布核验_2026-11-12.md)。
+**开源整理与最新基线：2026-11-27（Hyper-V 专线版 `0.5.0`；V11 脚本基线 2026-11-15）；许可证：[MIT](LICENSE)。** 桌面端详情见 [Claudome 开发说明](installer/README.md)；V11 中文流程首次使用读 [用户须知](01_用户须知.md)，准备工具读 [采购清单](02_采购清单与工具入口.md)，历史核验见 [首次发布核验](docs/发布核验_2026-11-12.md)。
 
 V11 本次合并与检查见 [2026-11-15 更新与核验](docs/更新与核验_2026-11-15.md)。此前更新见 [2026-11-14 更新与核验](docs/更新与核验_2026-11-14.md)。配置完成后其他软件无法联网，可检查后 [按软件补充必要规则](skills/claude-environment-deploy/references/Clash与来宾网络配置.md#配置后其他软件无法联网按需补充规则)。
 
@@ -206,9 +211,14 @@ skills/claude-environment-deploy/SKILL.md，按 Skill 帮我部署。
 
 若限制来宾只访问选定服务，https://ip.net.coffee/claude/ 仍作为本套流程明确的浏览器检测例外；必须保留同一 AdsPower 窗口先检测、再打开 Claude 的顺序。Claude trace 请求只做连通与出口检查，第三方归属查询放主机；严格规则阻止检测或维护时先报告，不擅自扩大允许范围。
 
-## 草稿状态和后续验证
+## 版本状态与开源边界
 
-本仓库现命名为 `Claudome`（原名 `claude-environment-deploy`），Windows x64 桌面端已在 [Releases](https://github.com/binlin0120/Claudome/releases) 发布 `v0.4.5`，V11 教程及 Mac 路线仍在持续测试与完善中。原创文档和源码采用 [MIT 许可](LICENSE)，第三方软件、标识及交流群图片的范围见 [NOTICE](NOTICE.md)。公开仓库只放源码、教程和通用脚本，Windows 镜像、商业安装包、私有日志和账号配置都留在自己电脑上。
+本仓库现命名为 `Claudome`（原名 `claude-environment-deploy`）：
+- **Windows 11 x64 Hyper-V 专线版（主力维护）**：已在 [Releases](https://github.com/binlin0120/Claudome/releases/tag/hyperv-v0.5.0) 发布 `hyperv-v0.5.0`（支持 Win11 专业版 / 企业版 / 教育版，独立更新通道 `hyperv-latest.json`，内置从旧多线路版一键备份并原地升级向导）。
+- **Windows 历史多线路版（维护冻结）**：保留 [v0.4.10](https://github.com/binlin0120/Claudome/releases/tag/v0.4.10) 与 `/releases/latest/download/latest.json`，供 Windows 家庭版及旧 VirtualBox / VMware 任务继续使用或回退。
+- **V11 教程脚本与 Mac 路线**：继续保留并按实机验收进度持续完善。
+
+原创文档和源码采用 [MIT 许可](LICENSE)，第三方软件、标识及交流群图片的范围见 [NOTICE](NOTICE.md)。公开仓库只放源码、教程和通用脚本，Windows 镜像、商业安装包、私有日志和账号配置都留在自己电脑上。
 
 致谢是感谢作者分享方法；这份教程由我们自己整理，遇到问题也由我们自己核对和维护。
 

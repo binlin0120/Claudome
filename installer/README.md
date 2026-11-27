@@ -1,10 +1,16 @@
-# Claudome · Claude 独立环境
+# Claudome · Claude 独立安全工作区
 
-Claudome 是 Claude 与 Dome（穹顶）的组合名，寓意为 Claude 提供一个独立空间。Windows 程序为 `Claudome.exe`，开发者为李诗恩、林琛，交流群 1129410798。
+Claudome 是 Claude 与 Dome（穹顶）的组合名，寓意为 Claude 提供一个独立安全空间。Windows 程序为 `Claudome.exe`，开发者为李诗恩、林琛，交流群 1129410798。
 
-保留 Windows 来宾、Clash Verge Rev、TUN、来宾防火墙和 AdsPower 的原有部署模式。Windows 11 x64 安装器已接入 VirtualBox、Hyper-V、VMware Workstation 三条部署路径，共用资源校验、所选节点、断点继续及结果回读。客户无需 Codex、Go 或 .NET SDK。
+**Windows 11 x64 Hyper-V 专线版 `0.5.0`（2026-11-27，主力维护）** · [专线发布页](https://github.com/binlin0120/Claudome/releases/tag/hyperv-v0.5.0) · [全部发布记录](https://github.com/binlin0120/Claudome/releases)
 
-**Windows x64 `0.4.10`（2026-11-23）** · [下载与发布记录](https://github.com/binlin0120/Claudome/releases)
+- **发行政策**：Windows 后续只维护和发布 Hyper-V 专线版（Windows 11 x64 专业版 / 企业版 / 教育版），历史多线路版与 Windows 家庭版保留 `v0.4.10`（`/releases/latest/download/latest.json`）供原环境继续使用或回退。
+- **B 路线内嵌/独立桌面与直贴剪贴板**：内置 16:9 连续缩放内嵌桌面、独立窗口模式与原生 `VMConnect` 显式回退，支持无弹窗双向纯文本剪贴板同步（禁用磁盘/USB/设备重定向）。
+- **一键四维安全验真与重启持久复核**：顺序核验外层边界与来宾有效策略、出口、DoH/DNS 防旁路、断线阻断恢复以及正常重启持久复核。
+- **旧多线路版一键迁移**：下载解压新版 `Claudome-HyperV_0.5.0_win-x64.zip` 到单独目录后，运行新版 `Claudome.exe` 选择「从旧版升级到专线版」（或 `--migrate-legacy`），预检宿主机通过后完整备份旧版再原地升级；旧 VirtualBox / VMware 任务可通过备份目录中的独立多线路版继续打开。
+- **独立在线自更新**：专线版使用独立清单 `hyperv-latest.json`（与旧版 `latest.json` 严格隔离）。
+
+**Windows x64 历史多线路版 `0.4.10`（2026-11-23，维护冻结）** · [v0.4.10 发布页](https://github.com/binlin0120/Claudome/releases/tag/v0.4.10)
 
 - Hyper-V 首登初始化改为隐藏、非交互运行，显示来宾初始化阶段。暂停后可继续原任务，程序会检查初始化和 PowerShell.7 会话状态。
 - 资源传送增加完整性校验和阶段提示。网络组件可复用已核验的部署，替换失败时尝试恢复原组件。

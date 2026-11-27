@@ -1,9 +1,6 @@
 name: Build and Release Claudome Hyper-V
 
 on:
-  push:
-    tags:
-      - 'hyperv-v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -84,8 +81,8 @@ jobs:
 
             > **重要发行说明**：Windows 后续只维护和发布 Hyper-V 专线版；旧多线路版与 Windows 家庭版停止更新，但保留原 `releases/latest` 公共清单与历史安装包供原环境继续使用或回退。
 
-            1. 点击下方 **`${{ steps.pkg.outputs.zip_name }}`** 下载并完整解压到本地文件夹，双击 `Claudome.exe` 启动。
-            2. **旧多线路版用户一键迁移**：在软件概览页点击 **「升级到专线版」**（或运行 `Claudome.exe --migrate-legacy`），程序会先执行宿主机预检，在确认后完整备份原多线路版再原地升级：
+            1. 点击下方 **`${{ steps.pkg.outputs.zip_name }}`** 下载并完整解压到一个**单独的本地目录**，双击该目录中的 `Claudome.exe` 启动。
+            2. **旧多线路版用户一键迁移（已发布的 v0.4.10 客户端本身不含迁移按钮）**：请先将本版 `${{ steps.pkg.outputs.zip_name }}` 完整解压到单独目录，打开解压后的**新版 `Claudome.exe`**，在概览页或「设置」中选择 **「从旧版升级到专线版」**（命令行也可运行新版 `Claudome.exe --migrate-legacy`），再选择旧版程序所在目录，确认宿主机预检与完整备份后再原地升级：
                - **符合条件的宿主**：已有 Hyper-V 任务校验身份后无缝续用；已有 VirtualBox / VMware 任务的磁盘、快照与记录完整保留，并可通过备份目录中的独立多线路版继续打开。
                - **Windows 家庭版或其他不合格宿主**：在任何文件替换前停止并说明原因，零改动继续保留原版与原任务。
             3. **后续在线自更新**：Hyper-V 专线版使用独立更新清单 `hyperv-latest.json`（不与旧客户端 `latest.json` 混用），可在软件内点击 **「检查在线更新」** 或 **「从本地 ZIP 更新」** 原地升级。
