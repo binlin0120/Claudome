@@ -248,6 +248,13 @@ public static class DesktopRecoveryTests
             Assert(SetupWindow.ResolveLoadedTaskSection(awaitingVerify, canEnterDesktop: true) == 5, "installed unverified task must jump to safety verification");
             var unbuilt = new SessionState { VmId = "" };
             Assert(SetupWindow.ResolveLoadedTaskSection(unbuilt, canEnterDesktop: false) == 1, "unbuilt task must jump to wizard");
+
+            Assert(!Deployment.ShouldOpenNativeConsoleAfterRestart("hyperv", routeBConsoleActive: true),
+                "Hyper-V Route B restart verification must not launch competing VMConnect");
+            Assert(Deployment.ShouldOpenNativeConsoleAfterRestart("hyperv", routeBConsoleActive: false),
+                "Hyper-V explicit Route A fallback must retain VMConnect open after restart");
+            Assert(Deployment.ShouldOpenNativeConsoleAfterRestart("virtualbox", routeBConsoleActive: true),
+                "Non-Hyper-V platforms must retain native console open after restart");
         }));
         await check("route-b-direct-clipboard-protocol-unicode-only-isolation-and-loop-suppression", async () => {
             var busId = Guid.Parse("11111111-2222-3333-4444-555555555555");

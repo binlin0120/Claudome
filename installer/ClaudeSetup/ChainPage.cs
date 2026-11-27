@@ -148,14 +148,22 @@ public sealed partial class SetupWindow
     private async Task RunValidation(bool restart, bool outageTest)
     {
         var showResult = false;
+        var routeBActive = state.Options.PlatformId == "hyperv" &&
+            !explicitHyperVFallbackToA &&
+            (hyperVDesktopMode is HyperVDesktopMode.EmbeddedRdp or HyperVDesktopMode.StandaloneRdp ||
+             hyperVRdpHost?.IsConnected == true ||
+             standaloneRdpWindow is not null ||
+             ProductProfile.IsHyperVStandalone);
         await Perform(async (_, token) =>
         {
             if (!restart && !outageTest)
                 await Engine().ReadProtection(state, AppliedLogin(), token);
             else
-                await Engine().ValidateExisting(state, AppliedLogin(), restart, outageTest, token);
+                await Engine().ValidateExisting(state, AppliedLogin(), restart, outageTest, token, routeBConsoleActive: routeBActive);
             showResult = true;
         }, useSavedOptions: true);
+        if (restart && routeBActive && !closeAfterPause && hyperVRdpHost?.IsConnected != true && standaloneRdpWindow is null)
+            _ = ConnectDesktop(true);
         if (showResult && !closeAfterPause) Notice(ProtectionSummary());
     }
 }

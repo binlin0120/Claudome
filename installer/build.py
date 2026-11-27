@@ -105,19 +105,25 @@ def desktop_notices(project, obj_dir):
         output.write("\n\n=== YamlDotNet 18.1.0 ===\n" + license_file.read_text(encoding="utf-8"))
 
 
-def verify_published_zip(zip_path: Path, expected_product: str, expected_version: str, expected_sidecars: list[str], temp_root: Path):
+def verify_published_zip(zip_path: Path, expected_product: str, expected_version: str, expected_files: list[str], publish_dir: Path, temp_root: Path):
     verify_dir = temp_root / ("verify-" + zip_path.stem)
     if verify_dir.exists():
         shutil.rmtree(verify_dir)
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
+            actual_entries = sorted(info.filename for info in zf.infolist() if not info.is_dir())
+            expected_entries = sorted(expected_files)
+            if actual_entries != expected_entries:
+                raise RuntimeError(f"ZIP entry set mismatch: actual={actual_entries}, expected={expected_entries}")
             zf.extractall(verify_dir)
+        for rel in expected_entries:
+            extracted = verify_dir / rel
+            source = publish_dir / rel
+            if not extracted.is_file() or not source.is_file():
+                raise RuntimeError(f"Missing release file '{rel}' during ZIP verification")
+            if hashlib.sha256(extracted.read_bytes()).hexdigest() != hashlib.sha256(source.read_bytes()).hexdigest():
+                raise RuntimeError(f"SHA-256 mismatch between ZIP and publish output for '{rel}'")
         exe_path = verify_dir / "Claudome.exe"
-        if not exe_path.is_file():
-            raise RuntimeError(f"Claudome.exe missing in ZIP: {zip_path}")
-        for sidecar in expected_sidecars:
-            if not (verify_dir / sidecar).is_file():
-                raise RuntimeError(f"Missing sidecar '{sidecar}' in ZIP: {zip_path}")
         ps_cmd = (
             "$vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($env:CHECK_EXE); "
             "Write-Output ($vi.ProductName + '|' + $vi.FileVersion + '|' + $vi.ProductVersion)"
@@ -199,10 +205,21 @@ def main():
             pkg_prefix = "Claudome-HyperV" if is_hyperv else "Claudome"
             zip_name = f"{pkg_prefix}_{version}_win-x64.zip"
             zip_path = edition_artifacts / zip_name
+            symbols_dir = edition_artifacts / "symbols"
+            if symbols_dir.exists():
+                shutil.rmtree(symbols_dir)
+            pdb_files = sorted(publish_dir.glob("*.pdb"))
+            if pdb_files:
+                symbols_dir.mkdir(parents=True, exist_ok=True)
+                for pdb in pdb_files:
+                    shutil.copy2(pdb, symbols_dir / pdb.name)
+            release_files = ["Claudome.exe", "Gateway-THIRD-PARTY-NOTICES.txt", "PROJECT-LICENSE.txt", quickstart_name]
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-                for p in sorted(publish_dir.rglob("*")):
-                    if p.is_file():
-                        zf.write(p, p.relative_to(publish_dir).as_posix())
+                for rel in release_files:
+                    src = publish_dir / rel
+                    if not src.is_file():
+                        raise RuntimeError(f"Missing release file in publish directory: {rel}")
+                    zf.write(src, rel)
             zip_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest().lower()
             exe_sha = hashlib.sha256((publish_dir / "Claudome.exe").read_bytes()).hexdigest().lower()
             (edition_artifacts / "SHA256SUMS.txt").write_text(
@@ -228,7 +245,8 @@ def main():
                 zip_path,
                 "Claudome Hyper-V" if is_hyperv else "Claudome",
                 version,
-                ["Gateway-THIRD-PARTY-NOTICES.txt", "PROJECT-LICENSE.txt", quickstart_name],
+                release_files,
+                publish_dir,
                 edition_artifacts,
             )
             logging.info("Published verified package: %s (%s)", zip_path, zip_sha)

@@ -11,7 +11,10 @@ public sealed partial class Deployment
         report.GetProperty("clashRuntimePassed").GetBoolean() && report.GetProperty("networkPassed").GetBoolean() &&
         (manualAdsPower || (report.GetProperty("browserRuntimePassed").GetBoolean() && report.GetProperty("translationPassed").GetBoolean()));
 
-    public async Task ValidateExisting(SessionState state,Secrets secrets,bool restart,bool outageTest,CancellationToken token)
+    internal static bool ShouldOpenNativeConsoleAfterRestart(string? platformId, bool routeBConsoleActive) =>
+        !(string.Equals(platformId, "hyperv", StringComparison.OrdinalIgnoreCase) && routeBConsoleActive);
+
+    public async Task ValidateExisting(SessionState state,Secrets secrets,bool restart,bool outageTest,CancellationToken token,bool routeBConsoleActive = false)
     {
         if(string.IsNullOrEmpty(state.VmId)||!state.Options.HasUsableGuestPassword(secrets.VmPassword)||state.CoreConfigSha256.Length!=64)
             throw new SetupException("请载入已完成配置的原任务，并填写虚拟机密码。旧版本任务需先继续部署一次。");
@@ -54,7 +57,8 @@ public sealed partial class Deployment
                     if(i%6==0)messages.Report("等待虚拟机重启和来宾工具；如有保存工作提示，请在虚拟机中处理。");
                     await Task.Delay(TimeSpan.FromSeconds(5),token);
                 }
-                await box.Open(state,token);
+                if (ShouldOpenNativeConsoleAfterRestart(state.Options.PlatformId, routeBConsoleActive))
+                    await box.Open(state,token);
                 await BoundaryRuntime.VerifyCurrent(state,token);
                 using var after=await ReadValidation(box,state,secrets,false,token);
                 result=after.RootElement;
