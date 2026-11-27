@@ -1,5 +1,6 @@
 """Developer build only. Customer PCs need neither Go nor the .NET SDK."""
 import argparse
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -203,7 +204,26 @@ def main():
                     if p.is_file():
                         zf.write(p, p.relative_to(publish_dir).as_posix())
             zip_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest().lower()
-            (edition_artifacts / "SHA256SUMS.txt").write_text(f"{zip_sha}  {zip_name}\n", encoding="utf-8")
+            exe_sha = hashlib.sha256((publish_dir / "Claudome.exe").read_bytes()).hexdigest().lower()
+            (edition_artifacts / "SHA256SUMS.txt").write_text(
+                f"{zip_sha}  {zip_name}\n{exe_sha}  Claudome.exe\n",
+                encoding="utf-8",
+            )
+            if is_hyperv:
+                manifest = {
+                    "version": version,
+                    "tag": f"hyperv-v{version}",
+                    "zipName": zip_name,
+                    "zipSha256": zip_sha,
+                    "exeSha256": exe_sha,
+                    "notes": f"Claudome Hyper-V v{version} (Windows 11 x64)",
+                    "publishedAtUtc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "channel": "hyperv",
+                }
+                (edition_artifacts / "hyperv-latest.json").write_text(
+                    json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
             verify_published_zip(
                 zip_path,
                 "Claudome Hyper-V" if is_hyperv else "Claudome",

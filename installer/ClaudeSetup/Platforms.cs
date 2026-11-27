@@ -20,7 +20,8 @@ public static class Platforms
     internal static bool IsHyperVSupportedEdition(string? edition) =>
         edition is not null &&
         (edition.StartsWith("Professional", StringComparison.OrdinalIgnoreCase) ||
-         edition.StartsWith("Enterprise", StringComparison.OrdinalIgnoreCase));
+         edition.StartsWith("Enterprise", StringComparison.OrdinalIgnoreCase) ||
+         edition.StartsWith("Education", StringComparison.OrdinalIgnoreCase));
 
     public static List<PlatformChoice> Recommend(PlatformFacts host)
     {

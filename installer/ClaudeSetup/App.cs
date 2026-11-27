@@ -21,11 +21,19 @@ public static class Program
         if (args.Length == 2 && args[0] == "--scan-machines") { try { JsonFile.Write(args[1], VmInventory.Scan(CancellationToken.None).GetAwaiter().GetResult()); return 0; } catch { return 1; } }
         if (args.Length == 2 && args[0] == "--diagnostics") { try { using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2)); JsonFile.Write(args[1], Diagnostics.Collect(timeout.Token).GetAwaiter().GetResult()); return 0; } catch { return 1; } }
         if (args.Length > 0 && args[0] == "--self-test") return SelfTests.Run(args.Length > 1 ? args[1] : Path.Combine(Path.GetTempPath(), "ClaudeSetup-tests")).GetAwaiter().GetResult();
+        var migrateLegacyMode = args.Length > 0 && args[0] == "--migrate-legacy";
         try { SelfUpdater.CleanupStaleUpdateFiles(Path.GetDirectoryName(Environment.ProcessPath ?? "") ?? AppContext.BaseDirectory, Path.GetTempPath()); } catch { }
         var app = new Application();
         app.Exit += (_, _) => Task.Run(() => BoundaryRuntime.Replace(null, "")).GetAwaiter().GetResult();
         app.DispatcherUnhandledException += (_, e) => { MessageBox.Show(Redaction.SafeError(e.Exception), "需要处理", MessageBoxButton.OK, MessageBoxImage.Information); e.Handled = true; };
-        var window = new SetupWindow(restoreTask: args.Length == 0 || args[0] != "--preview");
+        var window = new SetupWindow(restoreTask: !migrateLegacyMode && (args.Length == 0 || args[0] != "--preview"));
+        if (migrateLegacyMode)
+        {
+            window.Loaded += (_, _) =>
+            {
+                window.OpenLegacyMigrationDialog();
+            };
+        }
         if (args.Length > 0 && args[0] == "--preview")
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -1114,6 +1122,12 @@ public sealed partial class SetupWindow : Window
             actionButtons.Children.Add(applyUpdateButton);
             actionButtons.Children.Add(checkUpdateButton);
             actionButtons.Children.Add(localZipUpdateButton);
+            if (ProductProfile.IsHyperVStandalone)
+            {
+                var migrateLegacyBtn = Action("从旧版升级到专线版", (_, _) => OpenLegacyMigrationDialog());
+                migrateLegacyBtn.Name = "LegacyMigrationButton";
+                actionButtons.Children.Add(migrateLegacyBtn);
+            }
             DockPanel.SetDock(actionButtons, Dock.Right);
             var updateDock = new DockPanel();
             updateDock.Children.Add(actionButtons);

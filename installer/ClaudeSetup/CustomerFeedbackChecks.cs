@@ -614,7 +614,7 @@ public sealed partial class SetupWindow
             updateStatusText.Text.Contains($"v{SelfUpdater.CurrentVersion().ToString(3)}") &&
             (ProductProfile.OnlineUpdatesEnabled || updateStatusText.Text.Contains("在线更新暂未开放")) &&
             globalUpdateBanner?.Visibility == Visibility.Collapsed;
-        var fakeManifest = new ReleaseManifest("9.9.9", ProductProfile.OnlineUpdatesEnabled ? "v9.9.9" : "hyperv-preview-9.9.9", $"{ProductProfile.PackagePrefix}_9.9.9_win-x64.zip", new string('a', 64), new string('b', 64), "fixture", "", ProductProfile.ChannelId);
+        var fakeManifest = new ReleaseManifest("9.9.9", ProductProfile.IsHyperVStandalone ? "hyperv-v9.9.9" : "v9.9.9", $"{ProductProfile.PackagePrefix}_9.9.9_win-x64.zip", new string('a', 64), new string('b', 64), "fixture", "", ProductProfile.ChannelId);
         ShowAvailableUpdateNotice(new UpdateCheckResult(true, fakeManifest, "https://example.invalid/Claudome_9.9.9_win-x64.zip", "fixture"), fakeManifest);
         hasLocalUpdaterControls &= globalUpdateBanner?.Visibility == Visibility.Visible &&
             globalUpdateBannerText?.Text.Contains("v9.9.9") == true &&
@@ -1173,10 +1173,31 @@ public sealed partial class SetupWindow
             Descendants<TextBlock>(popRoot).Any(t => t.Text == "帮助与关于");
         var hyperVWizardHidesApiKeyOk = !ProductProfile.IsHyperVStandalone ||
             (manualAdsPower.Visibility == Visibility.Collapsed && adsApiKey.Visibility == Visibility.Collapsed);
+        var legacyMigrationUiOk = true;
+        if (ProductProfile.IsHyperVStandalone)
+        {
+            var hasMigrateButton = Descendants<Button>(main).Any(b => b.Name == "LegacyMigrationButton" && b.Content as string == "从旧版升级到专线版");
+            var homeDialog = BuildLegacyMigrationDialog(
+                new HostInfo("CoreCountrySpecific", 16L << 30, 8L << 30, 16, true, 26100, null),
+                new PlatformFacts("Windows", "x64", "CoreCountrySpecific", true, true, 16, false, false, Build: 26100));
+            var homeDialogRoot = (DependencyObject)homeDialog.Content;
+            var homeExecBtn = LogicalDescendants<Button>(homeDialogRoot).FirstOrDefault(b => b.Name == "ExecuteLegacyMigrationButton");
+            var homeTexts = string.Join(" ", LogicalDescendants<TextBlock>(homeDialogRoot).Select(t => t.Text));
+            var proDialog = BuildLegacyMigrationDialog(
+                new HostInfo("Professional", 16L << 30, 8L << 30, 16, true, 26100, null),
+                new PlatformFacts("Windows", "x64", "Professional", true, true, 16, false, false, Build: 26100));
+            var proTexts = string.Join(" ", LogicalDescendants<TextBlock>((DependencyObject)proDialog.Content).Select(t => t.Text));
+            legacyMigrationUiOk = hasMigrateButton &&
+                homeExecBtn is not null && !homeExecBtn.IsEnabled &&
+                homeTexts.Contains("宿主机不支持") &&
+                proTexts.Contains("符合专线条件");
+        }
         if (!headingRestoredOnOverview) failed++;
         rows.Add(new { name = "desktop-hides-redundant-heading-and-restores-on-other-sections", passed = headingRestoredOnOverview });
         if (!(overviewThreeStagesOk && settingsGroupedOk && hyperVWizardHidesApiKeyOk)) failed++;
         rows.Add(new { name = "three-stage-overview-grouped-settings-and-hyperv-manual-only-wizard", passed = overviewThreeStagesOk && settingsGroupedOk && hyperVWizardHidesApiKeyOk, overviewThreeStagesOk, settingsGroupedOk, hyperVWizardHidesApiKeyOk });
+        if (!legacyMigrationUiOk) failed++;
+        rows.Add(new { name = "hyperv-exposes-legacy-migration-entry-and-blocks-home-edition", passed = legacyMigrationUiOk });
 
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);
@@ -1188,6 +1209,15 @@ public sealed partial class SetupWindow
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++) {
             var child = VisualTreeHelper.GetChild(root, i); if (child is T item) yield return item;
             foreach (var nested in Descendants<T>(child)) yield return nested;
+        }
+    }
+    private static IEnumerable<T> LogicalDescendants<T>(DependencyObject root) where T : DependencyObject
+    {
+        foreach (var child in LogicalTreeHelper.GetChildren(root))
+        {
+            if (child is T item) yield return item;
+            if (child is DependencyObject dep)
+                foreach (var nested in LogicalDescendants<T>(dep)) yield return nested;
         }
     }
 }

@@ -41,6 +41,7 @@ public sealed record StagedUpdate(
 public static class SelfUpdater
 {
     public const string DefaultManifestUrl = "https://github.com/binlin0120/Claudome/releases/latest/download/latest.json";
+    public const string HyperVDefaultManifestUrl = "https://github.com/binlin0120/Claudome/releases/download/hyperv-latest/hyperv-latest.json";
     public const string DefaultReleaseBaseUrl = "https://github.com/binlin0120/Claudome/releases/download";
 
     private static readonly string[] RequiredSideFiles =
@@ -51,7 +52,8 @@ public static class SelfUpdater
 
     private static readonly string[] DeferrableSideFiles =
     [
-        "快速开始.txt"
+        "快速开始.txt",
+        "快速开始-HyperV.txt"
     ];
 
     private static readonly string[] PayloadSideFiles =
@@ -219,7 +221,7 @@ public static class SelfUpdater
             return new UpdateCheckResult(false, null, ProductProfile.PreReleasePageUrl,
                 $"在线更新暂未开放（当前为 {ProductProfile.WindowTitle} v{currentVersion.ToString(3)}），请前往预发布页手动下载新版或使用本地 ZIP 更新。");
         }
-        var url = string.IsNullOrWhiteSpace(manifestUrl) ? DefaultManifestUrl : manifestUrl;
+        var url = string.IsNullOrWhiteSpace(manifestUrl) ? ProductProfile.DefaultManifestUrl : manifestUrl;
         using var client = CreateHttpClient(TimeSpan.FromSeconds(10));
         using var response = await client.GetAsync(url, token);
         if ((int)response.StatusCode == 404)

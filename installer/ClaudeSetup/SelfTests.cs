@@ -1630,16 +1630,164 @@ public static class SelfTests
             });
             Assert(SelfUpdater.ParseAndValidateManifest(stdManifest, "standard").Channel == "standard", "Standard manifest failed");
             Assert(SelfUpdater.ParseAndValidateManifest(hvManifest, "hyperv").Channel == "hyperv", "Hyper-V manifest failed");
+            var hvReleaseTagManifest = JsonSerializer.Serialize(new
+            {
+                version = "0.5.1", tag = "hyperv-v0.5.1", zipName = "Claudome-HyperV_0.5.1_win-x64.zip",
+                zipSha256 = new string('c', 64), exeSha256 = new string('d', 64), channel = "hyperv"
+            });
+            var parsedHvRelease = SelfUpdater.ParseAndValidateManifest(hvReleaseTagManifest, "hyperv");
+            Assert(parsedHvRelease.Channel == "hyperv" && parsedHvRelease.Tag == "hyperv-v0.5.1" &&
+                   SelfUpdater.BuildDownloadUrl(parsedHvRelease).EndsWith("/hyperv-v0.5.1/Claudome-HyperV_0.5.1_win-x64.zip", StringComparison.Ordinal),
+                "Hyper-V dedicated release tag manifest failed");
             await RejectAsync(() => Task.FromResult(SelfUpdater.ParseAndValidateManifest(stdManifest, "hyperv")), "Hyper-V accepted standard manifest");
             await RejectAsync(() => Task.FromResult(SelfUpdater.ParseAndValidateManifest(hvManifest, "standard")), "Standard accepted Hyper-V manifest");
 
-            if (!ProductProfile.OnlineUpdatesEnabled)
+            if (ProductProfile.IsHyperVStandalone)
             {
-                var disabled = await SelfUpdater.CheckForUpdateAsync(SelfUpdater.CurrentVersion());
-                Assert(!disabled.HasUpdate && disabled.StatusMessage.Contains("在线更新暂未开放", StringComparison.Ordinal) &&
-                       disabled.DownloadUrl == ProductProfile.PreReleasePageUrl,
-                    $"Unexpected Hyper-V default update status: {disabled.StatusMessage}");
+                Assert(ProductProfile.OnlineUpdatesEnabled &&
+                       ProductProfile.DefaultManifestUrl.Equals(SelfUpdater.HyperVDefaultManifestUrl, StringComparison.Ordinal) &&
+                       !ProductProfile.DefaultManifestUrl.Contains("/releases/latest/download/latest.json", StringComparison.OrdinalIgnoreCase),
+                    "Hyper-V standalone must use its dedicated manifest URL separate from legacy latest.json");
             }
+            else
+            {
+                Assert(ProductProfile.OnlineUpdatesEnabled &&
+                       ProductProfile.DefaultManifestUrl.Equals(SelfUpdater.DefaultManifestUrl, StringComparison.Ordinal),
+                    "Standard build must keep legacy latest.json manifest URL");
+            }
+        });
+        await Check("legacy-to-hyperv-migration-preflight-backup-continuity-abort-and-rollback", async () =>
+        {
+            var migRoot = Path.Combine(root, "legacy-migration-suite");
+            var legacyAppData = Path.Combine(migRoot, "legacy-appdata");
+            var hyperVAppData = Path.Combine(migRoot, "hyperv-appdata");
+            Directory.CreateDirectory(legacyAppData);
+
+            // 1. Host eligibility preflight: Pro/Enterprise/Education pass; Home/Win10/NoVirt fail before any disk change.
+            var homeCheck = LegacyMigration.EvaluateHostEligibility(true, 26100, "CoreCountrySpecific", "11 家庭中文版", true, true);
+            Assert(!homeCheck.IsEligible && (homeCheck.BlockReason?.Contains("家庭中文版") == true), "Home edition must be blocked");
+            var win10Check = LegacyMigration.EvaluateHostEligibility(true, 19045, "Professional", "10 专业版", true, true);
+            Assert(!win10Check.IsEligible && (win10Check.BlockReason?.Contains("Windows 11") == true), "Win10 must be blocked");
+            var noVirtCheck = LegacyMigration.EvaluateHostEligibility(true, 26100, "Professional", "11 专业版", true, false);
+            Assert(!noVirtCheck.IsEligible && (noVirtCheck.BlockReason?.Contains("虚拟化") == true), "Disabled virtualization must be blocked");
+            var proCheck = LegacyMigration.EvaluateHostEligibility(true, 26100, "Professional", "11 专业版", true, true);
+            var eduCheck = LegacyMigration.EvaluateHostEligibility(true, 26100, "Education", "11 教育版", true, true);
+            Assert(proCheck.IsEligible && eduCheck.IsEligible, "Win11 Pro and Education with virtualization must be eligible");
+
+            // 2. Prepare realistic legacy install dir (never-run copy), Hyper-V task, VirtualBox task, VMware task, and Hyper-V payload dir.
+            string MakeLegacyDir(string name)
+            {
+                var d = Path.Combine(migRoot, name);
+                Directory.CreateDirectory(d);
+                File.WriteAllText(Path.Combine(d, "Claudome.exe"), "LEGACY-MULTI-ROUTE-0.4.10-BYTES");
+                File.WriteAllText(Path.Combine(d, "PROJECT-LICENSE.txt"), "legacy-license");
+                File.WriteAllText(Path.Combine(d, "Gateway-THIRD-PARTY-NOTICES.txt"), "legacy-notices");
+                File.WriteAllText(Path.Combine(d, "快速开始.txt"), "legacy-quickstart");
+                return d;
+            }
+            var payloadSrcDir = Path.Combine(migRoot, "hyperv-payload");
+            Directory.CreateDirectory(payloadSrcDir);
+            File.WriteAllText(Path.Combine(payloadSrcDir, "Claudome.exe"), "HYPERV-STANDALONE-0.5.0-BYTES");
+            File.WriteAllText(Path.Combine(payloadSrcDir, "PROJECT-LICENSE.txt"), "hyperv-license");
+            File.WriteAllText(Path.Combine(payloadSrcDir, "Gateway-THIRD-PARTY-NOTICES.txt"), "hyperv-notices");
+            File.WriteAllText(Path.Combine(payloadSrcDir, "快速开始-HyperV.txt"), "hyperv-quickstart");
+
+            (string ProductName, string Version) MockIdentity(string path)
+            {
+                var txt = File.ReadAllText(path);
+                if (txt.Contains("HYPERV-STANDALONE", StringComparison.Ordinal)) return ("Claudome Hyper-V", "0.5.0");
+                if (txt.Contains("LEGACY-MULTI-ROUTE", StringComparison.Ordinal)) return ("Claudome", "0.4.10");
+                return ("Unknown", "0.0.0");
+            }
+
+            var hvTaskDir = Path.Combine(migRoot, "task-hv");
+            var vbTaskDir = Path.Combine(migRoot, "task-vbox");
+            var vmwTaskDir = Path.Combine(migRoot, "task-vmware");
+            foreach (var td in new[] { hvTaskDir, vbTaskDir, vmwTaskDir }) Paths.EnsureWorkspace(td);
+
+            var hvWsId = Guid.NewGuid().ToString("N");
+            var hvVmId = Guid.NewGuid().ToString();
+            JsonFile.Write(Path.Combine(hvTaskDir, ".claude-setup-workspace.json"), new { WorkspaceId = hvWsId });
+            var hvState = new SessionState { VmId = hvVmId, SetupFinished = true, Status = "设置已完成", Options = new() { Root = hvTaskDir, VmName = "Claude-HV", WorkspaceId = hvWsId, PlatformId = "hyperv" } };
+            hvState.Save();
+
+            var vbWsId = Guid.NewGuid().ToString("N");
+            JsonFile.Write(Path.Combine(vbTaskDir, ".claude-setup-workspace.json"), new { WorkspaceId = vbWsId });
+            var vbState = new SessionState { VmId = Guid.NewGuid().ToString(), SetupFinished = true, Status = "设置已完成", Options = new() { Root = vbTaskDir, VmName = "Claude-VBox", WorkspaceId = vbWsId, PlatformId = "virtualbox" } };
+            vbState.Save();
+            Directory.CreateDirectory(vbState.Options.VmDirectory);
+            var vbDiskSentinel = Path.Combine(vbState.Options.VmDirectory, "Windows11.vdi");
+            File.WriteAllText(vbDiskSentinel, "VBOX-DISK-UNTOUCHED");
+
+            var vmwWsId = Guid.NewGuid().ToString("N");
+            JsonFile.Write(Path.Combine(vmwTaskDir, ".claude-setup-workspace.json"), new { WorkspaceId = vmwWsId });
+            var vmwState = new SessionState { VmId = Guid.NewGuid().ToString(), SetupFinished = true, Status = "设置已完成", Options = new() { Root = vmwTaskDir, VmName = "Claude-VMware", WorkspaceId = vmwWsId, PlatformId = "workstation" } };
+            vmwState.Save();
+
+            var legacyPrefPath = Path.Combine(legacyAppData, "preferences.json");
+            JsonFile.Write(legacyPrefPath, new { StatePath = vbState.Options.StatePath });
+            var legacyPrefBefore = File.ReadAllText(legacyPrefPath);
+
+            var discovered = LegacyMigration.DiscoverLegacyTasks(legacyAppData, [hvTaskDir, vbTaskDir, vmwTaskDir]);
+            Assert(discovered.Count == 3 &&
+                   discovered.Count(t => t.IsHyperV) == 1 &&
+                   discovered.Count(t => t.IsLegacyThirdPartyVm) == 2,
+                $"Unexpected task discovery result: count={discovered.Count}");
+
+            using var stagedPayload = await LegacyMigration.StageHyperVPayloadFromDirectoryAsync(payloadSrcDir, CancellationToken.None, MockIdentity);
+
+            // 3. Home edition must block with ZERO file replacement or backup creation.
+            var homeLegacyDir = MakeLegacyDir("legacy-home");
+            var homeLegacyInfo = LegacyMigration.InspectLegacyDirectory(homeLegacyDir, Path.Combine(migRoot, "never-run-appdata"), MockIdentity);
+            Assert(!homeLegacyInfo.HasEverRun && homeLegacyInfo.Version == "0.4.10", "Never-run legacy copy should be inspectable");
+            var homePlan = LegacyMigration.BuildPlan(homeCheck, homeLegacyInfo, stagedPayload, discovered, Path.Combine(homeLegacyDir, "bak-home"));
+            await RejectAsync(() => LegacyMigration.ExecuteMigrationAsync(homePlan, stagedPayload, hyperVAppData, binaryIdentityReader: MockIdentity),
+                "Home host must block migration before replacing files");
+            Assert(!Directory.Exists(homePlan.BackupDirectory) &&
+                   File.ReadAllText(Path.Combine(homeLegacyDir, "Claudome.exe")) == "LEGACY-MULTI-ROUTE-0.4.10-BYTES",
+                "Home block mutated target legacy directory");
+
+            // 4. Failure mid-replacement must trigger complete automatic rollback with identical SHA-256.
+            var failLegacyDir = MakeLegacyDir("legacy-fail");
+            var failLegacyInfo = LegacyMigration.InspectLegacyDirectory(failLegacyDir, legacyAppData, MockIdentity);
+            var failPlan = LegacyMigration.BuildPlan(proCheck, failLegacyInfo, stagedPayload, discovered, Path.Combine(failLegacyDir, "bak-fail"));
+            await RejectAsync(() => LegacyMigration.ExecuteMigrationAsync(
+                failPlan, stagedPayload, hyperVAppData,
+                faultInjectionBeforeFileCommit: file => file == "Gateway-THIRD-PARTY-NOTICES.txt"
+                    ? throw new IOException("Simulated disk write failure mid-swap")
+                    : Task.CompletedTask,
+                binaryIdentityReader: MockIdentity),
+                "Simulated mid-swap failure should abort and roll back");
+            Assert(File.ReadAllText(Path.Combine(failLegacyDir, "Claudome.exe")) == "LEGACY-MULTI-ROUTE-0.4.10-BYTES" &&
+                   File.ReadAllText(Path.Combine(failLegacyDir, "PROJECT-LICENSE.txt")) == "legacy-license" &&
+                   File.ReadAllText(Path.Combine(failLegacyDir, "快速开始.txt")) == "legacy-quickstart" &&
+                   !File.Exists(Path.Combine(failLegacyDir, "快速开始-HyperV.txt")) &&
+                   !File.Exists(Path.Combine(failLegacyDir, LegacyMigration.MigrationTransactionFileName)),
+                "Rollback did not cleanly restore original legacy files");
+
+            // 5. Eligible host full migration succeeds: legacy backup is runnable, VBox/VMware preserved, Hyper-V task verified & bound.
+            var okLegacyDir = MakeLegacyDir("legacy-ok");
+            var okLegacyInfo = LegacyMigration.InspectLegacyDirectory(okLegacyDir, legacyAppData, MockIdentity);
+            var okPlan = LegacyMigration.BuildPlan(proCheck, okLegacyInfo, stagedPayload, discovered, Path.Combine(okLegacyDir, "bak-ok"));
+            Assert(okPlan.FormatSummary().Contains("legacy-ok") && okPlan.FormatSummary().Contains("Claude-VBox") && okPlan.FormatSummary().Contains("Claude-HV"),
+                "Pre-migration summary missing key task/backup details");
+            var result = await LegacyMigration.ExecuteMigrationAsync(
+                okPlan, stagedPayload, hyperVAppData,
+                liveVmVerifier: t => (t.VmId == hvVmId, "模拟宿主机 VM UUID 与绑定核对通过"),
+                binaryIdentityReader: MockIdentity);
+            Assert(result.Succeeded && !result.RolledBack &&
+                   File.ReadAllText(Path.Combine(okLegacyDir, "Claudome.exe")) == "HYPERV-STANDALONE-0.5.0-BYTES" &&
+                   File.Exists(Path.Combine(okLegacyDir, "快速开始-HyperV.txt")) &&
+                   !File.Exists(Path.Combine(okLegacyDir, "快速开始.txt")) &&
+                   File.ReadAllText(result.LegacyLauncherExePath) == "LEGACY-MULTI-ROUTE-0.4.10-BYTES" &&
+                   File.Exists(result.LegacyLauncherCmdPath) &&
+                   File.ReadAllText(vbDiskSentinel) == "VBOX-DISK-UNTOUCHED" &&
+                   File.ReadAllText(legacyPrefPath) == legacyPrefBefore &&
+                   result.VerifiedHyperVTasks.Count == 1 && result.VerifiedHyperVTasks[0].Passed &&
+                   result.PreservedLegacyVmTasks.Count == 2 &&
+                   File.Exists(Path.Combine(hyperVAppData, "preferences.json")) &&
+                   File.ReadAllText(Path.Combine(hyperVAppData, "preferences.json")).Contains("task-hv", StringComparison.OrdinalIgnoreCase),
+                "Eligible legacy-to-Hyper-V migration failed one or more post-upgrade invariants");
         });
         await StorageCleanupTests.Run(Check, output);
         await Check("overview-host-view-aligns-home-pending-reboot-missing-feature-and-ready", () => Sync(() =>

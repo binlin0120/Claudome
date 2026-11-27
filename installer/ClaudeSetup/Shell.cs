@@ -145,6 +145,21 @@ public sealed partial class SetupWindow
         moreUpdateBtn.BorderThickness = new Thickness(0);
         moreUpdateBtn.FontSize = 12;
 
+        Button? moreMigrateBtn = null;
+        if (ProductProfile.IsHyperVStandalone)
+        {
+            moreMigrateBtn = Action("↑ 从旧版升级到专线版", (_, _) =>
+            {
+                if (topMorePopup is not null) topMorePopup.IsOpen = false;
+                OpenLegacyMigrationDialog();
+            });
+            moreMigrateBtn.HorizontalContentAlignment = HorizontalAlignment.Left;
+            moreMigrateBtn.Padding = new Thickness(12, 7, 12, 7);
+            moreMigrateBtn.Margin = new Thickness(0, 1, 0, 1);
+            moreMigrateBtn.BorderThickness = new Thickness(0);
+            moreMigrateBtn.FontSize = 12;
+        }
+
         var moreLicenseBtn = Action("ⓘ 组件来源与许可", (_, _) =>
         {
             if (topMorePopup is not null) topMorePopup.IsOpen = false;
@@ -177,6 +192,7 @@ public sealed partial class SetupWindow
         moreMenuStack.Children.Add(MenuDivider());
         moreMenuStack.Children.Add(MenuGroupHeading("帮助与关于"));
         moreMenuStack.Children.Add(moreUpdateBtn);
+        if (moreMigrateBtn is not null) moreMenuStack.Children.Add(moreMigrateBtn);
         moreMenuStack.Children.Add(moreLicenseBtn);
         moreMenuStack.Children.Add(moreGroupBtn);
 

@@ -20,4 +20,5 @@ Claudome 0.5.0 快速开始
 命令行与 SmartScreen 提示
 - 通过 conhost / PowerShell / cmd 运行 Claude Code 或其他 CLI 工具时，不会由 AdsPower 指纹浏览器自动接管，需在对应终端会话自行配置或核对代理环境变量。
 - 本发行包为开源自建未签名版本，如 Windows SmartScreen 提示“已保护你的电脑”，点击「更多信息 → 仍要运行」并建议核对同目录 SHA256SUMS.txt。
-- 如需升级新版，请从发布页下载对应 Claudome-HyperV_* ZIP 后，在软件内通过「从本地 ZIP 更新」原地升级。
+- 如需从旧多线路版原地升级，请在软件概览页点击「从旧版升级到专线版」（或运行 Claudome.exe --migrate-legacy），按向导先完成宿主机预检与完整备份后再替换；已有 VirtualBox / VMware 任务可通过备份目录中的独立多线路版继续打开。
+- 后续版本更新：本版本使用独立专线更新清单（hyperv-latest.json），可在软件内点击「检查在线更新」或「从本地 ZIP 更新」原地升级（与旧版 latest.json 严格隔离）。

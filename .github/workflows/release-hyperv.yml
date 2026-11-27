@@ -1,0 +1,115 @@
+name: Build and Release Claudome Hyper-V
+
+on:
+  push:
+    tags:
+      - 'hyperv-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Dedicated Hyper-V release tag (e.g. hyperv-v0.5.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release-hyperv-win-x64:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '^1.26.0'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate tag and build Hyper-V standalone package
+        id: pkg
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:RELEASE_TAG
+          if ($tag -cnotmatch '^hyperv-v(\d+\.\d+\.\d+)$') {
+            throw "Expected a Hyper-V release tag such as hyperv-v0.5.0, got: $tag"
+          }
+          $ver = $Matches[1]
+          python installer/build.py --edition hyperv --version $ver --test --ui-test --publish
+
+          $outDir = Resolve-Path -LiteralPath 'installer/artifacts/hyperv'
+          $zipName = "Claudome-HyperV_${ver}_win-x64.zip"
+          $zipPath = Join-Path $outDir $zipName
+          $sumsPath = Join-Path $outDir 'SHA256SUMS.txt'
+          $manifestPath = Join-Path $outDir 'hyperv-latest.json'
+          if (-not (Test-Path -LiteralPath $zipPath)) { throw "Missing published ZIP: $zipPath" }
+          if (-not (Test-Path -LiteralPath $manifestPath)) { throw "Missing Hyper-V manifest: $manifestPath" }
+
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($manifest.channel -cne 'hyperv' -or $manifest.tag -cne $tag -or $manifest.version -cne $ver) {
+            throw 'Generated hyperv-latest.json metadata mismatch.'
+          }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "sums_path=$sumsPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "manifest_path=$manifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip_sha256=$($manifest.zipSha256)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "exe_sha256=$($manifest.exeSha256)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Publish Dedicated Hyper-V Release (keeps legacy /releases/latest untouched)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.tag }}
+          name: Claudome Hyper-V v${{ steps.pkg.outputs.version }} (Windows 11 x64)
+          make_latest: false
+          fail_on_unmatched_files: true
+          body: |
+            ### Claudome Hyper-V 专线版（Windows 11 x64 专业版 / 企业版 / 教育版）
+
+            > **重要发行说明**：Windows 后续只维护和发布 Hyper-V 专线版；旧多线路版与 Windows 家庭版停止更新，但保留原 `releases/latest` 公共清单与历史安装包供原环境继续使用或回退。
+
+            1. 点击下方 **`${{ steps.pkg.outputs.zip_name }}`** 下载并完整解压到本地文件夹，双击 `Claudome.exe` 启动。
+            2. **旧多线路版用户一键迁移**：在软件概览页点击 **「升级到专线版」**（或运行 `Claudome.exe --migrate-legacy`），程序会先执行宿主机预检，在确认后完整备份原多线路版再原地升级：
+               - **符合条件的宿主**：已有 Hyper-V 任务校验身份后无缝续用；已有 VirtualBox / VMware 任务的磁盘、快照与记录完整保留，并可通过备份目录中的独立多线路版继续打开。
+               - **Windows 家庭版或其他不合格宿主**：在任何文件替换前停止并说明原因，零改动继续保留原版与原任务。
+            3. **后续在线自更新**：Hyper-V 专线版使用独立更新清单 `hyperv-latest.json`（不与旧客户端 `latest.json` 混用），可在软件内点击 **「检查在线更新」** 或 **「从本地 ZIP 更新」** 原地升级。
+
+            ### 文件校验（SHA-256）
+            - ZIP (`${{ steps.pkg.outputs.zip_name }}`): `${{ steps.pkg.outputs.zip_sha256 }}`
+            - `Claudome.exe`: `${{ steps.pkg.outputs.exe_sha256 }}`
+          files: |
+            ${{ steps.pkg.outputs.zip_path }}
+            ${{ steps.pkg.outputs.sums_path }}
+            ${{ steps.pkg.outputs.manifest_path }}
+
+      - name: Update Dedicated Hyper-V Channel Manifest (hyperv-latest, make_latest=false)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hyperv-latest
+          target_commitish: ${{ github.sha }}
+          name: Claudome Hyper-V Update Channel Manifest
+          make_latest: false
+          prerelease: true
+          fail_on_unmatched_files: true
+          body: |
+            Dedicated online self-update manifest channel for **Claudome Hyper-V** (`channel = "hyperv"`).
+            Latest Hyper-V release: **${{ steps.pkg.outputs.tag }}** (`${{ steps.pkg.outputs.zip_name }}`).
+            Legacy multi-route clients continue to use `/releases/latest/download/latest.json` unaffected.
+          files: |
+            ${{ steps.pkg.outputs.manifest_path }}
