@@ -1006,7 +1006,7 @@ public sealed partial class SetupWindow : Window
         chain.IsChecked=o.ChainEnabled&&!o.ChainFromImport;upstreamSource.SelectedItem=o.UpstreamSource;
         if(WindowsMedia.Saved(o) is { } media) ApplyMedia(media,o.WindowsImageIndex);
         SetDesktopFullscreen(false);
-        CloseDesktopConsole();
+        ResetDesktopForTaskLoad();
         hyperVRdpHost?.Dispose(); hyperVRdpHost = null;
         standaloneRdpWindow = null; hyperVDesktopMode = HyperVDesktopMode.None; explicitHyperVFallbackToA = false;
         desktopTimer.Stop();autoConnectDesktop=false;desktopConnectionPolicy.ResumeExplicitly();lastConsoleWindow=null;pendingConsole=null;desktopView=null;consoleHost=null;desktopTopBar=null;desktopDetailDrawer=null;desktopActionCluster=null;desktopTopBarToggle=null;desktopFullscreenButton=null;desktopTopBarCollapsed=false;desktopResumeNetworkBanner=null;desktopResumeNetworkText=null;desktopRetryNetworkBtn=null;desktopReconfigureNetworkBtn=null;fallbackVmConnectMenuItem=null;desktopGuidePanel=null;consoleIdleOverlay=null;idleWizardButton=null;desktopMaintenancePopup=null;desktopMaintenanceExpander=null;desktopStepGuideExpander=null;guideStepChoice=null;guideStepText=null;guidePhase="";

@@ -101,8 +101,11 @@ public sealed partial class SetupWindow
     private bool nativeClipboardReady, checkingNativeClipboard, hyperVClipboardSettingsVerified;
     private HyperVClipboardDirectSync? hyperVDirectClipboard;
     private string hyperVDirectClipboardVm = "";
+    private Guid hyperVDirectClipboardServiceId;
+    private byte[]? hyperVDirectClipboardKey;
     private long hyperVDirectClipboardGeneration;
     private bool hyperVDirectClipboardConnected;
+    private int hyperVDirectClipboardLaunching;
 
     private bool IsHyperVRouteBActiveOrPreferred() =>
         state.Options.PlatformId == "hyperv" &&
@@ -124,6 +127,8 @@ public sealed partial class SetupWindow
         }
         if (hyperVDirectClipboard is not null && hyperVDirectClipboardVm == vmId)
         {
+            if (!hyperVDirectClipboardConnected && hyperVDirectClipboardKey is { } existingKey)
+                _ = LaunchGuestDirectClipboardAgentAsync(state, hyperVDirectClipboardServiceId, existingKey, Volatile.Read(ref hyperVDirectClipboardGeneration));
             UpdateNativeClipboardControl();
             return;
         }
@@ -149,6 +154,8 @@ public sealed partial class SetupWindow
             sync.Start();
             hyperVDirectClipboard = sync;
             hyperVDirectClipboardVm = vmId;
+            hyperVDirectClipboardServiceId = clipServiceId;
+            hyperVDirectClipboardKey = [.. key];
             hyperVDirectClipboardConnected = false;
             UpdateNativeClipboardControl("正在建立 B 路线纯文本直贴通道（仅限纯文本，屏蔽文件/图片/设备）…");
             _ = LaunchGuestDirectClipboardAgentAsync(state, clipServiceId, key, gen);
@@ -161,6 +168,7 @@ public sealed partial class SetupWindow
 
     private async Task LaunchGuestDirectClipboardAgentAsync(SessionState target, Guid serviceId, byte[] key, long generation)
     {
+        if (Interlocked.Exchange(ref hyperVDirectClipboardLaunching, 1) != 0) return;
         try
         {
             var backend = BoundaryRuntime.BackendFor(target) as HyperV;
@@ -178,12 +186,18 @@ public sealed partial class SetupWindow
             await HyperVClipboardDirectSync.LaunchGuestAgentAsync(backend, target, credentials, serviceId, key, generation, timeout.Token);
         }
         catch { }
+        finally { Interlocked.Exchange(ref hyperVDirectClipboardLaunching, 0); }
     }
 
     internal void StopHyperVDirectClipboardSync()
     {
         hyperVDirectClipboardVm = "";
         hyperVDirectClipboardConnected = false;
+        if (hyperVDirectClipboardKey is { } oldKey)
+        {
+            Array.Clear(oldKey, 0, oldKey.Length);
+            hyperVDirectClipboardKey = null;
+        }
         var current = hyperVDirectClipboard;
         hyperVDirectClipboard = null;
         if (current is not null)

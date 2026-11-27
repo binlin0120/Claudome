@@ -92,13 +92,17 @@ public sealed partial class SetupWindow
                     catch (GuestCheckPendingException error) when (BoundaryRuntime.BackendFor(state) is not null)
                     {
                         state.NetworkPassed = false;
-                        RecordTaskActivity("来宾出口未能验证，保留当前外层限制。 " + Redaction.SafeError(error));
+                        var msg = "来宾出口未能验证，保留当前外层限制。 " + Redaction.SafeError(error);
+                        RecordTaskActivity(msg);
+                        SetDesktopConnectionStatus(msg);
                     }
                     catch (Exception error)
                     {
                         state.NetworkPassed = false;
                         await BoundaryRuntime.StopFor(state);
-                        RecordTaskActivity("网络待恢复 · " + Redaction.SafeError(error));
+                        var msg = "网络待恢复 · " + Redaction.SafeError(error);
+                        RecordTaskActivity(msg);
+                        SetDesktopConnectionStatus(msg);
                         if (!networkOnly) await Engine().OpenOriginalOffline(state, token);
                     }
                     finally { Deployment.WriteProtectionReport(state); }
@@ -109,6 +113,9 @@ public sealed partial class SetupWindow
                 desktopConnectionPolicy.ResumeExplicitly();
                 autoConnectDesktop = true;
                 await ConnectDesktop(requested: true);
+                if (hyperVDesktopMode is HyperVDesktopMode.EmbeddedRdp or HyperVDesktopMode.StandaloneRdp &&
+                    !string.IsNullOrEmpty(state.VmId))
+                    StartHyperVDirectClipboardSync(state.VmId);
             }
         }
         finally { enteringWorkspace = false; }
@@ -223,7 +230,7 @@ public sealed partial class Deployment
             else
             {
                 var spec = BusBoundary.Configuration(state, binding);
-                await BusBoundary.Verify(backend, state, spec, token);
+                await BusBoundary.Prepare(backend, state, spec, token);
                 relay = new BusPacketRelay(spec, binding);
                 var channel = relay;
                 gateway = await ExternalGateway.Start(state, binding, addresses, first.Port, first.Server, async ct =>

@@ -518,7 +518,7 @@ public sealed partial class SetupWindow
         ApplyLoadedTask(autoState, loadSecrets: true, interactive: false);
         var restoredSecrets = ReadSecrets();
         var guideUnified = CustomerGuide.Software(autoState.Options).Any(s => s.Id == "ads-proxy" && s.Instructions.Contains("127.0.0.1") && s.Instructions.Contains("17897") && s.Instructions.Contains("保留助手写入"));
-        var autoRestorePassed = restoredSecrets.VmPassword == "FictionalAutoRestore!1" && restoredSecrets.AdsPowerApiKey == "fictional-auto-ads-key" && restoredSecrets.SubscriptionUrl == "https://example.invalid/auto-sub" && restoredSecrets.SelectedNodeJson == fixture.Json && importedInput == "https://example.invalid/auto-sub" && consent.IsChecked == false && guideUnified;
+        var autoRestorePassed = !closingDesktop && restoredSecrets.VmPassword == "FictionalAutoRestore!1" && restoredSecrets.AdsPowerApiKey == "fictional-auto-ads-key" && restoredSecrets.SubscriptionUrl == "https://example.invalid/auto-sub" && restoredSecrets.SelectedNodeJson == fixture.Json && importedInput == "https://example.invalid/auto-sub" && consent.IsChecked == false && guideUnified;
         if (!autoRestorePassed) failed++;
         rows.Add(new { name = "auto-restore-loads-remembered-secrets-and-unified-adspower-guide", passed = autoRestorePassed });
         var comparisonState = Clone(autoState.Options);

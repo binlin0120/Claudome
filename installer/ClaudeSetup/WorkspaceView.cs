@@ -728,6 +728,18 @@ public sealed partial class SetupWindow
         return false;
     }
 
+    private void ResetDesktopForTaskLoad()
+    {
+        closingDesktop = false;
+        autoConnectDesktop = false;
+        desktopConnectionCancellation?.Cancel();
+        desktopTimer.Stop();
+        consoleResizeTimer.Stop();
+        consoleHost?.ReleaseGuestInputCapture();
+        ReleaseDesktopWindow();
+        ConsoleWindowLocator.Hide(lastConsoleWindow, state.Options.VmName, state.VmId);
+    }
+
     private void CloseDesktopConsole()
     {
         closingDesktop = true;
