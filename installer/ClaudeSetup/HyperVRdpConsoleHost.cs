@@ -443,26 +443,13 @@ internal sealed class HyperVRdpConsoleHost : IDisposable
             adv8.NegotiateSecurityLayer = p.NegotiateSecurityLayer;
 
             dynamic adv9 = ocx.AdvancedSettings9 ?? throw new SetupException("缺少 RDP AdvancedSettings9 接口。");
-            adv9.RedirectDynamicDevices = p.RedirectDynamicDevices;
-            adv9.RedirectDynamicDrives = p.RedirectDynamicDrives;
             adv9.AuthenticationServiceClass = p.AuthenticationServiceClass;
 
             if (rawOcx is not IMsRdpExtendedSettings ext)
-                throw new SetupException("RDP 控件不支持 IMsRdpExtendedSettings，无法锁定凭据与设备隔离策略。");
+                throw new SetupException("RDP 控件不支持 IMsRdpExtendedSettings，无法锁定凭据隔离策略。");
 
-            SetMandatoryExt(ext, "AuthenticationServiceClass", p.AuthenticationServiceClass);
+            // DisableCredentialsDelegation is a verified mandatory IMsRdpExtendedSettings property on MsRdpClient9.
             SetMandatoryExt(ext, "DisableCredentialsDelegation", p.DisableCredentialsDelegation);
-            SetMandatoryExt(ext, "NegotiateSecurityLayer", p.NegotiateSecurityLayer);
-            SetMandatoryExt(ext, "EnableCredSspSupport", p.EnableCredSspSupport);
-            SetMandatoryExt(ext, "PCB", p.Pcb);
-            SetMandatoryExt(ext, "RedirectDevices", p.RedirectDevices);
-            SetMandatoryExt(ext, "RedirectDrives", p.RedirectDrives);
-            SetMandatoryExt(ext, "RedirectPrinters", p.RedirectPrinters);
-            SetMandatoryExt(ext, "RedirectPorts", p.RedirectPorts);
-            SetMandatoryExt(ext, "RedirectSmartCards", p.RedirectSmartCards);
-            SetMandatoryExt(ext, "RedirectClipboard", p.RedirectClipboard);
-            SetMandatoryExt(ext, "AudioPlaybackMode", p.AudioRedirectionMode);
-            SetMandatoryExt(ext, "AudioCaptureMode", 0);
 
             // Optional hardening properties that vary by Windows build
             try { ocx.AdvancedSettings3.RedirectPOSDevices = p.RedirectPosDevices; } catch { }

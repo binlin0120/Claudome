@@ -205,6 +205,27 @@ public static class DesktopRecoveryTests
             try { HyperVRdpConsoleHost.ApplyProfile(new object(), profile); }
             catch (SetupException) { threwOnMissingExtendedSettings = true; }
             Assert(threwOnMissingExtendedSettings, "ApplyProfile must throw SetupException when mandatory binding/isolation cannot be written");
+
+            // Verify real local MsRdpClient9 COM instance accepts every mandatory Route B binding & isolation property with zero errors.
+            var rdpType = Type.GetTypeFromCLSID(new Guid("a3bc03a0-041d-42e3-ad22-882b7865c9c5"));
+            if (rdpType is not null)
+            {
+                Exception? staError = null;
+                var sta = new Thread(() =>
+                {
+                    try
+                    {
+                        var comObj = Activator.CreateInstance(rdpType) ?? throw new InvalidOperationException("MsRdpClient9 null");
+                        try { HyperVRdpConsoleHost.ApplyProfile(comObj, profile); }
+                        finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(comObj); }
+                    }
+                    catch (Exception ex) { staError = ex; }
+                });
+                sta.SetApartmentState(ApartmentState.STA);
+                sta.Start();
+                sta.Join();
+                Assert(staError is null, $"Real MsRdpClient9 ApplyProfile failed: {staError}");
+            }
         });
         await check("manual-adspower-readonly-saved-network-and-hyperv-manual-only-new-tasks", () => Sync(() => {
             Assert(Deployment.ShouldUseReadOnlySavedNetworkCheck(checkSavedNetwork: true, manualAdsPower: true, resumeNetwork: true),
