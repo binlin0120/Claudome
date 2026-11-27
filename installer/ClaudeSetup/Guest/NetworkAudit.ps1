@@ -562,12 +562,14 @@ function Test-AdsBrowserExit([string]$Id) {
     }
 }
 
-function Wait-ClashRecoveryReady([int]$TimeoutSeconds = 30) {
+function Wait-ClashRecoveryReady([int]$TimeoutSeconds = 45) {
     $transient = @(
+        'CLASH_SERVICE_NOT_RUNNING',
         'CLASH_CORE_NOT_READY',
         'CLASH_SERVICE_CORE_REQUIRED',
         'CLASH_CONTROLLER_UNAVAILABLE',
         'CLASH_TUN_REQUIRED',
+        'RUNTIME_CONFIG_NOT_LOCATED',
         'RUNTIME_ROUTE_MISMATCH',
         'RUNTIME_NETWORK_SETTINGS_MISMATCH'
     )
@@ -618,7 +620,7 @@ function Test-NetworkOutage([string]$Id) {
             Start-Core
         }
         $script:LastOutageStage = 'recovery-runtime'
-        Wait-ClashRecoveryReady 30
+        Wait-ClashRecoveryReady 45
         $script:LastOutageStage = 'recovery-trace'
         $traceOk = $false
         for($attempt = 0; $attempt -lt 3; $attempt++) {

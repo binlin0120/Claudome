@@ -193,17 +193,28 @@ function Stop-Core {
 function Start-Core {
     try{
         $service=Get-Service -Name 'clash_verge_service' -ErrorAction Stop
-        if($service.Status -eq 'Stopped'){Start-Service -InputObject $service -ErrorAction Stop}
-        $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(20))
+        if($service.Status -eq 'Stopped'){
+            Start-Service -InputObject $service -ErrorAction Stop
+            $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(20))
+            # Give clash_verge_service IPC pipe time to bind before launching the GUI client,
+            # preventing Clash Verge from racing and falling back to sidecar mode.
+            Start-Sleep -Seconds 2
+        }else{
+            $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(20))
+        }
     }catch{throw 'CLASH_SERVICE_START_FAILED'}
     if(-not(Get-Process -Name 'clash-verge','Clash Verge' -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $script:ClashExe})){
         try{Start-Process -FilePath $script:ClashExe -WindowStyle Minimized -ErrorAction Stop | Out-Null}
         catch{throw 'CLASH_APP_LAUNCH_FAILED'}
     }
     $clock=[Diagnostics.Stopwatch]::StartNew()
+    $restartedGuiForSidecar=$false
     do{
         try{
             $process=Get-VerifiedClashListener
+            $svcInfo=Get-CimInstance Win32_Service -Filter "Name='clash_verge_service'" -ErrorAction SilentlyContinue
+            $coreInfo=Get-CimInstance Win32_Process -Filter ('ProcessId='+$process.Id) -ErrorAction SilentlyContinue
+            if($svcInfo -and $coreInfo -and $coreInfo.ParentProcessId -ne $svcInfo.ProcessId){throw 'CLASH_SERVICE_CORE_REQUIRED'}
             if(@(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {$_.Name -eq 'ClaudeTun' -and $_.Status -eq 'Up'}).Count -eq 1){
                 $script:CoreExe=ConvertTo-ClashLocalPath $process.Path
                 return
@@ -211,7 +222,16 @@ function Start-Core {
             $failure='CLASH_TUN_REQUIRED'
         }catch{
             $failure=$_.Exception.Message
-            if($failure -notin @('CLASH_CORE_NOT_READY','CLASH_SERVICE_CORE_REQUIRED')){throw}
+            if($failure -eq 'CLASH_SERVICE_CORE_REQUIRED' -and -not $restartedGuiForSidecar -and $clock.Elapsed.TotalSeconds -ge 6){
+                $restartedGuiForSidecar=$true
+                try{
+                    Get-Process -Name 'clash-verge','Clash Verge' -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $script:ClashExe} | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Get-Process -Name 'verge-mihomo','verge-mihomo-alpha' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 2
+                    Start-Process -FilePath $script:ClashExe -WindowStyle Minimized -ErrorAction Stop | Out-Null
+                }catch{}
+            }
+            elseif($failure -notin @('CLASH_CORE_NOT_READY','CLASH_SERVICE_CORE_REQUIRED')){throw}
         }
         Start-Sleep -Seconds 1
     }while($clock.Elapsed.TotalSeconds -lt 75)

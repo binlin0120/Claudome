@@ -25,8 +25,9 @@ function Invoke-ReportedOutage([string]$Id) {
         $report.outageStage=[string]$script:LastOutageStage
         $report.outageBlockedVerified=[bool]$script:LastOutageBlockedVerified
         $report.outageRecoveryVerified=[bool]$script:LastOutageRecoveryVerified
+        if($script:LastRuntimeMismatchDetail -and -not $report.runtimeMismatchDetail){$report.runtimeMismatchDetail=[string]$script:LastRuntimeMismatchDetail}
         $report.outageCode=if($_.Exception.Message -eq 'OUTAGE_UNVERIFIED'){'UNVERIFIED'}else{'FAILED'}
-        try{Wait-ClashRecoveryReady 15;Assert-ExpectedTrace (Read-GuestTrace)}catch{$report.networkPassed=$false;$report.outageCode='FAILED'}
+        try{Wait-ClashRecoveryReady 20;Assert-ExpectedTrace (Read-GuestTrace)}catch{$report.networkPassed=$false;$report.outageCode='FAILED'}
     }
 }
 try {
