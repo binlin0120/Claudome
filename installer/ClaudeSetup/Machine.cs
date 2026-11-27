@@ -8,7 +8,10 @@ namespace ClaudeSetup;
 public sealed record HostInfo(string Edition, long TotalMemory, long FreeMemory, int Processors, bool Is64Bit, int Build, string? VBoxPath)
 {
     public string EditionName => (Build>=22000?"11 ":"10 ") + (Edition switch { "CoreCountrySpecific" => "家庭中文版", "Core" or "CoreSingleLanguage" => "家庭版", "CoreN" => "家庭版 N", "Professional" => "专业版", "Enterprise" => "企业版", "Education" => "教育版", _ => Edition });
-    public string Summary => $"Windows {EditionName}  ·  {TotalMemory / 1073741824d:F1} GB 内存  ·  {Processors} 个逻辑处理器\n当前空闲 {FreeMemory / 1073741824d:F1} GB；" + (VBoxPath is null ? "尚未安装 VirtualBox" : "检测到 VirtualBox，可复用");
+    public string Summary => $"Windows {EditionName}  ·  {TotalMemory / 1073741824d:F1} GB 内存  ·  {Processors} 个逻辑处理器\n当前空闲 {FreeMemory / 1073741824d:F1} GB；" +
+        (ProductProfile.IsHyperVStandalone
+            ? "Hyper-V 专线版（硬件隔离）"
+            : (VBoxPath is null ? "尚未安装 VirtualBox" : "检测到 VirtualBox，可复用"));
 }
 public static class Machine
 {

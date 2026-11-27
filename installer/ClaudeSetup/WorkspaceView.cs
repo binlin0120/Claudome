@@ -1023,6 +1023,12 @@ public sealed partial class SetupWindow
 
     private async Task FitConnectedConsole(bool requested = false)
     {
+        if (hyperVRdpHost?.IsConnected == true && section == 7)
+        {
+            UpdateDesktopFrameGeometry();
+            if (requested) SetDesktopConnectionStatus("当前 B 路线已启用 16:9 连续自适应缩放，已重新适配显示区域。");
+            return;
+        }
         var host = consoleHost;
         if (host?.IsAttached != true || host.Visibility != Visibility.Visible || section != 7)
         {
@@ -1206,6 +1212,11 @@ public sealed partial class SetupWindow
     private async Task ShowStandaloneHyperVAsync()
     {
         if (connectingConsole || shuttingDownVm || state.Options.PlatformId != "hyperv" || string.IsNullOrEmpty(state.VmId)) return;
+        if (standaloneRdpWindow is { } currentStandalone && hyperVDesktopMode == HyperVDesktopMode.StandaloneRdp)
+        {
+            await currentStandalone.ReturnToEmbeddedAsync();
+            return;
+        }
         await desktopHandoffGate.WaitAsync();
         try
         {
@@ -1378,11 +1389,13 @@ public sealed partial class SetupWindow
     {
         UpdateShutdownCommand(section == 7);
         if (desktopGuidePanel is not null) desktopGuidePanel.IsEnabled = !shuttingDownVm;
+        var inStandaloneB = standaloneRdpWindow is not null && hyperVDesktopMode == HyperVDesktopMode.StandaloneRdp;
         var hyperVActive = (consoleHost?.IsAttached == true || hyperVRdpHost?.IsConnected == true) && !connectingConsole && !shuttingDownVm;
         if (openStandaloneHyperV is not null)
         {
             openStandaloneHyperV.Visibility = state.Options.PlatformId == "hyperv" ? Visibility.Visible : Visibility.Collapsed;
-            openStandaloneHyperV.IsEnabled = hyperVActive;
+            openStandaloneHyperV.Content = inStandaloneB ? "返回内嵌桌面" : "在独立窗口查看 Hyper-V 桌面";
+            openStandaloneHyperV.IsEnabled = hyperVActive || inStandaloneB;
         }
         if (topStandaloneHyperV is not null)
         {
@@ -1456,10 +1469,11 @@ public sealed partial class SetupWindow
         if (desktopContinue is not null)
         {
             desktopContinue.IsEnabled = !busy && !recoveringDisplay;
-            var hideDuplicateCta = showFinish && desktopFinish?.Visibility == Visibility.Visible &&
+            var hideDuplicateCta = !inStandaloneB && showFinish && desktopFinish?.Visibility == Visibility.Visible &&
                 (hyperVRdpHost?.IsConnected == true || consoleHost?.IsAttached == true) && !busy && !installationNetworkFailed;
             desktopContinue.Visibility = hideDuplicateCta ? Visibility.Collapsed : Visibility.Visible;
             desktopContinue.Content = busy ? "正在处理…" :
+                inStandaloneB ? "返回内嵌桌面" :
                 state.SetupFinished ? "进入桌面" :
                 installationNetworkFailed ? "重连安装网络" :
                 ManualAdsPowerReady ? "打开浏览器指引" :
@@ -1532,6 +1546,11 @@ public sealed partial class SetupWindow
             return;
         }
         if (busy) return;
+        if (standaloneRdpWindow is { } activeStandalone && hyperVDesktopMode == HyperVDesktopMode.StandaloneRdp)
+        {
+            await activeStandalone.ReturnToEmbeddedAsync();
+            return;
+        }
         if (state.SetupFinished && CanEnterDesktopWorkspace())
         {
             await EnterOriginalWorkspace();

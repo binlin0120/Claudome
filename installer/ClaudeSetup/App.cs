@@ -970,10 +970,21 @@ public sealed partial class SetupWindow : Window
             _ = BoundaryRuntime.Replace(null, "");
             var credentialsNote = ApplyLoadedTask(loaded, loadSecrets, interactive);
             RememberTask();
-            log.Text = "已载入：" + state.Stage + "\n状态：" + state.Status + (string.IsNullOrEmpty(credentialsNote) ? "" : "\n" + credentialsNote) + "\n请重新确认安装范围后继续。"; Go(5);
+            log.Text = "已载入：" + state.Stage + "\n状态：" + state.Status + (string.IsNullOrEmpty(credentialsNote) ? "" : "\n" + credentialsNote) + "\n请确认当前阶段后继续。";
+            var targetSection = ResolveLoadedTaskSection(state, CanEnterDesktopWorkspace());
+            if (targetSection == 1) Go(5);
+            else Navigate(targetSection);
             if (!string.IsNullOrEmpty(credentialsNote)) banner.Text = credentialsNote;
         }
         catch (Exception ex) { if (interactive) Notice(Redaction.SafeError(ex)); else banner.Text = Redaction.SafeError(ex); }
+    }
+
+    internal static int ResolveLoadedTaskSection(SessionState loaded, bool canEnterDesktop)
+    {
+        if (loaded.SetupFinished && canEnterDesktop) return 7;
+        if (loaded.Completed.Contains("software") && !loaded.SetupFinished && !loaded.Protection.FourDimensionsPassed(loaded)) return 5;
+        if (canEnterDesktop) return 7;
+        return 1;
     }
     private string ApplyLoadedTask(SessionState loaded, bool loadSecrets, bool interactive = true)
     {

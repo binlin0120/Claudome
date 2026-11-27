@@ -241,6 +241,13 @@ public static class DesktopRecoveryTests
                 "existing saved Hyper-V task must preserve its saved mode without wiping credentials");
             Assert(!SetupOptions.ShouldForceManualAdsPower(isHyperVStandalone: false, platformId: "virtualbox", vmId: ""),
                 "non-HyperV-standalone task must not force manual mode");
+
+            var finishedTask = new SessionState { VmId = id, SetupFinished = true };
+            Assert(SetupWindow.ResolveLoadedTaskSection(finishedTask, canEnterDesktop: true) == 7, "finished task must jump to desktop");
+            var awaitingVerify = new SessionState { VmId = id, SetupFinished = false, Completed = ["software"] };
+            Assert(SetupWindow.ResolveLoadedTaskSection(awaitingVerify, canEnterDesktop: true) == 5, "installed unverified task must jump to safety verification");
+            var unbuilt = new SessionState { VmId = "" };
+            Assert(SetupWindow.ResolveLoadedTaskSection(unbuilt, canEnterDesktop: false) == 1, "unbuilt task must jump to wizard");
         }));
         await check("route-b-direct-clipboard-protocol-unicode-only-isolation-and-loop-suppression", async () => {
             var busId = Guid.Parse("11111111-2222-3333-4444-555555555555");

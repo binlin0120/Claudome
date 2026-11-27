@@ -508,7 +508,7 @@ public sealed partial class SetupWindow
     {
         if (!connected) return "先连上原任务的受控网络，再确认出口和完成设置。";
         var pending = task.Protection.PendingChecks(task);
-        return pending.Length == 0 ? "核验已通过，可以完成设置。" : "待确认：" + string.Join("、", pending) + "。可在「防护结果」查看。";
+        return pending.Length == 0 ? "核验已通过，可以完成设置。" : "待确认：" + string.Join("、", pending) + "。可在「安全验真」查看。";
     }
 
     private void ConfirmBrowserExit()

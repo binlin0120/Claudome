@@ -679,7 +679,7 @@ internal sealed class HyperVStandaloneRdpWindow : Window
         return true;
     }
 
-    private async Task ReturnToEmbeddedAsync()
+    internal async Task ReturnToEmbeddedAsync()
     {
         if (returning) return;
         returning = true;
