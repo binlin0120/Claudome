@@ -365,6 +365,8 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
     {
         Machine.RequireHyperVStandaloneHostEligible();
         var o = state.Options;
+        if (SetupOptions.ShouldForceManualAdsPower(ProductProfile.IsHyperVStandalone, o.PlatformId, state.VmId))
+            o.ManualAdsPower = true;
         try { IsolationPolicy.RequireSupportedPlatform(state); }
         catch (HandoffException handoff) { Paths.EnsureWorkspace(o.Root); using var handoffLock = WorkspaceLock.Acquire(state); state.PendingActions = [handoff.Action]; state.Status = "所选平台尚不支持受控通道"; state.Save(); throw; }
         var previousBackend=BoundaryRuntime.BackendFor(state);
@@ -704,6 +706,41 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
                 if (relay?.IsConnected != true) throw new SetupException("来宾网络通道尚未完成双向认证，未继续配置代理。");
                 await BoundaryRuntime.VerifyCurrent(state, token);
             }
+            if (ShouldUseReadOnlySavedNetworkCheck(checkSavedNetwork, o.ManualAdsPower, resumeNetwork))
+            {
+                Stage(state, "6 / 7  只读复核已保存的网络与防火墙状态（不修改来宾配置）");
+                using var validation = await ReadValidation(box, state, secrets, outageTest: false, token, guestOnly: true);
+                var readResult = validation.RootElement;
+                ApplyValidation(state, readResult);
+                ApplyProtection(state, readResult, DateTime.UtcNow, guestOnly: true);
+                state.PendingActions.RemoveAll(a => a.Id is "resume-network" or "runtime-validation" or "manual-adspower");
+                if (state.NetworkPassed)
+                {
+                    state.PendingActions.Add(CustomerGuide.ManualAdsPower());
+                    state.Stage = CustomerGuide.ManualAdsPowerStage;
+                    state.Status = state.SetupFinished ? "已完成设置" : "需要本人完成浏览器验收";
+                    BoundaryRuntime.RetainBackend(box, state);
+                    retained = true;
+                    state.Save();
+                    WriteValidationAcceptance(state);
+                    WriteProtectionReport(state);
+                    messages.Report("已只读复核原任务网络通过，未修改来宾配置、服务或防火墙。");
+                    return;
+                }
+                var mismatch = readResult.TryGetProperty("runtimeMismatchDetail", out var detailEl) &&
+                    detailEl.ValueKind == JsonValueKind.String ? detailEl.GetString() : "";
+                var summary = string.IsNullOrWhiteSpace(mismatch)
+                    ? "已保存的原任务网络只读检查未通过；本次未修改来宾配置、服务或防火墙。"
+                    : $"已保存的原任务网络只读检查未通过（差异明细：{mismatch}）；本次未修改来宾配置、服务或防火墙。";
+                state.PendingActions.Add(new("已保存网络检查未通过", [summary, "确认节点可用后可再次点击「重试检查原网络」，或在确认后点击「重新配置本任务网络」写回配置。"], "resume-network"));
+                state.Stage = "原任务网络只读复核未通过";
+                state.Status = "网络待处理";
+                await BoundaryRuntime.StopFor(state);
+                state.Save();
+                WriteValidationAcceptance(state);
+                WriteProtectionReport(state);
+                throw new SetupException(summary);
+            }
             TimeZoneInfo.TryConvertWindowsIdToIanaId(o.TimeZoneId, o.Country, out var ianaTimeZone);
             if(state.GuestSettingsStamp!=settingsStamp || reconfigureGuestNetwork) { state.OutagePassed=false;state.RestartPassed=false;state.RestartBootBefore=""; }
             if (reconfigureGuestNetwork)
@@ -892,6 +929,9 @@ public sealed partial class Deployment(IProgress<string> messages, IProgress<Dow
         }
         finally { if (!state.DeferCheckpoint && !o.Remember) SecretStore.Forget(state); if (!retained) await box.DisposeAsync(); }
     }
+    internal static bool ShouldUseReadOnlySavedNetworkCheck(bool checkSavedNetwork, bool manualAdsPower, bool resumeNetwork) =>
+        checkSavedNetwork && manualAdsPower && resumeNetwork;
+
     internal static bool CanHoldInstallationNetworkForWindowsSignIn(SessionState state, Exception error, bool cancelled) =>
         !cancelled && state.Options.PlatformId == "virtualbox" &&
         state.Options.NetworkSource != "稍后配置" && !state.Completed.Contains("guest-ready") &&

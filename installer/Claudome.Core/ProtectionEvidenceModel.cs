@@ -27,6 +27,22 @@ public sealed class ProtectionEvidence
         return ConfigHash.Length > 0 && ConfigHash == state.CoreConfigSha256;
     }
 
+    internal string[] PendingNetworkChecks(SessionState state)
+    {
+        var pending = new List<string>();
+        var current = HasMatchingBinding(state);
+        if (!current || Boundary.Status != CheckStatus.Passed) pending.Add("防护与运行配置");
+        if (!current || !state.NetworkPassed || Exit.Status != CheckStatus.Passed) pending.Add("来宾出口");
+        if (!current || Dns.Status != CheckStatus.Passed) pending.Add("DNS 与旁路");
+        if (state.Options.PlatformId == "hyperv" && (!current || Outage.Status != CheckStatus.Passed))
+            pending.Add("断线阻断与恢复");
+        return [.. pending];
+    }
+
+    internal bool AutomaticNetworkChecksPassed(SessionState state) => PendingNetworkChecks(state).Length == 0;
+
+    internal bool BrowserExitConfirmed(SessionState state) => HasMatchingBinding(state) && Browser.Status == CheckStatus.Passed;
+
     internal string[] PendingChecks(SessionState state)
     {
         var pending = new List<string>();
@@ -34,8 +50,10 @@ public sealed class ProtectionEvidence
         var current = HasMatchingBinding(state);
         if (!current || Boundary.Status != CheckStatus.Passed) pending.Add("外层网关与来宾防火墙");
         if (!current || !state.NetworkPassed || Exit.Status != CheckStatus.Passed) pending.Add("来宾出口");
-        if (!current || Browser.Status != CheckStatus.Passed) pending.Add("AdsPower 窗口出口");
         if (!current || Dns.Status != CheckStatus.Passed) pending.Add("DNS 与直连旁路");
+        if (state.Options.PlatformId == "hyperv" && (!current || Outage.Status != CheckStatus.Passed))
+            pending.Add("断线阻断与恢复");
+        if (!current || Browser.Status != CheckStatus.Passed) pending.Add("手动浏览器出口确认");
         if (state.RestartBootBefore.Length > 0) pending.Add("重启后持久复核");
         return [.. pending];
     }

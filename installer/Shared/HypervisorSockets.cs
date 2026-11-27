@@ -68,6 +68,29 @@ public static class HypervisorSockets
     }
     internal static HyperVEndPoint HyperVHostListenEndpoint(Guid serviceId) => new(Children, serviceId);
 
+    public static Socket ListenHyperV(Guid serviceId)
+    {
+        var step = HypervisorListenerStep.Create;
+        Socket? socket = null;
+        try
+        {
+            socket = new((AddressFamily)34, SocketType.Stream, (ProtocolType)1);
+            step = HypervisorListenerStep.Bind;
+            socket.Bind(HyperVHostListenEndpoint(serviceId));
+            step = HypervisorListenerStep.Listen;
+            socket.Listen(4);
+            return socket;
+        }
+        catch (SocketException ex)
+        {
+            socket?.Dispose();
+            throw new HypervisorListenerException(step, ex);
+        }
+    }
+
+    internal static bool IsExpectedHyperVPeer(Socket socket, string expectedVmId) =>
+        Guid.TryParse(expectedVmId, out var parsed) && IsExpectedHyperVPeer(socket, parsed);
+
     internal static bool IsExpectedHyperVPeer(Socket socket, Guid expectedVm)
     {
         // Query the connected peer from Winsock rather than matching against

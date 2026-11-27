@@ -225,41 +225,207 @@ public sealed partial class Deployment
 
 public sealed partial class SetupWindow
 {
-    private string ProtectionSummary()
-    {
-        static string Show(ProtectionCheck item) => item.Status switch
+    private bool verificationRunning;
+
+    private static string FormatCheckStatus(CheckStatus status, bool running) =>
+        running ? "检查中" : status switch
         {
             CheckStatus.Passed => "通过",
             CheckStatus.Failed => "失败",
             CheckStatus.Unverified => "未能验证",
             _ => "未测试"
-        } + (item.CheckedUtc is { } time ? $" · {time.ToLocalTime():MM-dd HH:mm} · {item.Evidence}" : "");
+        };
+
+    private static (string BgHex, string FgHex) StatusBadgeColors(CheckStatus status, bool running) =>
+        running ? ("#FDF2DB", "#8A550C") : status switch
+        {
+            CheckStatus.Passed => ("#E6F5EE", "#176B4E"),
+            CheckStatus.Failed => ("#FCEAE8", "#A32D26"),
+            CheckStatus.Unverified => ("#FDF2DB", "#8A550C"),
+            _ => ("#F3EFEA", "#6A5D52")
+        };
+
+    private string ProtectionSummary()
+    {
+        static string Show(ProtectionCheck item) => FormatCheckStatus(item.Status, false) +
+            (item.CheckedUtc is { } time ? $" · {time.ToLocalTime():MM-dd HH:mm} · {item.Evidence}" : "");
         var p = state.Protection;
         var network = BoundaryRuntime.BackendFor(state) is not null && state.NetworkPassed ? "当前受控连接已核对" : "当前连接待核对";
         var hostNet = NodeEndpointResolver.InspectHostNetworkContext();
-        return $"{network}\n宿主网络状态　{hostNet.Summary}\n外层网关与来宾防火墙　{Show(p.Boundary)}\n来宾出口　{Show(p.Exit)}\n" +
-            $"AdsPower 窗口出口　{Show(p.Browser)}\nDNS 与直连旁路　{Show(p.Dns)}" +
+        return $"{network}\n宿主网络状态　{hostNet.Summary}\n1. 防护与运行配置　{Show(p.Boundary)}\n2. 来宾出口　{Show(p.Exit)}\n" +
+            $"3. DNS 与旁路　{Show(p.Dns)}" +
             (p.BlockAuditNote.Length == 0 ? "" : $"\nWindows 阻断审核　{p.BlockAuditNote}") +
-            $"\n断线阻断与恢复　{Show(p.Outage)}";
+            $"\n4. 断线阻断与恢复　{Show(p.Outage)}\n手动浏览器出口确认（本人核对）　{Show(p.Browser)}";
     }
 
-    private Border BuildProtectionCard() => Card(Text("防护验收", 16, false),
-        Text(ProtectionSummary(), 12),
-        Row(Action("核验当前防护", async (_, _) => { await RunValidation(false, false); Navigate(5); }, true),
-            Action("确认浏览器出口", (_, _) => ConfirmBrowserExit()),
-            Action("完成设置", (_, _) => FinishWorkspace())),
-        Row(Action("启用来宾阻断审核并重测", async (_, _) => await EnableBlockAuditAndRetest()),
-            Action("查看脱敏报告", (_, _) =>
+    private Border BuildCheckRow(string titleText, ProtectionCheck check, bool running, Button? recoveryAction = null, string? subtitleHint = null)
+    {
+        var (bg, fg) = StatusBadgeColors(check.Status, running);
+        var badge = OverviewPill(FormatCheckStatus(check.Status, running), bg, fg);
+        var dock = new DockPanel { LastChildFill = true };
+        var right = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        right.Children.Add(badge);
+        if (recoveryAction is not null)
         {
-            try
+            recoveryAction.Padding = new Thickness(10, 4, 10, 4);
+            recoveryAction.FontSize = 11.5;
+            recoveryAction.Margin = new Thickness(8, 0, 0, 0);
+            right.Children.Add(recoveryAction);
+        }
+        DockPanel.SetDock(right, Dock.Right);
+        dock.Children.Add(right);
+
+        var left = new StackPanel { Margin = new Thickness(0, 0, 10, 0) };
+        left.Children.Add(new TextBlock { Text = titleText, FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = Ink });
+        var detail = !string.IsNullOrWhiteSpace(check.Evidence)
+            ? check.Evidence + (check.CheckedUtc is { } t ? $"（{t.ToLocalTime():MM-dd HH:mm}）" : "")
+            : (subtitleHint ?? "尚未运行本次检查。");
+        left.Children.Add(new TextBlock { Text = detail, FontSize = 11.5, Foreground = Muted, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) });
+        dock.Children.Add(left);
+
+        return new Border
+        {
+            Background = Pale,
+            BorderBrush = Line,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(12, 9, 12, 9),
+            Margin = new Thickness(0, 0, 0, 7),
+            Child = dock
+        };
+    }
+
+    private async Task StartOneClickVerificationAsync()
+    {
+        if (busy || verificationRunning) return;
+        if (BoundaryRuntime.BackendFor(state) is null)
+        {
+            Notice("请先在「专属桌面」恢复本任务的受控连接，再点击「开始验真」。");
+            return;
+        }
+        var choice = MessageBox.Show(this,
+            "即将按顺序执行 4 项自动安全验真：\n" +
+            "1. 防护与运行配置\n" +
+            "2. 来宾出口\n" +
+            "3. DNS 与旁路\n" +
+            "4. 断线阻断与恢复（将短暂停止来宾代理几秒后自动恢复）\n\n" +
+            "是否允许短暂断网以一次完成全部 4 项？\n" +
+            "· 点击「是」：完整顺序运行全部 4 项\n" +
+            "· 点击「否」：先运行前 3 项，第 4 项记为「未测试」可稍后补测\n" +
+            "· 点击「取消」：暂不开始",
+            "开始安全验真", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+        if (choice == MessageBoxResult.Cancel) return;
+        await RunOneClickVerificationAsync(includeOutage: choice == MessageBoxResult.Yes);
+    }
+
+    private async Task RunOneClickVerificationAsync(bool includeOutage)
+    {
+        if (busy || verificationRunning) return;
+        verificationRunning = true;
+        if (section == 5) Navigate(5);
+        try
+        {
+            await RunValidation(restart: false, outageTest: includeOutage);
+        }
+        finally
+        {
+            verificationRunning = false;
+            if (section == 5 && !closeAfterPause) Navigate(5);
+        }
+    }
+
+    private Border BuildProtectionCard()
+    {
+        var p = state.Protection;
+        var connected = BoundaryRuntime.BackendFor(state) is not null;
+        var hostNet = NodeEndpointResolver.InspectHostNetworkContext();
+        var netPending = p.PendingNetworkChecks(state);
+        var summaryText = !connected
+            ? $"当前受控连接未激活 · 宿主网络：{hostNet.Summary}"
+            : netPending.Length == 0
+                ? $"4 项自动网络验真已全部通过 · 宿主网络：{hostNet.Summary}"
+                : $"待完成自动验真：{string.Join("、", netPending)} · 宿主网络：{hostNet.Summary}";
+
+        var startBtn = Action(verificationRunning ? "检查中…" : "开始验真", async (_, _) => await StartOneClickVerificationAsync(), true);
+        startBtn.Name = "StartVerificationButton";
+        startBtn.IsEnabled = !busy && !verificationRunning;
+
+        var topDock = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+        DockPanel.SetDock(startBtn, Dock.Right);
+        topDock.Children.Add(startBtn);
+        var headStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
+        headStack.Children.Add(Text("一键四维安全验真", 16, false));
+        headStack.Children.Add(new TextBlock { Text = summaryText, FontSize = 11.5, Foreground = Muted, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) });
+        topDock.Children.Add(headStack);
+
+        Button? boundaryRecovery = p.Boundary.Status == CheckStatus.Passed ? null :
+            Action("重新配置本任务网络", async (_, _) => await ReconfigureGuestNetworkWithConfirmation());
+        Button? exitRecovery = p.Exit.Status == CheckStatus.Passed ? null :
+            Action("重试失败项", async (_, _) => await RunOneClickVerificationAsync(includeOutage: false));
+        Button? dnsRecovery = p.Dns.Status == CheckStatus.Passed ? null :
+            (p.Dns.Evidence.Contains("阻断审核")
+                ? Action("启用来宾阻断审核并重测", async (_, _) => await EnableBlockAuditAndRetest())
+                : Action("重试失败项", async (_, _) => await RunOneClickVerificationAsync(includeOutage: false)));
+        Button? outageRecovery = p.Outage.Status == CheckStatus.Passed ? null :
+            Action("补测断线阻断", async (_, _) =>
             {
-                var path = Paths.Under(state.Options.Root, "protection-report.json");
-                if (!File.Exists(path)) throw new SetupException("请先核验当前防护。");
-                Notice(File.ReadAllText(path));
-            }
-            catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
-        }),
+                if (MessageBox.Show(this, "断线阻断与恢复检查会短暂停止来宾代理几秒，再自动恢复（不修改任务配置）。继续吗？",
+                    "补测断线阻断", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+                    await RunOneClickVerificationAsync(includeOutage: true);
+            });
+
+        var autoRows = new StackPanel();
+        autoRows.Children.Add(BuildCheckRow("1. 防护与运行配置", p.Boundary, verificationRunning, boundaryRecovery, "核对外层网关、总线隔离与来宾 Clash/防火墙生效策略。"));
+        autoRows.Children.Add(BuildCheckRow("2. 来宾出口", p.Exit, verificationRunning, exitRecovery, "核对虚拟机实际公网出口与任务地区/IP 设置是否一致。"));
+        autoRows.Children.Add(BuildCheckRow("3. DNS 与旁路", p.Dns, verificationRunning, dnsRecovery, "核对 DoH 加密解析与物理上行直连 DNS 拒绝证据。"));
+        autoRows.Children.Add(BuildCheckRow("4. 断线阻断与恢复", p.Outage, verificationRunning, outageRecovery, "停核期间阻断直连泄露，并验证重启后完整恢复。"));
+
+        var browserConfirmBtn = Action("确认浏览器出口", (_, _) => ConfirmBrowserExit(), p.Browser.Status != CheckStatus.Passed);
+        var finishBtn = Action("完成设置", (_, _) => FinishWorkspace(), IsProtectionReadyForFinish());
+        finishBtn.IsEnabled = !busy && !verificationRunning;
+        var browserRow = BuildCheckRow(
+            "手动浏览器出口确认（由本人核对 · 非自动验证）",
+            p.Browser,
+            false,
+            browserConfirmBtn,
+            "请在虚拟机内的 AdsPower 打开 https://ip.net.coffee/claude/ 核对出口一致后点击确认。");
+
+        var advancedContent = new StackPanel { Margin = new Thickness(0, 6, 0, 0) };
+        advancedContent.Children.Add(Text("以下为高级排障与验收工具；重启复验作为独立验收记录保存。", 11));
+        advancedContent.Children.Add(Row(
+            Action("启用来宾阻断审核并重测", async (_, _) => await EnableBlockAuditAndRetest()),
+            Action("查看脱敏报告", (_, _) =>
+            {
+                try
+                {
+                    var path = Paths.Under(state.Options.Root, "protection-report.json");
+                    if (!File.Exists(path)) throw new SetupException("请先运行「开始验真」。");
+                    Notice(File.ReadAllText(path));
+                }
+                catch (Exception ex) { Notice(Redaction.SafeError(ex)); }
+            }),
+            Action("重启后持久复核", async (_, _) =>
+            {
+                if (MessageBox.Show(this, "请先保存虚拟机中的工作。将请求正常重启这台任务虚拟机；重新登录 Windows 后检查持久配置和实际网络，检查前不会修复配置。保持助手开启。继续？",
+                    "重启验收", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
+                    await RunValidation(true, false);
+            }),
             Action("导出客户使用手册", (_, _) => ExportCustomerGuideFile())));
+        if (p.BlockAuditNote.Length > 0)
+            advancedContent.Children.Add(Text("Windows 阻断审核：" + p.BlockAuditNote, 11));
+
+        var advancedExpander = new Expander
+        {
+            Name = "AdvancedChecksExpander",
+            Header = "高级检查（脱敏报告 · 阻断审核 · 重启复验）",
+            IsExpanded = false,
+            Foreground = Ink,
+            Margin = new Thickness(0, 6, 0, 0),
+            Content = advancedContent
+        };
+
+        return Card(topDock, autoRows, browserRow, Row(finishBtn, Action("进入桌面", (_, _) => Navigate(7))), advancedExpander);
+    }
 
     private void ExportCustomerGuideFile()
     {

@@ -577,6 +577,12 @@ public static class SelfTests
                     Dns = new(CheckStatus.Passed)
                 }
             };
+            if (st.Options.PlatformId == "hyperv")
+            {
+                Assert(!st.Protection.FourDimensionsPassed(st) && st.Protection.PendingNetworkChecks(st).SequenceEqual(["断线阻断与恢复"]),
+                    "Hyper-V 4D evidence must require Outage pass");
+                st.Protection.Outage = new(CheckStatus.Passed);
+            }
             Assert(st.Protection.FourDimensionsPassed(st), "Matched 4D evidence did not pass");
             st.VmId = "22222222-2222-2222-2222-222222222222";
             Assert(!st.Protection.FourDimensionsPassed(st), "Changing VmId left 4D evidence passing");

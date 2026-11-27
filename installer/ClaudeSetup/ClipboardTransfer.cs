@@ -99,6 +99,96 @@ public sealed partial class SetupWindow
     private TextBlock? nativeClipboardStatus;
     private DateTime nextNativeClipboardCheck;
     private bool nativeClipboardReady, checkingNativeClipboard, hyperVClipboardSettingsVerified;
+    private HyperVClipboardDirectSync? hyperVDirectClipboard;
+    private string hyperVDirectClipboardVm = "";
+    private long hyperVDirectClipboardGeneration;
+    private bool hyperVDirectClipboardConnected;
+
+    private bool IsHyperVRouteBActiveOrPreferred() =>
+        state.Options.PlatformId == "hyperv" &&
+        (hyperVDesktopMode is HyperVDesktopMode.EmbeddedRdp or HyperVDesktopMode.StandaloneRdp ||
+         HyperVRdpDisplayGeometry.ShouldUseRouteB("hyperv", state.Completed.Contains("guest-ready"), explicitHyperVFallbackToA));
+
+    internal void StartHyperVDirectClipboardSync(string vmId)
+    {
+        if (state.Options.PlatformId != "hyperv" || string.IsNullOrEmpty(vmId) || state.VmId != vmId)
+        {
+            StopHyperVDirectClipboardSync();
+            return;
+        }
+        if (state.Options.DirectClipboardDisabled)
+        {
+            StopHyperVDirectClipboardSync();
+            UpdateNativeClipboardControl("已按你的选择关闭 B 路线直贴纯文本剪贴板。仍可使用手动传送纯文本。");
+            return;
+        }
+        if (hyperVDirectClipboard is not null && hyperVDirectClipboardVm == vmId)
+        {
+            UpdateNativeClipboardControl();
+            return;
+        }
+        StopHyperVDirectClipboardSync();
+        var spec = BusBoundary.TryReadSavedSpec(state);
+        if (spec is null)
+        {
+            UpdateNativeClipboardControl("连接本任务受控网络后将自动启用 B 路线纯文本直贴（Ctrl+C / Ctrl+V）。当前可先使用手动传送纯文本。");
+            return;
+        }
+        try
+        {
+            var clipServiceId = ClipboardProtocol.DeriveServiceId(Guid.Parse(spec.ServiceId));
+            var key = Convert.FromBase64String(spec.Key);
+            var gen = Interlocked.Increment(ref hyperVDirectClipboardGeneration);
+            var sync = new HyperVClipboardDirectSync(Dispatcher, state.Options.WorkspaceId, vmId, clipServiceId, key, gen);
+            sync.ConnectionChanged += connected =>
+            {
+                if (!ReferenceEquals(hyperVDirectClipboard, sync)) return;
+                hyperVDirectClipboardConnected = connected;
+                UpdateNativeClipboardControl();
+            };
+            sync.Start();
+            hyperVDirectClipboard = sync;
+            hyperVDirectClipboardVm = vmId;
+            hyperVDirectClipboardConnected = false;
+            UpdateNativeClipboardControl("正在建立 B 路线纯文本直贴通道（仅限纯文本，屏蔽文件/图片/设备）…");
+            _ = LaunchGuestDirectClipboardAgentAsync(state, clipServiceId, key, gen);
+        }
+        catch (Exception ex)
+        {
+            UpdateNativeClipboardControl($"B 路线直贴剪贴板未能启动（{Redaction.SafeError(ex)}），可使用手动传送纯文本回退。");
+        }
+    }
+
+    private async Task LaunchGuestDirectClipboardAgentAsync(SessionState target, Guid serviceId, byte[] key, long generation)
+    {
+        try
+        {
+            var backend = BoundaryRuntime.BackendFor(target) as HyperV;
+            if (backend is null || !backend.HasManagementConnection || !ReferenceEquals(state, target)) return;
+            var credentials = new Secrets { VmPassword = CurrentGuestPassword(), VmMicrosoftAddress = guestMicrosoftAddress };
+            bool HasLogin() => target.Options.HasUsableGuestPassword(credentials.VmPassword) &&
+                (!target.Options.UsesMicrosoftGuestAccount || SetupOptions.IsMicrosoftGuestAddress(credentials.VmMicrosoftAddress));
+            if (!HasLogin() && target.Options.Remember && SecretStore.Load(target) is { } saved)
+            {
+                credentials.VmPassword = saved.VmPassword;
+                credentials.VmMicrosoftAddress = saved.VmMicrosoftAddress;
+            }
+            if (!HasLogin()) return;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            await HyperVClipboardDirectSync.LaunchGuestAgentAsync(backend, target, credentials, serviceId, key, generation, timeout.Token);
+        }
+        catch { }
+    }
+
+    internal void StopHyperVDirectClipboardSync()
+    {
+        hyperVDirectClipboardVm = "";
+        hyperVDirectClipboardConnected = false;
+        var current = hyperVDirectClipboard;
+        hyperVDirectClipboard = null;
+        if (current is not null)
+            _ = current.DisposeAsync().AsTask();
+    }
 
     private FrameworkElement CreateClipboardControls()
     {
@@ -107,7 +197,7 @@ public sealed partial class SetupWindow
         nativeClipboardStatus = Text("", 11);
         var manual = new Expander
         {
-            Header = "手动传送纯文本", IsExpanded = state.Options.PlatformId == "hyperv", Foreground = Ink, Background = Surface,
+            Header = "手动传送纯文本（排障回退）", IsExpanded = false, Foreground = Ink, Background = Surface,
             Content = new StackPanel
             {
                 Children =
@@ -136,11 +226,16 @@ public sealed partial class SetupWindow
         var visible = platformId is "virtualbox" or "hyperv";
         nativeClipboardButton.Visibility = nativeClipboardStatus.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (!visible) return;
-        if (platformId == "hyperv" && (hyperVDesktopMode is HyperVDesktopMode.EmbeddedRdp or HyperVDesktopMode.StandaloneRdp ||
-            HyperVRdpDisplayGeometry.ShouldUseRouteB("hyperv", state.Completed.Contains("guest-ready"), explicitHyperVFallbackToA)))
+        if (IsHyperVRouteBActiveOrPreferred())
         {
-            nativeClipboardButton.Visibility = Visibility.Collapsed;
-            nativeClipboardStatus.Text = status ?? "B 路线基本控制台已保持磁盘、设备与文件剪贴板隔离（不改宿主全局增强会话）。请直接使用下方「手动传送纯文本」双向复制粘贴。";
+            var directOn = !state.Options.DirectClipboardDisabled;
+            nativeClipboardButton.Visibility = Visibility.Visible;
+            nativeClipboardButton.Content = directOn ? "关闭直贴纯文本剪贴板" : "开启直贴纯文本剪贴板";
+            nativeClipboardStatus.Text = status ?? (directOn
+                ? (hyperVDirectClipboardConnected
+                    ? "B 路线双向纯文本直贴已连接（可直接 Ctrl+C / Ctrl+V；严格屏蔽文件、图片、磁盘与宿主增强会话）。"
+                    : "B 路线双向纯文本直贴已开启（待受控网络与来宾桌面就绪后自动连通；仅纯文本，不改宿主全局增强会话）。")
+                : "已关闭 B 路线直贴纯文本剪贴板（所有设备与文件保持隔离）。需要时可随时重新开启或使用手动传送纯文本。");
             return;
         }
         var allowed = WantsNativeClipboard(state);
@@ -225,6 +320,46 @@ public sealed partial class SetupWindow
     {
         if (nativeClipboardButton is null) return;
         var original = state;
+        if (IsHyperVRouteBActiveOrPreferred())
+        {
+            if (busy || connectingConsole || checkingNativeClipboard)
+            {
+                UpdateNativeClipboardControl("请等待当前操作完成，再调整直贴剪贴板。");
+                return;
+            }
+            var enableDirect = original.Options.DirectClipboardDisabled;
+            original.Options.DirectClipboardDisabled = !enableDirect;
+            try
+            {
+                if (!string.IsNullOrEmpty(original.VmId) && File.Exists(original.Options.StatePath))
+                {
+                    using var taskLock = WorkspaceLock.Acquire(original);
+                    original.Save();
+                }
+            }
+            catch { }
+            if (enableDirect)
+            {
+                StartHyperVDirectClipboardSync(original.VmId);
+            }
+            else
+            {
+                StopHyperVDirectClipboardSync();
+                if (BoundaryRuntime.BackendFor(original) is HyperV activeHv && activeHv.HasManagementConnection)
+                {
+                    var creds = new Secrets { VmPassword = CurrentGuestPassword(), VmMicrosoftAddress = guestMicrosoftAddress };
+                    if (!original.Options.HasUsableGuestPassword(creds.VmPassword) && original.Options.Remember && SecretStore.Load(original) is { } saved)
+                        creds.VmPassword = saved.VmPassword;
+                    if (original.Options.HasUsableGuestPassword(creds.VmPassword))
+                    {
+                        using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                        _ = HyperVClipboardDirectSync.StopGuestAgentAsync(activeHv, original, creds, stopCts.Token);
+                    }
+                }
+                UpdateNativeClipboardControl("已关闭 B 路线直贴纯文本剪贴板，停止同步。仍可使用手动传送纯文本。");
+            }
+            return;
+        }
         if (original.Options.PlatformId != "hyperv" && consoleHost?.IsAttached != true)
         {
             UpdateNativeClipboardControl("请先连接本任务的虚拟机桌面。");
@@ -338,7 +473,8 @@ public sealed partial class SetupWindow
     {
         void Status(string message) { if (clipboardActivity is not null) clipboardActivity.Text = message; }
         if (busy) { Status("请等待当前任务结束，或保存并暂停后再用剪贴板。"); return; }
-        if (consoleHost?.IsAttached != true) { Status("请先连接原虚拟机桌面。"); return; }
+        if (consoleHost?.IsAttached != true && hyperVRdpHost?.IsConnected != true && standaloneRdpWindow is null)
+        { Status("请先连接原虚拟机桌面。"); return; }
         if (!state.Completed.Contains("guest-files")) { Status("来宾尚在安装，请完成 Windows 初始设置并等待来宾工具与部署资源就绪。"); return; }
         try
         {

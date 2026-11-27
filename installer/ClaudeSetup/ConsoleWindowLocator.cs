@@ -118,6 +118,44 @@ public static class ConsoleWindowLocator
             throw new SetupException("虚拟机已关机，但系统拒绝关闭控制台窗口。");
     }
 
+    internal static async Task<bool> CloseAndWaitExitAsync(
+        ConsoleWindow? window,
+        string? expectedName,
+        TimeSpan timeout,
+        CancellationToken token = default)
+    {
+        if (window is null) return true;
+        if (!Path.GetFileName(window.Executable).Equals("vmconnect.exe", StringComparison.OrdinalIgnoreCase))
+            throw new SetupException("仅允许受控关闭当前任务对应的 VMConnect 控制台窗口。");
+        return await CloseAndWaitExitAsync(
+            () => IsAlive(window, expectedName),
+            () =>
+            {
+                NativeConsoleHost.EnableWindow(window.Handle, true);
+                PostMessage(window.Handle, 0x0010, IntPtr.Zero, IntPtr.Zero);
+            },
+            timeout,
+            token);
+    }
+
+    internal static async Task<bool> CloseAndWaitExitAsync(
+        Func<bool> isAlive,
+        Action sendClose,
+        TimeSpan timeout,
+        CancellationToken token = default)
+    {
+        if (!isAlive()) return true;
+        sendClose();
+        var deadline = DateTime.UtcNow + (timeout <= TimeSpan.Zero ? TimeSpan.FromMilliseconds(50) : timeout);
+        while (DateTime.UtcNow < deadline)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!isAlive()) return true;
+            await Task.Delay(80, token);
+        }
+        return !isAlive();
+    }
+
     public static void Track(string vmId,ConsoleWindow window)=>Embedded[vmId]=window;
     public static void Forget(string vmId)=>Embedded.TryRemove(vmId,out _);
     public static ConsoleWindow? Find(string vmId,string executable,string? exactVmName=null,string? vmConfigPath=null)=>Find(vmId,executable,out _,exactVmName,vmConfigPath);

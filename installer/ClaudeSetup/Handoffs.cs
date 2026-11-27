@@ -65,8 +65,8 @@ public sealed partial class SetupWindow
             state.Options.VmwareSecurityConfirmed = true; state.Save(); await StartInstall();
         }, true)));
         if (action.Id == "isolation-boundary") { instructions.Add(Text("这是旧构建保存的记录。当前构建已改为实际边界检查，请重新核对方案和镜像后继续。", 12)); instructions.Add(Row(Action("重新检查安装方案",(_,_)=>Go(0),true))); return Card(instructions.ToArray()); }
-        if (action.Id == "adspower")
-            instructions.Add(Row(Action("不用 API，手动使用 AdsPower", (_, _) => { SelectManualAdsPower(); Navigate(7); })));
+        if (action.Id is "adspower" or "browser-active" or "browser-runtime" or "browser-reopen" && !state.Options.ManualAdsPower)
+            instructions.Add(Row(Action("切换为手动浏览器模式", (_, _) => { SelectManualAdsPower(); Navigate(7); })));
         var openAction = ResumePlan.HasVerifiedSystemDiskProof(state)
             ? Action("打开虚拟机", async (_, _) => await Perform(async (_, token) => await Backends.Open(state, token)))
             : Action("前往「6 开始安装」", (_, _) => Go(5));

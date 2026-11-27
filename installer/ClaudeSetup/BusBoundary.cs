@@ -22,6 +22,27 @@ public static class BusBoundary
         var spec = new BridgeSpec(state.Options.PlatformId, state.VmId, state.Options.WorkspaceId, Guid.NewGuid().ToString(), (uint)RandomNumberGenerator.GetInt32(20000, int.MaxValue - 1), binding.GuestMac, Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
         spec.Validate(); var data = JsonSerializer.SerializeToUtf8Bytes(spec); try { File.WriteAllBytes(file, SecretStore.Protect(data)); } finally { CryptographicOperations.ZeroMemory(data); } return spec;
     }
+    internal static BridgeSpec? TryReadSavedSpec(SessionState state)
+    {
+        if (string.IsNullOrEmpty(state.VmId) || state.Options.PlatformId is not ("hyperv" or "workstation")) return null;
+        try
+        {
+            var file = Paths.Under(state.Options.Private, "bridge-identity.dpapi");
+            if (!File.Exists(file)) return null;
+            var plain = SecretStore.Protect(File.ReadAllBytes(file), true);
+            try
+            {
+                var saved = JsonSerializer.Deserialize<BridgeSpec>(plain);
+                if (saved is null) return null;
+                saved.Validate();
+                if (saved.VmId != state.VmId || saved.WorkspaceId != state.Options.WorkspaceId || saved.Platform != state.Options.PlatformId)
+                    return null;
+                return saved;
+            }
+            finally { CryptographicOperations.ZeroMemory(plain); }
+        }
+        catch { return null; }
+    }
     public static async Task Prepare(IVmBackend backend, SessionState state, BridgeSpec spec, CancellationToken token)
     {
         if (backend is HyperV hyperv) await hyperv.PrepareBoundary(state, spec, token);

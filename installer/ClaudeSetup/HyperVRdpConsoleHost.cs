@@ -219,6 +219,7 @@ internal sealed class HyperVRdpConsoleHost : IDisposable
     private HyperVRdpAxControl? control;
     private TaskCompletionSource<bool>? pendingConnect;
     private TaskCompletionSource<bool>? pendingDisconnect;
+    private long sessionGeneration;
     private bool intentionalDisconnect;
     private bool disposed;
 
@@ -227,10 +228,14 @@ internal sealed class HyperVRdpConsoleHost : IDisposable
     public string ConnectedVmId { get; private set; } = "";
     public int SourceWidth { get; private set; }
     public int SourceHeight { get; private set; }
+    internal long ActiveGeneration => Volatile.Read(ref sessionGeneration);
 
     public event Action<int, int>? SourceSizeChanged;
     public event Action<string>? Connected;
     public event Action<bool, int, string>? Disconnected;
+
+    internal static bool ShouldProcessGenerationEvent(long eventGeneration, long currentGeneration) =>
+        eventGeneration > 0 && eventGeneration == currentGeneration;
 
     private void EnsureControl()
     {
@@ -243,9 +248,11 @@ internal sealed class HyperVRdpConsoleHost : IDisposable
 
     private void HandleComEvent(string name, int arg1, int arg2)
     {
+        var eventGeneration = Volatile.Read(ref sessionGeneration);
         host.Dispatcher.BeginInvoke(() =>
         {
-            if (disposed) return;
+            if (disposed || !ShouldProcessGenerationEvent(eventGeneration, Volatile.Read(ref sessionGeneration)))
+                return;
             switch (name)
             {
                 case "OnRemoteDesktopSizeChange":
@@ -297,13 +304,15 @@ internal sealed class HyperVRdpConsoleHost : IDisposable
     public async Task<bool> ConnectAsync(string vmId, CancellationToken token)
     {
         var profile = HyperVRdpConnectionProfile.CreateVerifiedBasic(vmId);
-        await DisconnectAndWaitAsync(TimeSpan.FromSeconds(3));
+        if (!await DisconnectAndWaitAsync(TimeSpan.FromSeconds(3)))
+            throw new SetupException("未能确认上一个 B 路线桌面会话断开，已阻止重复连接以避免会话冲突。");
         token.ThrowIfCancellationRequested();
 
         EnsureControl();
         if (control?.Ocx is null)
             throw new SetupException("无法初始化本机 RDP 桌面控件，请回退原生控制台。");
 
+        Interlocked.Increment(ref sessionGeneration);
         SourceWidth = 0;
         SourceHeight = 0;
         ConnectedVmId = profile.VmId;
@@ -318,11 +327,14 @@ internal sealed class HyperVRdpConsoleHost : IDisposable
         timeout.CancelAfter(TimeSpan.FromSeconds(12));
         try
         {
-            return await pendingConnect.Task.WaitAsync(timeout.Token);
+            var ok = await pendingConnect.Task.WaitAsync(timeout.Token);
+            if (!ok) await DisconnectAndWaitAsync(TimeSpan.FromSeconds(2));
+            return ok;
         }
         catch (OperationCanceledException)
         {
             await DisconnectAndWaitAsync(TimeSpan.FromSeconds(2));
+            if (token.IsCancellationRequested) throw;
             return false;
         }
         finally
@@ -331,115 +343,149 @@ internal sealed class HyperVRdpConsoleHost : IDisposable
         }
     }
 
-    public async Task DisconnectAndWaitAsync(TimeSpan timeout)
+    private bool IsOcxStillConnected()
+    {
+        if (control?.Ocx is null) return false;
+        try
+        {
+            dynamic ocx = control.Ocx;
+            return (short)ocx.Connected != 0;
+        }
+        catch
+        {
+            return IsConnected;
+        }
+    }
+
+    public async Task<bool> DisconnectAndWaitAsync(TimeSpan timeout)
     {
         if (disposed || control?.Ocx is null)
         {
             IsConnected = false;
             ConnectedVmId = "";
-            return;
+            return true;
         }
-        var shouldDisconnect = IsConnected;
-        try
-        {
-            dynamic ocx = control.Ocx;
-            if ((short)ocx.Connected != 0) shouldDisconnect = true;
-        }
-        catch { }
+        var shouldDisconnect = IsConnected || IsOcxStillConnected();
         if (!shouldDisconnect)
         {
             IsConnected = false;
             ConnectedVmId = "";
-            return;
+            return true;
         }
 
         intentionalDisconnect = true;
         var waiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         pendingDisconnect = waiter;
+        var confirmed = false;
         try
         {
             dynamic ocx = control.Ocx;
             ocx.Disconnect();
             using var cts = new CancellationTokenSource(timeout);
-            try { await waiter.Task.WaitAsync(cts.Token); }
-            catch (OperationCanceledException) { }
+            try
+            {
+                await waiter.Task.WaitAsync(cts.Token);
+                confirmed = true;
+            }
+            catch (OperationCanceledException)
+            {
+                confirmed = !IsOcxStillConnected();
+            }
         }
-        catch { }
+        catch
+        {
+            confirmed = !IsOcxStillConnected();
+        }
         finally
         {
             pendingDisconnect = null;
-            IsConnected = false;
-            ConnectedVmId = "";
             intentionalDisconnect = false;
+            if (confirmed)
+            {
+                Interlocked.Increment(ref sessionGeneration);
+                IsConnected = false;
+                ConnectedVmId = "";
+            }
         }
+        return confirmed;
     }
 
-    private static void ApplyProfile(object rawOcx, HyperVRdpConnectionProfile p)
+    internal static void ApplyProfile(object rawOcx, HyperVRdpConnectionProfile p)
     {
-        dynamic ocx = rawOcx;
-        ocx.Server = p.Server;
-        ocx.ColorDepth = 32;
-        ocx.DesktopWidth = 1920;
-        ocx.DesktopHeight = 1080;
-
-        dynamic adv2 = ocx.AdvancedSettings2;
-        adv2.RDPPort = p.Port;
-        adv2.SmartSizing = p.SmartSizing;
-        adv2.RedirectDrives = p.RedirectDrives;
-        adv2.RedirectPrinters = p.RedirectPrinters;
-        adv2.RedirectPorts = p.RedirectPorts;
-        adv2.RedirectSmartCards = p.RedirectSmartCards;
-        adv2.ConnectToServerConsole = false;
-
-        try { ocx.AdvancedSettings3.RedirectPOSDevices = p.RedirectPosDevices; } catch { }
         try
         {
-            dynamic adv5 = ocx.AdvancedSettings5;
+            dynamic ocx = rawOcx;
+            ocx.Server = p.Server;
+            ocx.ColorDepth = 32;
+            ocx.DesktopWidth = 1920;
+            ocx.DesktopHeight = 1080;
+
+            dynamic adv2 = ocx.AdvancedSettings2 ?? throw new SetupException("缺少 RDP AdvancedSettings2 接口。");
+            adv2.RDPPort = p.Port;
+            adv2.SmartSizing = p.SmartSizing;
+            adv2.RedirectDrives = p.RedirectDrives;
+            adv2.RedirectPrinters = p.RedirectPrinters;
+            adv2.RedirectPorts = p.RedirectPorts;
+            adv2.RedirectSmartCards = p.RedirectSmartCards;
+            adv2.ConnectToServerConsole = false;
+
+            dynamic adv5 = ocx.AdvancedSettings5 ?? throw new SetupException("缺少 RDP AdvancedSettings5 接口。");
             adv5.AuthenticationLevel = p.AuthenticationLevel;
             adv5.RedirectClipboard = p.RedirectClipboard;
-        }
-        catch { }
-        try
-        {
-            dynamic adv7 = ocx.AdvancedSettings7;
+
+            dynamic adv7 = ocx.AdvancedSettings7 ?? throw new SetupException("缺少 RDP AdvancedSettings7 接口。");
             adv7.PCB = p.Pcb;
             adv7.EnableCredSspSupport = p.EnableCredSspSupport;
             adv7.AudioRedirectionMode = p.AudioRedirectionMode;
             adv7.AudioCaptureRedirectionMode = p.AudioCaptureRedirectionMode;
-            adv7.PublicMode = false;
-        }
-        catch { }
-        try { ocx.AdvancedSettings8.NegotiateSecurityLayer = p.NegotiateSecurityLayer; } catch { }
-        try
-        {
-            dynamic adv9 = ocx.AdvancedSettings9;
+
+            dynamic adv8 = ocx.AdvancedSettings8 ?? throw new SetupException("缺少 RDP AdvancedSettings8 接口。");
+            adv8.NegotiateSecurityLayer = p.NegotiateSecurityLayer;
+
+            dynamic adv9 = ocx.AdvancedSettings9 ?? throw new SetupException("缺少 RDP AdvancedSettings9 接口。");
             adv9.RedirectDynamicDevices = p.RedirectDynamicDevices;
             adv9.RedirectDynamicDrives = p.RedirectDynamicDrives;
             adv9.AuthenticationServiceClass = p.AuthenticationServiceClass;
-        }
-        catch { }
 
-        if (rawOcx is IMsRdpExtendedSettings ext)
+            if (rawOcx is not IMsRdpExtendedSettings ext)
+                throw new SetupException("RDP 控件不支持 IMsRdpExtendedSettings，无法锁定凭据与设备隔离策略。");
+
+            SetMandatoryExt(ext, "AuthenticationServiceClass", p.AuthenticationServiceClass);
+            SetMandatoryExt(ext, "DisableCredentialsDelegation", p.DisableCredentialsDelegation);
+            SetMandatoryExt(ext, "NegotiateSecurityLayer", p.NegotiateSecurityLayer);
+            SetMandatoryExt(ext, "EnableCredSspSupport", p.EnableCredSspSupport);
+            SetMandatoryExt(ext, "PCB", p.Pcb);
+            SetMandatoryExt(ext, "RedirectDevices", p.RedirectDevices);
+            SetMandatoryExt(ext, "RedirectDrives", p.RedirectDrives);
+            SetMandatoryExt(ext, "RedirectPrinters", p.RedirectPrinters);
+            SetMandatoryExt(ext, "RedirectPorts", p.RedirectPorts);
+            SetMandatoryExt(ext, "RedirectSmartCards", p.RedirectSmartCards);
+            SetMandatoryExt(ext, "RedirectClipboard", p.RedirectClipboard);
+            SetMandatoryExt(ext, "AudioPlaybackMode", p.AudioRedirectionMode);
+            SetMandatoryExt(ext, "AudioCaptureMode", 0);
+
+            // Optional hardening properties that vary by Windows build
+            try { ocx.AdvancedSettings3.RedirectPOSDevices = p.RedirectPosDevices; } catch { }
+            try { adv7.PublicMode = false; } catch { }
+        }
+        catch (SetupException) { throw; }
+        catch (Exception ex)
         {
-            SetExt(ext, "AuthenticationServiceClass", p.AuthenticationServiceClass);
-            SetExt(ext, "DisableCredentialsDelegation", p.DisableCredentialsDelegation);
-            SetExt(ext, "NegotiateSecurityLayer", p.NegotiateSecurityLayer);
-            SetExt(ext, "EnableCredSspSupport", p.EnableCredSspSupport);
-            SetExt(ext, "PCB", p.Pcb);
-            SetExt(ext, "RedirectDevices", p.RedirectDevices);
-            SetExt(ext, "RedirectDrives", p.RedirectDrives);
-            SetExt(ext, "RedirectPrinters", p.RedirectPrinters);
-            SetExt(ext, "RedirectPorts", p.RedirectPorts);
-            SetExt(ext, "RedirectSmartCards", p.RedirectSmartCards);
-            SetExt(ext, "RedirectClipboard", p.RedirectClipboard);
-            SetExt(ext, "AudioPlaybackMode", p.AudioRedirectionMode);
-            SetExt(ext, "AudioCaptureMode", 0);
+            throw new SetupException($"B 路线桌面隔离或目标绑定参数写入失败，已拒绝建立未锁定会话：{Redaction.SafeError(ex)}");
         }
     }
 
-    private static void SetExt(IMsRdpExtendedSettings ext, string name, object value)
+    private static void SetMandatoryExt(IMsRdpExtendedSettings ext, string name, object value)
     {
-        try { var v = value; ext.set_Property(name, ref v); } catch { }
+        try
+        {
+            var v = value;
+            ext.set_Property(name, ref v);
+        }
+        catch (Exception ex)
+        {
+            throw new SetupException($"无法写入 B 路线强制安全参数 {name}：{Redaction.SafeError(ex)}");
+        }
     }
 
     public void Dispose()
@@ -633,11 +679,17 @@ internal sealed class HyperVStandaloneRdpWindow : Window
         }
     }
 
-    public async Task CloseCleanlyAsync()
+    public async Task<bool> CloseCleanlyAsync()
     {
-        await rdpHost.DisconnectAndWaitAsync(TimeSpan.FromSeconds(3));
+        var disconnected = await rdpHost.DisconnectAndWaitAsync(TimeSpan.FromSeconds(3));
+        if (!disconnected)
+        {
+            statusText.Text = "未能确认独立桌面断开，已保留当前窗口以避免会话冲突。请稍后重试。";
+            return false;
+        }
         rdpHost.Dispose();
         if (IsVisible) Close();
+        return true;
     }
 
     private async Task ReturnToEmbeddedAsync()
@@ -646,7 +698,12 @@ internal sealed class HyperVStandaloneRdpWindow : Window
         returning = true;
         try
         {
-            await rdpHost.DisconnectAndWaitAsync(TimeSpan.FromSeconds(3));
+            var disconnected = await rdpHost.DisconnectAndWaitAsync(TimeSpan.FromSeconds(3));
+            if (!disconnected)
+            {
+                statusText.Text = "未能确认独立桌面断开，已保留当前窗口以避免会话冲突。请稍后重试。";
+                return;
+            }
             rdpHost.Dispose();
             Close();
             await onReturnToEmbedded();

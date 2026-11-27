@@ -179,5 +179,112 @@ public static class DesktopRecoveryTests
                 non16By9.StatusText.Contains("非 16:9"),
                 $"4:3 source geometry did not preserve full aspect ratio: {non16By9}");
         }));
+        await check("confirmed-vmconnect-close-generation-guard-and-mandatory-isolation-no-swallow", async () => {
+            var alive = true;
+            var closeSent = 0;
+            var closedOk = await ConsoleWindowLocator.CloseAndWaitExitAsync(
+                () => alive,
+                () => { closeSent++; alive = false; },
+                TimeSpan.FromMilliseconds(400));
+            Assert(closedOk && closeSent == 1, "CloseAndWaitExitAsync must confirm exit when window closes");
+
+            var stillAlive = true;
+            var timedOut = await ConsoleWindowLocator.CloseAndWaitExitAsync(
+                () => stillAlive,
+                () => { },
+                TimeSpan.FromMilliseconds(120));
+            Assert(!timedOut, "CloseAndWaitExitAsync must return false on timeout without faking release");
+
+            Assert(HyperVRdpConsoleHost.ShouldProcessGenerationEvent(2, 2) &&
+                !HyperVRdpConsoleHost.ShouldProcessGenerationEvent(1, 2) &&
+                !HyperVRdpConsoleHost.ShouldProcessGenerationEvent(0, 0),
+                "stale COM generation events must be ignored");
+
+            var profile = HyperVRdpConnectionProfile.CreateVerifiedBasic(id);
+            var threwOnMissingExtendedSettings = false;
+            try { HyperVRdpConsoleHost.ApplyProfile(new object(), profile); }
+            catch (SetupException) { threwOnMissingExtendedSettings = true; }
+            Assert(threwOnMissingExtendedSettings, "ApplyProfile must throw SetupException when mandatory binding/isolation cannot be written");
+        });
+        await check("manual-adspower-readonly-saved-network-and-hyperv-manual-only-new-tasks", () => Sync(() => {
+            Assert(Deployment.ShouldUseReadOnlySavedNetworkCheck(checkSavedNetwork: true, manualAdsPower: true, resumeNetwork: true),
+                "manual AdsPower checkSavedNetwork must route to strictly read-only path");
+            Assert(!Deployment.ShouldUseReadOnlySavedNetworkCheck(checkSavedNetwork: false, manualAdsPower: true, resumeNetwork: true),
+                "explicit reconfigure must not be hijacked as read-only");
+            Assert(!Deployment.ShouldUseReadOnlySavedNetworkCheck(checkSavedNetwork: true, manualAdsPower: true, resumeNetwork: false),
+                "missing saved network checkpoint must not run read-only saved check");
+
+            Assert(SetupOptions.ShouldForceManualAdsPower(isHyperVStandalone: true, platformId: "hyperv", vmId: ""),
+                "new Hyper-V standalone task must force ManualAdsPower=true");
+            Assert(!SetupOptions.ShouldForceManualAdsPower(isHyperVStandalone: true, platformId: "hyperv", vmId: id),
+                "existing saved Hyper-V task must preserve its saved mode without wiping credentials");
+            Assert(!SetupOptions.ShouldForceManualAdsPower(isHyperVStandalone: false, platformId: "virtualbox", vmId: ""),
+                "non-HyperV-standalone task must not force manual mode");
+        }));
+        await check("route-b-direct-clipboard-protocol-unicode-only-isolation-and-loop-suppression", async () => {
+            var busId = Guid.Parse("11111111-2222-3333-4444-555555555555");
+            var clipId1 = ClipboardProtocol.DeriveServiceId(busId);
+            var clipId2 = ClipboardProtocol.DeriveServiceId(busId);
+            Assert(clipId1 == clipId2 && clipId1 != busId, "DeriveServiceId must be deterministic and distinct from bus ServiceId");
+
+            Assert(!ClipboardProtocol.ShouldForwardClipboardSnapshot(hasFileDropList: true, hasUnicodeText: true, "C:\\secret.txt", out _),
+                "file drop list must be strictly blocked even when text is also present");
+            Assert(!ClipboardProtocol.ShouldForwardClipboardSnapshot(hasFileDropList: false, hasUnicodeText: false, "ignored", out _),
+                "image-only or non-text clipboard must be ignored");
+            Assert(!ClipboardProtocol.ShouldForwardClipboardSnapshot(hasFileDropList: false, hasUnicodeText: true, "abc\0def", out _),
+                "NUL character must be rejected");
+            Assert(!ClipboardProtocol.ShouldForwardClipboardSnapshot(hasFileDropList: false, hasUnicodeText: true, new string('x', ClipboardProtocol.MaxTextLength + 1), out _),
+                "oversized clipboard text must be rejected");
+            Assert(ClipboardProtocol.ShouldForwardClipboardSnapshot(hasFileDropList: false, hasUnicodeText: true, "Hello 世界 123", out var clean) && clean == "Hello 世界 123",
+                "valid Unicode plain text must be forwarded");
+
+            var dedup = new ClipboardSyncDeduplicator();
+            var t0 = DateTime.UtcNow;
+            dedup.Reset("task-a", 1, 10);
+            Assert(dedup.ShouldSendLocalChange("task-a", 1, 11, "host copy", t0), "new local copy should be sent");
+            Assert(!dedup.ShouldSendLocalChange("task-a", 1, 11, "host copy", t0), "same clipboard sequence must not resend");
+            Assert(dedup.TryBeginApplyRemote("task-a", 1, "guest copy", t0.AddMilliseconds(500), out var remoteHash), "remote update should apply");
+            dedup.CompleteApplyRemote("task-a", 1, 12, remoteHash, t0.AddMilliseconds(510));
+            Assert(!dedup.ShouldSendLocalChange("task-a", 1, 12, "guest copy", t0.AddMilliseconds(600)), "echo of applied remote text must be suppressed by seq");
+            Assert(!dedup.ShouldSendLocalChange("task-a", 1, 13, "guest copy", t0.AddMilliseconds(700)), "echo of applied remote text must be suppressed by hash window");
+            // Switching task/generation immediately blocks old task events and prevents replay.
+            dedup.Reset("task-b", 2, 13);
+            Assert(!dedup.ShouldSendLocalChange("task-a", 1, 14, "old task", t0.AddSeconds(1)), "old task local change must be ignored");
+            Assert(!dedup.TryBeginApplyRemote("task-a", 1, "old remote", t0.AddSeconds(1), out _), "old task remote change must be ignored");
+
+            // End-to-end mutual HMAC handshake (CLDCLP01) + framed plain-text round-trip over paired duplex pipes.
+            using var c2s = new System.IO.Pipes.AnonymousPipeServerStream(System.IO.Pipes.PipeDirection.Out);
+            using var c2sRead = new System.IO.Pipes.AnonymousPipeClientStream(System.IO.Pipes.PipeDirection.In, c2s.GetClientHandleAsString());
+            using var s2c = new System.IO.Pipes.AnonymousPipeServerStream(System.IO.Pipes.PipeDirection.Out);
+            using var s2cRead = new System.IO.Pipes.AnonymousPipeClientStream(System.IO.Pipes.PipeDirection.In, s2c.GetClientHandleAsString());
+            await using var clientStream = new DuplexTestStream(s2cRead, c2s);
+            await using var serverStream = new DuplexTestStream(c2sRead, s2c);
+            var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+            var serverAuth = ClipboardProtocol.AuthenticateAsync(serverStream, key, server: true, CancellationToken.None);
+            var clientAuth = ClipboardProtocol.AuthenticateAsync(clientStream, key, server: false, CancellationToken.None);
+            await Task.WhenAll(serverAuth, clientAuth);
+
+            await ClipboardProtocol.WriteFrameAsync(clientStream, new(ClipboardFrameType.TextUpdate, 7, 2, "双向直贴测试 ✓"), CancellationToken.None);
+            var received = await ClipboardProtocol.ReadFrameAsync(serverStream, CancellationToken.None);
+            Assert(received is { Type: ClipboardFrameType.TextUpdate, Sequence: 7, Generation: 2, Text: "双向直贴测试 ✓" },
+                $"ClipboardProtocol round-trip mismatch: {received}");
+        });
+    }
+
+    private sealed class DuplexTestStream(System.IO.Stream reader, System.IO.Stream writer) : System.IO.Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() => writer.Flush();
+        public override Task FlushAsync(CancellationToken token) => writer.FlushAsync(token);
+        public override int Read(byte[] buffer, int offset, int count) => reader.Read(buffer, offset, count);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default) => reader.ReadAsync(buffer, token);
+        public override void Write(byte[] buffer, int offset, int count) => writer.Write(buffer, offset, count);
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken token = default) => writer.WriteAsync(buffer, token);
+        public override long Seek(long offset, System.IO.SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 }

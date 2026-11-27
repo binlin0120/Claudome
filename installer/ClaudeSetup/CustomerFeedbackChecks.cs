@@ -292,9 +292,9 @@ public sealed partial class SetupWindow
 
         var maintenance = desktopMaintenanceExpander ?? throw new SetupException("Missing desktop maintenance expander.");
         Button MaintenanceAction(string label) => ((StackPanel)maintenance.Content).Children.OfType<Button>().Single(b => b.Content as string == label);
-        await Click(MaintenanceAction("防护结果"));
+        await Click(MaintenanceAction("开始验真（安全验真页）"));
         var maintenanceRoutes = section == 5;
-        await Click(WorkspaceAction("打开程序内桌面"));
+        await Click(WorkspaceAction("进入桌面"));
         maintenanceRoutes &= section == 7;
         await Click(MaintenanceAction("打开网络配置"));
         maintenanceRoutes &= section == 3;
@@ -371,9 +371,21 @@ public sealed partial class SetupWindow
         protection.Measure(new Size(780, double.PositiveInfinity));
         protection.Arrange(new Rect(0, 0, 780, protection.DesiredSize.Height));
         var auditControls = Descendants<Button>(protection).Select(b => b.Content?.ToString()).ToArray();
-        var auditButtonReady = auditControls.Contains("核验当前防护") && auditControls.Contains("启用来宾阻断审核并重测");
+        var auditTexts = Descendants<TextBlock>(protection).Select(t => t.Text).ToArray();
+        var advancedExpander = Descendants<Expander>(protection).FirstOrDefault(e => e.Name == "AdvancedChecksExpander");
+        var advancedButtons = advancedExpander?.Content is DependencyObject advContent
+            ? Descendants<Button>(advContent).Select(b => b.Content?.ToString()).ToArray()
+            : [];
+        var auditButtonReady = auditControls.Contains("开始验真") &&
+            advancedExpander is { IsExpanded: false } &&
+            advancedButtons.Contains("启用来宾阻断审核并重测") &&
+            auditTexts.Any(t => t.Contains("1. 防护与运行配置")) &&
+            auditTexts.Any(t => t.Contains("2. 来宾出口")) &&
+            auditTexts.Any(t => t.Contains("3. DNS 与旁路")) &&
+            auditTexts.Any(t => t.Contains("4. 断线阻断与恢复")) &&
+            auditTexts.Any(t => t.Contains("手动浏览器出口确认"));
         if (!auditButtonReady) failed++;
-        rows.Add(new { name = "protection-card-offers-explicit-guest-block-audit-action", passed = auditButtonReady });
+        rows.Add(new { name = "protection-card-offers-one-click-4dim-and-advanced-checks-expander", passed = auditButtonReady });
 
         var beforeCompletionFixture = state;
         state = new SessionState
@@ -392,11 +404,15 @@ public sealed partial class SetupWindow
             }
         };
         UpdateDesktopActivity();
+        var expectedInitialPending = state.Options.PlatformId == "hyperv"
+            ? new[] { "DNS 与直连旁路", "断线阻断与恢复", "手动浏览器出口确认" }
+            : new[] { "DNS 与直连旁路", "手动浏览器出口确认" };
         var manualCompletionEntry = desktopFinish is { Visibility: Visibility.Visible, IsEnabled: true } &&
             desktopConfirmAdsExit is { Visibility: Visibility.Visible, IsEnabled: true } &&
-            state.Protection.PendingChecks(state).SequenceEqual(new[] { "AdsPower 窗口出口", "DNS 与直连旁路" });
+            state.Protection.PendingChecks(state).SequenceEqual(expectedInitialPending);
         state.Protection.Browser = new(CheckStatus.Passed);
         state.Protection.Dns = new(CheckStatus.Passed);
+        state.Protection.Outage = new(CheckStatus.Passed);
         UpdateDesktopActivity();
         manualCompletionEntry &= desktopConfirmAdsExit is { Visibility: Visibility.Collapsed } &&
             state.Protection.PendingChecks(state).Length == 0 &&
@@ -432,9 +448,13 @@ public sealed partial class SetupWindow
         var hasForceRepairItem = desktopMaintenanceExpander is not null &&
             (desktopMaintenanceExpander.Content as Panel)?.Children.OfType<Button>().Any(button => button.Content?.ToString() == "强制关闭无响应虚拟机并修复" &&
                 button.Visibility == (ProductProfile.IsHyperVStandalone ? Visibility.Collapsed : Visibility.Visible)) == true;
+        var hasClipboardControl = desktopMaintenanceExpander?.Content is Panel maintPanel &&
+            maintPanel.Children.OfType<Expander>().Any(exp =>
+                exp.Header?.ToString()?.Contains("剪贴板") == true &&
+                exp.Content is Panel clipPanel &&
+                clipPanel.Children.OfType<Expander>().Any(sub => sub.Header?.ToString()?.Contains("手动传送纯文本") == true));
         var desktopInputControls = desktopGuidePanel is not null &&
-            desktopClipboardPopup?.Child is DependencyObject clipRoot &&
-            Descendants<Expander>(clipRoot).Any(control => control.Header?.ToString() == "手动传送纯文本") &&
+            hasClipboardControl &&
             Descendants<Button>(desktopGuidePanel).All(button => button.Content?.ToString() != "聚焦虚拟机键盘") &&
             hasForceRepairItem;
         if (!desktopInputControls) failed++;
@@ -492,7 +512,7 @@ public sealed partial class SetupWindow
         var autoRestoreDir = Path.Combine(directory, "auto-restore-fixture");
         if (Directory.Exists(autoRestoreDir)) Directory.Delete(autoRestoreDir, true);
         Paths.EnsureWorkspace(autoRestoreDir);
-        var autoState = new SessionState { VmId = "22222222-2222-2222-2222-222222222222", Stage = "6 / 7  配置来宾环境", Status = "已暂停，可继续原任务", Options = new() { Root = autoRestoreDir, Remember = true, NetworkSource = "已有订阅链接", NodeName = fixture.Name, Country = "US", TimeZoneId = "Pacific Standard Time" } };
+        var autoState = new SessionState { VmId = "22222222-2222-2222-2222-222222222222", Stage = "6 / 7  配置来宾环境", Status = "已暂停，可继续原任务", Options = new() { Root = autoRestoreDir, Remember = true, ManualAdsPower = false, NetworkSource = "已有订阅链接", NodeName = fixture.Name, Country = "US", TimeZoneId = "Pacific Standard Time" } };
         autoState.Save();
         SecretStore.Save(autoState.Options.Private, new Secrets { VmPassword = "FictionalAutoRestore!1", SubscriptionUrl = "https://example.invalid/auto-sub", SelectedNodeJson = fixture.Json, AdsPowerApiKey = "fictional-auto-ads-key" });
         ApplyLoadedTask(autoState, loadSecrets: true, interactive: false);
@@ -914,7 +934,7 @@ public sealed partial class SetupWindow
             Navigate(2);
             var machinesWithWin = Descendants<Button>(main).Select(b => b.Content?.ToString() ?? "").ToList();
             startedAllowed = CanEnterDesktopWorkspace() &&
-                overviewWithWin.Any(t => t.Contains("继续进入空间")) &&
+                overviewWithWin.Any(t => t == "进入桌面") &&
                 machinesWithWin.Any(t => t == "进入虚拟机");
 
             var twoHopYml = """
@@ -1128,22 +1148,35 @@ public sealed partial class SetupWindow
         UpdateDesktopActivity();
         UpdateNativeClipboardControl();
         var finishLinksToSafetyWhenIncomplete = desktopFinish?.Visibility == Visibility.Visible &&
-            desktopFinish.Content as string == "去「安全验真」";
-        var routeBClipboardSafe = nativeClipboardButton?.Visibility == Visibility.Collapsed &&
-            nativeClipboardStatus?.Text.Contains("手动传送纯文本") == true;
+            desktopFinish.Content as string == "去安全验真";
+        var routeBClipboardSafe = nativeClipboardButton?.Visibility == Visibility.Visible &&
+            (nativeClipboardButton.Content as string)?.Contains("直贴纯文本") == true &&
+            nativeClipboardStatus?.Text.Contains("不改宿主全局增强会话") == true;
+        var compactMoreMenuPresent = Descendants<Button>(desktopTopBar!).Any(b => b.Name == "DesktopMoreMenuButton" && b.Content as string == "更多 ▾");
         state.Completed.Remove("guest-ready");
         state.Completed.Remove("software");
         state.PendingActions.RemoveAll(a => a.Id == "resume-network");
         state.VmId = savedVmForP1;
         state.Options = savedOptsSnapshot;
         var desktop16By9UiOk = expandedAspectOk && resumeBannerOk && collapsedOk && fullscreenEntered &&
-            fullscreenRestored && finishLinksToSafetyWhenIncomplete && routeBClipboardSafe;
+            fullscreenRestored && finishLinksToSafetyWhenIncomplete && routeBClipboardSafe && compactMoreMenuPresent;
         if (!desktop16By9UiOk) failed++;
-        rows.Add(new { name = "desktop-16by9-frame-collapsible-topbar-embedded-fullscreen-and-resume-network-banner", passed = desktop16By9UiOk, expandedAspectOk, resumeBannerOk, collapsedOk, fullscreenEntered, fullscreenRestored, finishLinksToSafetyWhenIncomplete, routeBClipboardSafe });
+        rows.Add(new { name = "desktop-16by9-frame-collapsible-topbar-embedded-fullscreen-and-resume-network-banner", passed = desktop16By9UiOk, expandedAspectOk, resumeBannerOk, collapsedOk, fullscreenEntered, fullscreenRestored, finishLinksToSafetyWhenIncomplete, routeBClipboardSafe, compactMoreMenuPresent });
         Navigate(0);
         var headingRestoredOnOverview = shellHeading?.Visibility == Visibility.Visible;
+        var overviewThreeStagesOk = Descendants<TextBlock>(main).Any(t => t.Text == "安装向导") &&
+            Descendants<TextBlock>(main).Any(t => t.Text == "安全验真") &&
+            Descendants<TextBlock>(main).Any(t => t.Text == "专属桌面");
+        var settingsGroupedOk = topMorePopup?.Child is DependencyObject popRoot &&
+            Descendants<TextBlock>(popRoot).Any(t => t.Text == "外观") &&
+            Descendants<TextBlock>(popRoot).Any(t => t.Text == "任务与资源") &&
+            Descendants<TextBlock>(popRoot).Any(t => t.Text == "帮助与关于");
+        var hyperVWizardHidesApiKeyOk = !ProductProfile.IsHyperVStandalone ||
+            (manualAdsPower.Visibility == Visibility.Collapsed && adsApiKey.Visibility == Visibility.Collapsed);
         if (!headingRestoredOnOverview) failed++;
         rows.Add(new { name = "desktop-hides-redundant-heading-and-restores-on-other-sections", passed = headingRestoredOnOverview });
+        if (!(overviewThreeStagesOk && settingsGroupedOk && hyperVWizardHidesApiKeyOk)) failed++;
+        rows.Add(new { name = "three-stage-overview-grouped-settings-and-hyperv-manual-only-wizard", passed = overviewThreeStagesOk && settingsGroupedOk && hyperVWizardHidesApiKeyOk, overviewThreeStagesOk, settingsGroupedOk, hyperVWizardHidesApiKeyOk });
 
         Directory.Delete(autoRestoreDir, true);
         ApplyLoadedTask(new SessionState { Options = new() { Root = Path.Combine(directory, "clean-reset-fixture") } }, false);

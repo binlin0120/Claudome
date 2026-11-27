@@ -66,12 +66,16 @@ public sealed class SetupOptions
     public bool AcceptChanges { get; set; }
     public bool AcceptWindowsLicense { get; set; }
     public bool TestOutage { get; set; }
-    public bool ManualAdsPower { get; set; }
+    public bool ManualAdsPower { get; set; } = ProductProfile.IsHyperVStandalone;
     public string WorkspaceId { get; set; } = Guid.NewGuid().ToString("N");
     public string PlatformId { get; set; } = ProductProfile.IsHyperVStandalone ? "hyperv" : "virtualbox";
     public bool VmwareSecurityConfirmed { get; set; }
     public bool HyperVBasicConsoleConfirmed { get; set; }
     public bool SharedClipboardEnabled { get; set; } = true;
+    public bool DirectClipboardDisabled { get; set; }
+
+    public static bool ShouldForceManualAdsPower(bool isHyperVStandalone, string platformId, string? vmId) =>
+        isHyperVStandalone && platformId == "hyperv" && string.IsNullOrEmpty(vmId);
 
     public string StatePath => Path.Combine(Root, "setup-state.json");
     public string Cache => Path.Combine(Root, "downloads");

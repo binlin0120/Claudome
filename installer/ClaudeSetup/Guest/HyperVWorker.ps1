@@ -492,11 +492,19 @@ function Bus-ServicePath($Data) {
     if($Data.workspaceId -ne $o.WorkspaceId -or ([string]$Data.serviceId) -notmatch '^[a-fA-F0-9-]{36}$'){throw 'VM_SCOPE'}
     return 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\'+([guid]$Data.serviceId).ToString()
 }
+function Clipboard-ServicePath($Data) {
+    if($Data.workspaceId -ne $o.WorkspaceId -or ([string]$Data.clipboardServiceId) -notmatch '^[a-fA-F0-9-]{36}$'){throw 'VM_SCOPE'}
+    return 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\'+([guid]$Data.clipboardServiceId).ToString()
+}
 function Verify-BusService($Data,$Vm) {
     Assert-NoNetworkAdapter $Vm
     Verify-Console $Vm
     $path=Bus-ServicePath $Data;$expected='Claudome '+[string]$Vm.Id+' '+[string]$o.WorkspaceId
     if(-not(Test-Path -LiteralPath $path) -or (Get-ItemPropertyValue -LiteralPath $path -Name ElementName) -ne $expected){throw 'BOUNDARY_SERVICE'}
+    if($Data.PSObject.Properties['clipboardServiceId'] -and -not [string]::IsNullOrWhiteSpace([string]$Data.clipboardServiceId)) {
+        $clipPath=Clipboard-ServicePath $Data;$clipExpected='ClaudomeClipboard '+[string]$Vm.Id+' '+[string]$o.WorkspaceId
+        if(-not(Test-Path -LiteralPath $clipPath) -or (Get-ItemPropertyValue -LiteralPath $clipPath -Name ElementName) -ne $clipExpected){throw 'BOUNDARY_SERVICE'}
+    }
     $metadata=@(Get-VMIntegrationService -VM $Vm | Where-Object {$_.Id.ToString() -match '2a34b1c2-fd73-4043-8a5b-dd2159bc743f' -or $_.Name -match 'Key-Value|Data Exchange|数据交换|键值'})
     if($metadata.Count -ne 1 -or $metadata[0].Enabled){throw 'BOUNDARY_METADATA'}
 }
@@ -1085,6 +1093,11 @@ try {
                             $path=Bus-ServicePath $d;$expected='Claudome '+[string]$vm.Id+' '+[string]$o.WorkspaceId
                             if(Test-Path -LiteralPath $path){if((Get-ItemPropertyValue -LiteralPath $path -Name ElementName) -ne $expected){throw 'BOUNDARY_SERVICE'}}
                             else{New-Item -Path $path -Force | Out-Null;New-ItemProperty -LiteralPath $path -Name ElementName -Value $expected -PropertyType String | Out-Null}
+                            if($d.PSObject.Properties['clipboardServiceId'] -and -not [string]::IsNullOrWhiteSpace([string]$d.clipboardServiceId)) {
+                                $clipPath=Clipboard-ServicePath $d;$clipExpected='ClaudomeClipboard '+[string]$vm.Id+' '+[string]$o.WorkspaceId
+                                if(Test-Path -LiteralPath $clipPath){if((Get-ItemPropertyValue -LiteralPath $clipPath -Name ElementName) -ne $clipExpected){throw 'BOUNDARY_SERVICE'}}
+                                else{New-Item -Path $clipPath -Force | Out-Null;New-ItemProperty -LiteralPath $clipPath -Name ElementName -Value $clipExpected -PropertyType String | Out-Null}
+                            }
                             Verify-BusService $d $vm;$value='verified'
                         }
                         'boundary-verify' {$vm=Target-VM $d;Verify-BusService $d $vm;$value='verified'}

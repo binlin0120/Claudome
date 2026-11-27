@@ -48,10 +48,11 @@ public sealed partial class SetupWindow
     {
         taskSavingEnabled=enabled;taskSaveTimer.Tick+=(_,_)=>SaveCurrentTask();if(enabled)taskSaveTimer.Start();
         Closing+=OnTaskClosing;
-        Closed+=(_,_)=>{taskSaveTimer.Stop();desktopConnectionCancellation?.Cancel();mediaCancellation?.Cancel();desktopTimer.Stop();};
+        Closed+=(_,_)=>{StopHyperVDirectClipboardSync();taskSaveTimer.Stop();desktopConnectionCancellation?.Cancel();mediaCancellation?.Cancel();desktopTimer.Stop();};
     }
     private void PauseCurrentTask()
     {
+        StopHyperVDirectClipboardSync();
         CancelPendingHyperVDisplayFit(resetViewport: true);
         desktopConnectionPolicy.Suspend();autoConnectDesktop=false;
         BoundaryRuntime.RevokeWindowsSignInHold(state);

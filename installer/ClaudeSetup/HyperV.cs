@@ -951,11 +951,16 @@ public sealed class HyperV : IVmBackend
     }
     private object Context(SessionState s, Secrets? secrets = null) => new { vmId = s.VmId, password = secrets?.VmPassword };
     public Task Configure(SessionState s, CancellationToken token) => Call(s.Options, "configure", Context(s), token);
-    public Task PrepareBoundary(SessionState s, BridgeSpec spec, CancellationToken token) => Call(s.Options,"boundary-prepare",new {vmId=s.VmId,serviceId=spec.ServiceId,workspaceId=spec.WorkspaceId},token);
+    public Task PrepareBoundary(SessionState s, BridgeSpec spec, CancellationToken token)
+    {
+        var clipServiceId = ClipboardProtocol.DeriveServiceId(Guid.Parse(spec.ServiceId)).ToString("D");
+        return Call(s.Options, "boundary-prepare", new { vmId = s.VmId, serviceId = spec.ServiceId, clipboardServiceId = clipServiceId, workspaceId = spec.WorkspaceId }, token);
+    }
     public Task VerifyBoundary(SessionState s, BridgeSpec spec, CancellationToken token)
     {
         verifier ??= new HyperV(this);
-        return verifier.Call(s.Options,"boundary-verify",new {vmId=s.VmId,serviceId=spec.ServiceId,workspaceId=spec.WorkspaceId},token);
+        var clipServiceId = ClipboardProtocol.DeriveServiceId(Guid.Parse(spec.ServiceId)).ToString("D");
+        return verifier.Call(s.Options, "boundary-verify", new { vmId = s.VmId, serviceId = spec.ServiceId, clipboardServiceId = clipServiceId, workspaceId = spec.WorkspaceId }, token);
     }
     public Task VerifyOffline(SessionState s, CancellationToken token) => Call(s.Options,"boundary-offline",Context(s),token);
     public Task<string> RestoreConsole(SessionState s,CancellationToken token)=>Call(s.Options,"console-restore",Context(s),token);

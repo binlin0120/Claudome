@@ -325,7 +325,19 @@ public sealed partial class SetupWindow : Window
             })));
         pages[4].Children.Add(Card(Field("虚拟机 Windows 账号", user), localGuestPasswordControls, microsoftGuestPasswordHint, remember,
             Text("勾选后使用当前 Windows 用户的本机加密机制保存。换电脑不能直接复制使用；不勾选时，重开安装器需要重新填写。", 11)));
-        pages[4].Children.Add(Card(manualAdsPower, Field("AdsPower API Key（自动配置时选填）", adsApiKey, "手动使用时无须开启 API 或填写密钥。自动配置时，如果接口要求密钥，可从 AdsPower 的 API 页面复制到这里。")));
+        if (ProductProfile.IsHyperVStandalone)
+        {
+            manualAdsPower.IsChecked = true;
+            manualAdsPower.Visibility = Visibility.Collapsed;
+            adsApiKey.Visibility = Visibility.Collapsed;
+            pages[4].Children.Add(Card(
+                Text("浏览器配置方式 · 手动模式", 14, false),
+                Text("Hyper-V 专线版新建任务直接使用手动浏览器模式，无需开启 AdsPower 本地 API 或填写 API Key。安装完成后在专属桌面按 3 步指引核对即可。", 11.5)));
+        }
+        else
+        {
+            pages[4].Children.Add(Card(manualAdsPower, Field("AdsPower API Key（自动配置时选填）", adsApiKey, "手动使用时无须开启 API 或填写密钥。自动配置时，如果接口要求密钥，可从 AdsPower 的 API 页面复制到这里。")));
+        }
         log.IsReadOnly = true; log.Height = 175;
         pages[5].Children.Add(Card(Text("准备好后开始", 16, false), Text("安装流程：核验资源 → 安装虚拟机组件 → 安装 Windows → 配置所选网络 → 安装 AdsPower → 回读结果。遇到需要本人操作的步骤会暂停提示。"), consent, Row(Action("仅下载并核验资源", async (_, _) => await Perform(async (o, token) => await Engine().DownloadResources(o, token))), Action("开始 / 继续部署", async (_, _) => await StartInstall(), true), Action("暂停", (_, _) => { cancellation?.Cancel(); banner.Text = "已请求暂停；进行中的系统安装或来宾配置步骤会先结束。"; })), progress, progressText, log));
         pages[5].Children.Add(BuildValidationCard());
@@ -594,14 +606,19 @@ public sealed partial class SetupWindow : Window
     private SetupOptions Options()
     {
         int Number(TextBox field, string label) => int.TryParse(field.Text.Trim(), out var n) ? n : throw new SetupException(label + "请填写整数。");
-        var o = new SetupOptions { Root = root.Text.Trim(), VmName = vmName.Text.Trim(), MemoryMb = Number(memory, "内存"), CpuCount = Number(cpu, "CPU"), DiskGb = Number(disk, "磁盘"), IsoPath = iso.Text.Trim(), IsoUrl = isoUrl.Text.Trim(), IsoSha256 = isoHash.Text.Trim().ToLowerInvariant(), WindowsImageIndex = Number(imageIndex, "镜像索引"), UserName = user.Text.Trim(), NetworkSource = source.SelectedItem?.ToString() ?? "稍后配置", NodeName = (node.SelectedItem as ProxyNode)?.Name ?? "", Country = country.SelectedValue?.ToString() ?? "US", TimeZoneId = timeZone.SelectedValue?.ToString() ?? "Pacific Standard Time", Remember = remember.IsChecked == true, AcceptChanges = consent.IsChecked == true, AcceptWindowsLicense = license.IsChecked == true && windowsImages.SelectedItem is WindowsImageChoice && selectedMedia?.Sha256 == isoHash.Text.Trim(), TestOutage = outage.IsChecked == true, ManualAdsPower = manualAdsPower.IsChecked == true, WorkspaceId = state.Options.WorkspaceId };
+        var selectedPlatform = platform.SelectedValue?.ToString() ?? (ProductProfile.IsHyperVStandalone ? "hyperv" : "virtualbox");
+        var effectiveManualAdsPower = SetupOptions.ShouldForceManualAdsPower(ProductProfile.IsHyperVStandalone, selectedPlatform, state.VmId)
+            ? true
+            : (ProductProfile.IsHyperVStandalone ? state.Options.ManualAdsPower : manualAdsPower.IsChecked == true);
+        var o = new SetupOptions { Root = root.Text.Trim(), VmName = vmName.Text.Trim(), MemoryMb = Number(memory, "内存"), CpuCount = Number(cpu, "CPU"), DiskGb = Number(disk, "磁盘"), IsoPath = iso.Text.Trim(), IsoUrl = isoUrl.Text.Trim(), IsoSha256 = isoHash.Text.Trim().ToLowerInvariant(), WindowsImageIndex = Number(imageIndex, "镜像索引"), UserName = user.Text.Trim(), NetworkSource = source.SelectedItem?.ToString() ?? "稍后配置", NodeName = (node.SelectedItem as ProxyNode)?.Name ?? "", Country = country.SelectedValue?.ToString() ?? "US", TimeZoneId = timeZone.SelectedValue?.ToString() ?? "Pacific Standard Time", Remember = remember.IsChecked == true, AcceptChanges = consent.IsChecked == true, AcceptWindowsLicense = license.IsChecked == true && windowsImages.SelectedItem is WindowsImageChoice && selectedMedia?.Sha256 == isoHash.Text.Trim(), TestOutage = outage.IsChecked == true, ManualAdsPower = effectiveManualAdsPower, WorkspaceId = state.Options.WorkspaceId };
         o.ChainEnabled = source.SelectedIndex!=3 && (chain.IsChecked == true || (node.SelectedItem as ProxyNode)?.Upstream is not null);
         o.ChainFromImport=o.ChainEnabled && chain.IsChecked!=true;
         o.UpstreamSource=upstreamSource.SelectedItem?.ToString() ?? "节点链接 / 本地配置";o.UpstreamName=(upstreamNode.SelectedItem as ProxyNode)?.Name ?? (node.SelectedItem as ProxyNode)?.Upstream?.Name ?? "";
-        o.PlatformId = platform.SelectedValue?.ToString() ?? "virtualbox";
+        o.PlatformId = selectedPlatform;
         o.VmwareSecurityConfirmed = state.Options.VmwareSecurityConfirmed;
         o.HyperVBasicConsoleConfirmed = state.Options.HyperVBasicConsoleConfirmed;
         o.SharedClipboardEnabled = state.Options.SharedClipboardEnabled;
+        o.DirectClipboardDisabled = state.Options.DirectClipboardDisabled;
         o.ManualCpuConfirmed = !string.IsNullOrEmpty(state.VmId)
             ? state.Options.ManualCpuConfirmed
             : (useCustomVmConfig.IsChecked == true || o.CpuCount != SetupOptions.RecommendedCpuCount(o.PlatformId));
@@ -612,7 +629,21 @@ public sealed partial class SetupWindow : Window
         if (state.Options.UsesMicrosoftGuestAccount) return guestMicrosoftPassword;
         return showPassword.IsChecked == true ? passwordVisible.Text : password.Password;
     }
-    private Secrets ReadSecrets() => ChainSecrets(new() { VmPassword = CurrentGuestPassword(), VmMicrosoftAddress = guestMicrosoftAddress, SubscriptionUrl = subscription.Text.Trim(), NetworkText = networkText.Text, SelectedNodeJson = (node.SelectedItem as ProxyNode)?.Json ?? "", ExpectedExitIp = expectedIp.Text.Trim(), AdsPowerApiKey = adsApiKey.Password });
+    private Secrets ReadSecrets()
+    {
+        var omitAdsApiKey = SetupOptions.ShouldForceManualAdsPower(ProductProfile.IsHyperVStandalone, state.Options.PlatformId, state.VmId) ||
+            state.Options.ManualAdsPower || manualAdsPower.IsChecked == true;
+        return ChainSecrets(new()
+        {
+            VmPassword = CurrentGuestPassword(),
+            VmMicrosoftAddress = guestMicrosoftAddress,
+            SubscriptionUrl = subscription.Text.Trim(),
+            NetworkText = networkText.Text,
+            SelectedNodeJson = (node.SelectedItem as ProxyNode)?.Json ?? "",
+            ExpectedExitIp = expectedIp.Text.Trim(),
+            AdsPowerApiKey = omitAdsApiKey ? "" : adsApiKey.Password
+        });
+    }
     private Deployment Engine() => new(new Progress<string>(message => { log.AppendText(message + Environment.NewLine); log.ScrollToEnd(); banner.Text = message; RecordTaskActivity(message); }), new Progress<DownloadProgress>(p => { progressText.Text = p.Display; RecordTaskDownload(p.Display); progress.IsIndeterminate=p.Total is not >0; progress.Value = p.Total > 0 ? p.Received * 100d / p.Total.Value : 0; if (downloadFeatureInfo is not null) downloadFeatureInfo.Text = p.Display; if (downloadFeatureBar is not null) downloadFeatureBar.Value = progress.Value; }), new Progress<InstallationProgress>(ShowInstallationProgress));
     private void ShowInstallationProgress(InstallationProgress value)
     {
@@ -978,7 +1009,7 @@ public sealed partial class SetupWindow : Window
         CloseDesktopConsole();
         hyperVRdpHost?.Dispose(); hyperVRdpHost = null;
         standaloneRdpWindow = null; hyperVDesktopMode = HyperVDesktopMode.None; explicitHyperVFallbackToA = false;
-        desktopTimer.Stop();autoConnectDesktop=false;desktopConnectionPolicy.ResumeExplicitly();lastConsoleWindow=null;pendingConsole=null;desktopView=null;consoleHost=null;desktopTopBar=null;desktopDetailDrawer=null;desktopActionCluster=null;desktopTopBarToggle=null;desktopFullscreenButton=null;desktopTopBarCollapsed=false;desktopResumeNetworkBanner=null;desktopResumeNetworkText=null;desktopRetryNetworkBtn=null;desktopReconfigureNetworkBtn=null;fallbackVmConnectMenuItem=null;desktopGuidePanel=null;consoleIdleOverlay=null;idleWizardButton=null;desktopClipboardPopup=null;desktopMaintenancePopup=null;desktopMaintenanceExpander=null;desktopStepGuideExpander=null;guideStepChoice=null;guideStepText=null;guidePhase="";
+        desktopTimer.Stop();autoConnectDesktop=false;desktopConnectionPolicy.ResumeExplicitly();lastConsoleWindow=null;pendingConsole=null;desktopView=null;consoleHost=null;desktopTopBar=null;desktopDetailDrawer=null;desktopActionCluster=null;desktopTopBarToggle=null;desktopFullscreenButton=null;desktopTopBarCollapsed=false;desktopResumeNetworkBanner=null;desktopResumeNetworkText=null;desktopRetryNetworkBtn=null;desktopReconfigureNetworkBtn=null;fallbackVmConnectMenuItem=null;desktopGuidePanel=null;consoleIdleOverlay=null;idleWizardButton=null;desktopMaintenancePopup=null;desktopMaintenanceExpander=null;desktopStepGuideExpander=null;guideStepChoice=null;guideStepText=null;guidePhase="";
         RefreshCreationFields();taskFaulted=false;latestTaskActivity="";latestTaskDownload="";
         consent.IsChecked = false; license.IsChecked = false;
         secretsLoaded = !o.Remember || loadSecrets;

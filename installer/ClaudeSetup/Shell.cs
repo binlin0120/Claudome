@@ -84,7 +84,8 @@ public sealed partial class SetupWindow
         brandRow.Children.Add(brandText);
 
         var topNavRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        var moreMenuStack = new StackPanel { MinWidth = 148 };
+        var moreMenuStack = new StackPanel { MinWidth = 176 };
+        var taskResourceButtons = new List<Button>();
         for (var i = 0; i < sections.Length; i++)
         {
             var index = i;
@@ -105,14 +106,33 @@ public sealed partial class SetupWindow
             else
             {
                 button.HorizontalContentAlignment = HorizontalAlignment.Left;
-                button.Padding = new Thickness(12, 8, 12, 8);
+                button.Padding = new Thickness(12, 7, 12, 7);
                 button.Margin = new Thickness(0, 1, 0, 1);
-                moreMenuStack.Children.Add(button);
+                taskResourceButtons.Add(button);
             }
             navigationButtons.Add(button);
         }
-        var moreSep = new Border { Background = Line, Height = 1, Margin = new Thickness(6, 5, 6, 5) };
-        moreMenuStack.Children.Add(moreSep);
+        TextBlock MenuGroupHeading(string heading) => new()
+        {
+            Text = heading,
+            FontSize = 10.5,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Muted,
+            Margin = new Thickness(10, 6, 10, 3)
+        };
+        Border MenuDivider() => new() { Background = Line, Height = 1, Margin = new Thickness(6, 5, 6, 4) };
+
+        var moreAppearanceBtn = Action("◐ 外观与透明度", (_, _) =>
+        {
+            if (topMorePopup is not null) topMorePopup.IsOpen = false;
+            AppearanceDialog();
+        });
+        moreAppearanceBtn.HorizontalContentAlignment = HorizontalAlignment.Left;
+        moreAppearanceBtn.Padding = new Thickness(12, 7, 12, 7);
+        moreAppearanceBtn.Margin = new Thickness(0, 1, 0, 1);
+        moreAppearanceBtn.BorderThickness = new Thickness(0);
+        moreAppearanceBtn.FontSize = 12;
+
         var moreUpdateBtn = Action(ProductProfile.OnlineUpdatesEnabled ? "⟳ 检查与本地更新" : "⟳ 预发布与本地更新", async (_, _) =>
         {
             if (topMorePopup is not null) topMorePopup.IsOpen = false;
@@ -120,20 +140,22 @@ public sealed partial class SetupWindow
             if (ProductProfile.OnlineUpdatesEnabled) await CheckForUpdatesAsync(interactive: true);
         });
         moreUpdateBtn.HorizontalContentAlignment = HorizontalAlignment.Left;
-        moreUpdateBtn.Padding = new Thickness(12, 8, 12, 8);
+        moreUpdateBtn.Padding = new Thickness(12, 7, 12, 7);
         moreUpdateBtn.Margin = new Thickness(0, 1, 0, 1);
         moreUpdateBtn.BorderThickness = new Thickness(0);
         moreUpdateBtn.FontSize = 12;
-        var moreAppearanceBtn = Action("◐ 外观与透明度", (_, _) =>
+
+        var moreLicenseBtn = Action("ⓘ 组件来源与许可", (_, _) =>
         {
             if (topMorePopup is not null) topMorePopup.IsOpen = false;
-            AppearanceDialog();
+            ShowLicenses();
         });
-        moreAppearanceBtn.HorizontalContentAlignment = HorizontalAlignment.Left;
-        moreAppearanceBtn.Padding = new Thickness(12, 8, 12, 8);
-        moreAppearanceBtn.Margin = new Thickness(0, 1, 0, 1);
-        moreAppearanceBtn.BorderThickness = new Thickness(0);
-        moreAppearanceBtn.FontSize = 12;
+        moreLicenseBtn.HorizontalContentAlignment = HorizontalAlignment.Left;
+        moreLicenseBtn.Padding = new Thickness(12, 7, 12, 7);
+        moreLicenseBtn.Margin = new Thickness(0, 1, 0, 1);
+        moreLicenseBtn.BorderThickness = new Thickness(0);
+        moreLicenseBtn.FontSize = 11.5;
+
         var moreGroupBtn = Action("复制交流群 1129410798", (_, _) =>
         {
             if (topMorePopup is not null) topMorePopup.IsOpen = false;
@@ -141,22 +163,20 @@ public sealed partial class SetupWindow
             banner.Text = "群号已复制";
         });
         moreGroupBtn.HorizontalContentAlignment = HorizontalAlignment.Left;
-        moreGroupBtn.Padding = new Thickness(12, 8, 12, 8);
+        moreGroupBtn.Padding = new Thickness(12, 7, 12, 7);
         moreGroupBtn.Margin = new Thickness(0, 1, 0, 1);
         moreGroupBtn.BorderThickness = new Thickness(0);
         moreGroupBtn.FontSize = 11.5;
-        moreMenuStack.Children.Add(moreUpdateBtn);
+
+        // Grouped settings menu: 外观 · 任务与资源 · 帮助与关于
+        moreMenuStack.Children.Add(MenuGroupHeading("外观"));
         moreMenuStack.Children.Add(moreAppearanceBtn);
-        var moreLicenseBtn = Action("ⓘ 组件来源与许可", (_, _) =>
-        {
-            if (topMorePopup is not null) topMorePopup.IsOpen = false;
-            ShowLicenses();
-        });
-        moreLicenseBtn.HorizontalContentAlignment = HorizontalAlignment.Left;
-        moreLicenseBtn.Padding = new Thickness(12, 8, 12, 8);
-        moreLicenseBtn.Margin = new Thickness(0, 1, 0, 1);
-        moreLicenseBtn.BorderThickness = new Thickness(0);
-        moreLicenseBtn.FontSize = 11.5;
+        moreMenuStack.Children.Add(MenuDivider());
+        moreMenuStack.Children.Add(MenuGroupHeading("任务与资源"));
+        foreach (var taskBtn in taskResourceButtons) moreMenuStack.Children.Add(taskBtn);
+        moreMenuStack.Children.Add(MenuDivider());
+        moreMenuStack.Children.Add(MenuGroupHeading("帮助与关于"));
+        moreMenuStack.Children.Add(moreUpdateBtn);
         moreMenuStack.Children.Add(moreLicenseBtn);
         moreMenuStack.Children.Add(moreGroupBtn);
 
@@ -620,21 +640,22 @@ public sealed partial class SetupWindow
         Grid.SetColumn(hostCard, 2);
         overviewGrid.Children.Add(hostCard);
 
-        // 3. 左下：空间构建进程（4 步）+ 快捷入口（保留 UI 自测要求的关键导航按钮）
-        var stepIdx = state.SetupFinished ? 3 : !string.IsNullOrEmpty(state.VmId) ? 2 : selectedMedia is not null ? 1 : 0;
+        // 3. 左下：客户 3 阶段主路径（安装向导 → 安全验真 → 专属桌面）
+        var stageStepIdx = state.SetupFinished ? 2
+            : (state.Completed.Contains("software") ? (state.Protection.FourDimensionsPassed(state) ? 2 : 1) : 0);
         var trackHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
-        var trackPill = OverviewPill(state.SetupFinished ? "空间已落成" : string.IsNullOrEmpty(state.VmId) ? (ineligibility is not null ? "主机受限" : preflight is { RebootPending: true } ? "待重启" : preflight is { AllReady: false } ? "待启用" : "待启程") : "构建中",
+        var trackPill = OverviewPill(state.SetupFinished ? "空间已落成" : string.IsNullOrEmpty(state.VmId) ? (ineligibility is not null ? "主机受限" : preflight is { RebootPending: true } ? "待重启" : preflight is { AllReady: false } ? "待启用" : "待启程") : stageStepIdx == 1 ? "待安全验真" : "构建中",
             state.SetupFinished ? "#E6F5EE" : ineligibility is not null ? "#FCEAE8" : "#FBF0E8",
             state.SetupFinished ? "#176B4E" : ineligibility is not null ? "#A32D26" : "#963E1B");
         DockPanel.SetDock(trackPill, Dock.Right);
         trackHeader.Children.Add(trackPill);
-        trackHeader.Children.Add(Text("空间构建进程", 15, false));
-        var stepGrid = new UniformGrid { Columns = 4, Margin = new Thickness(0, 2, 0, 10) };
-        (string Num, string Title, string Hint)[] stageSpecs = [("01", "环境初检", "系统与硬件"), ("02", "镜像备妥", "下载与复用"), ("03", "空间落成", "建机与隔离"), ("04", "安全落锁", "四维验真")];
+        trackHeader.Children.Add(Text("三步完成专属空间", 15, false));
+        var stepGrid = new UniformGrid { Columns = 3, Margin = new Thickness(0, 2, 0, 10) };
+        (string Num, string Title, string Hint)[] stageSpecs = [("01", "安装向导", "核检建机与配置"), ("02", "安全验真", "四维自动 + 浏览器确认"), ("03", "专属桌面", "独立隔离日常使用")];
         for (var i = 0; i < stageSpecs.Length; i++)
         {
-            var done = i < stepIdx || (i == 3 && state.Protection.FourDimensionsPassed(state));
-            var active = i == stepIdx && !done;
+            var done = i < stageStepIdx || (i == 1 && state.Protection.FourDimensionsPassed(state)) || (i == 2 && state.SetupFinished);
+            var active = i == stageStepIdx && !done;
             var item = new StackPanel { Margin = new Thickness(0, 0, 8, 0) };
             var badge = new Border
             {
@@ -649,7 +670,7 @@ public sealed partial class SetupWindow
             item.Children.Add(new TextBlock { Text = stageSpecs[i].Hint, FontSize = 10.5, Foreground = Muted });
             stepGrid.Children.Add(item);
         }
-        var stepProgress = new ProgressBar { Height = 5, Maximum = 100, Value = state.SetupFinished ? 100 : !string.IsNullOrEmpty(state.VmId) ? 72 : selectedMedia is not null ? 45 : 25, Foreground = Accent, Background = Line, Margin = new Thickness(0, 2, 0, 10) };
+        var stepProgress = new ProgressBar { Height = 5, Maximum = 100, Value = state.SetupFinished ? 100 : stageStepIdx == 1 ? 66 : !string.IsNullOrEmpty(state.VmId) ? 45 : 20, Foreground = Accent, Background = Line, Margin = new Thickness(0, 2, 0, 10) };
         var trackCard = Card(
             trackHeader,
             stepGrid,
@@ -660,12 +681,12 @@ public sealed partial class SetupWindow
         Grid.SetRow(trackCard, 2);
         overviewGrid.Children.Add(trackCard);
 
-        // 4. 右下：上次停留的空间
+        // 4. 右下：当前任务阶段 + 唯一主操作按钮
         var taskHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
-        var taskPill = OverviewPill(string.IsNullOrEmpty(state.VmId) ? "未建机" : state.SetupFinished ? "可进入" : "已暂存", state.SetupFinished ? "#E6F5EE" : "#FDF2DB", state.SetupFinished ? "#176B4E" : "#8A550C");
+        var taskPill = OverviewPill(string.IsNullOrEmpty(state.VmId) ? "未建机" : state.SetupFinished ? "可进入" : stageStepIdx == 1 ? "待验真" : "安装中", state.SetupFinished ? "#E6F5EE" : "#FDF2DB", state.SetupFinished ? "#176B4E" : "#8A550C");
         DockPanel.SetDock(taskPill, Dock.Right);
         taskHeader.Children.Add(taskPill);
-        taskHeader.Children.Add(Text("上次停留的空间", 15, false));
+        taskHeader.Children.Add(Text("当前任务", 15, false));
         var taskBadgeRow = new StackPanel { Orientation = Orientation.Horizontal };
         var miniLogo = new Image { Source = Icon, Width = 34, Height = 34, Margin = new Thickness(0, 0, 10, 0) };
         RenderOptions.SetBitmapScalingMode(miniLogo, BitmapScalingMode.HighQuality);
@@ -676,13 +697,21 @@ public sealed partial class SetupWindow
         taskBadgeRow.Children.Add(taskMeta);
         var taskInner = new Border { Background = Pale, BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(11), Padding = new Thickness(10), Margin = new Thickness(0, 0, 0, 12), Child = taskBadgeRow };
         var canEnter = CanEnterDesktopWorkspace();
-        var taskAction = Action(string.IsNullOrEmpty(state.VmId) ? "载入已有环境" : canEnter ? "继续进入空间  →" : "继续构建空间  →",
+        var taskPrimaryLabel = string.IsNullOrEmpty(state.VmId) ? "载入已有环境"
+            : state.SetupFinished ? "进入桌面"
+            : IsProtectionReadyForFinish() ? "完成设置"
+            : state.Completed.Contains("software") && !state.Protection.FourDimensionsPassed(state) ? "开始验真"
+            : canEnter ? "进入桌面"
+            : "继续安装";
+        var taskAction = Action(taskPrimaryLabel,
             async (_, _) =>
             {
-                if (canEnter) await EnterOriginalWorkspace();
-                else if (!string.IsNullOrEmpty(state.VmId)) Go(5);
-                else LoadTask();
-            });
+                if (string.IsNullOrEmpty(state.VmId)) LoadTask();
+                else if (IsProtectionReadyForFinish()) FinishWorkspace();
+                else if (state.Completed.Contains("software") && !state.SetupFinished && !state.Protection.FourDimensionsPassed(state)) Navigate(5);
+                else if (canEnter) await EnterOriginalWorkspace();
+                else Go(5);
+            }, true);
         var taskCard = Card(taskHeader, taskInner, taskAction);
         taskCard.Margin = new Thickness(0);
         Grid.SetRow(taskCard, 2);
@@ -770,22 +799,18 @@ public sealed partial class SetupWindow
     }
     private void DrawRecovery()
     {
-        subtitle.Text = "先看清状态，再处理需要调整的地方。";
-        main.Children.Add(Card(Text("双重防护", 17, false), Text("外层网关在启动或恢复时核对配置，仅在检查通过后建立受控连接。", 12), Text("内层：保留原有 Clash 服务、TUN、来宾防火墙及检测。", 12), Text("当前内层记录：" + (state.NetworkPassed ? "出口检测有通过记录" : "出口尚未通过") + "；" + (state.OutagePassed ? "断线与恢复有通过记录" : "断线与恢复尚未通过") + "。历史记录不代表当前状态。", 11), Text("外层、内层与浏览器业务验收必须分别确认；任何一项待处理，都不标记环境就绪。", 11)));
-        var host = Machine.Read();
-        if (ProductProfile.IsHyperVStandalone)
-        {
-            main.Children.Add(Card(Text("黑屏与启动诊断", 16, false), Text("只读检查原 Hyper-V 虚拟机的运行状态、集成服务与主机配置。", 11), Row(Action("读取虚拟机诊断", async (_, _) => await ReadVmDiagnostic()), Action("打开程序内桌面", (_, _) => Navigate(7)))));
-        }
-        else
-        {
-            main.Children.Add(Card(Text("黑屏与启动诊断",16,false),Text("只读检查原虚拟机的运行状态、来宾工具与 NEM 兼容模式；若虚拟机已定格或白屏无响应，可使用下方受控入口强制关机并切换为单核防死锁兼容配置（不改主机安全功能）。",11),Row(Action("读取虚拟机诊断",async(_,_)=>await ReadVmDiagnostic()),Action("强制关闭无响应虚拟机并修复",async(_,_)=>await ForceRepairVirtualBoxDialog()),Action("打开程序内桌面",(_,_)=>Navigate(7)))));
-        }
+        subtitle.Text = "一键顺序完成 4 项自动网络验真，再由本人确认浏览器出口。";
         foreach (var action in state.PendingActions) main.Children.Add(PendingCard(action));
         main.Children.Add(BuildProtectionCard());
-        main.Children.Add(BuildValidationCard());
-        main.Children.Add(Card(Text("这台电脑", 15, false), Text(host.Summary, 12), Text(host.FreeMemory < 6L * 1024 * 1024 * 1024 ? "启动默认虚拟机前，请先关闭闲置应用，空出约 6 GB 内存。" : "默认虚拟机的启动内存余量已满足。", 11), Row(Action("重新检查", (_, _) => { RefreshHost(); Navigate(5); }), Action("查看验收报告", (_, _) => ShowReport()), Action("导出诊断信息", async (_, _) => await ExportDiagnostics()))));
-        main.Children.Add(Card(Text("当前任务", 15, false), Text(string.IsNullOrEmpty(state.VmId) ? "还没有已载入的环境。" : state.Stage, 12), Text("浏览器检测和登录结果由实际操作确认；安装记录不会冒充当前连通性。", 11), Row(Action("继续安装 / 修复", (_, _) => Go(5)), Action("载入任务", (_, _) => LoadTask()))));
+        var host = Machine.Read();
+        if (!ProductProfile.IsHyperVStandalone)
+        {
+            main.Children.Add(Card(Text("黑屏与启动诊断", 16, false), Text("只读检查原虚拟机的运行状态、来宾工具与 NEM 兼容模式；若虚拟机已定格或白屏无响应，可使用下方受控入口强制关机并切换为单核防死锁兼容配置（不改主机安全功能）。", 11), Row(Action("读取虚拟机诊断", async (_, _) => await ReadVmDiagnostic()), Action("强制关闭无响应虚拟机并修复", async (_, _) => await ForceRepairVirtualBoxDialog()), Action("进入桌面", (_, _) => Navigate(7)))));
+            main.Children.Add(BuildValidationCard());
+        }
+        main.Children.Add(Card(Text("本机与任务信息", 15, false),
+            Text($"{host.Summary}\n当前任务：{(string.IsNullOrEmpty(state.VmId) ? "还没有已载入的环境。" : state.Stage)}", 12),
+            Row(Action("查看验收报告", (_, _) => ShowReport()), Action("导出诊断信息", async (_, _) => await ExportDiagnostics()), Action("继续安装", (_, _) => Go(5)), Action("载入任务", (_, _) => LoadTask()))));
     }
     private void OpenWorkspace()
     {

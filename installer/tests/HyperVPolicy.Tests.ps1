@@ -983,6 +983,43 @@ Check 'outage-test-retries-transient-recovery-and-requires-both-block-and-recove
     }
 }
 
+Check 'clipboard-sync-agent-parses-and-enforces-unicode-only-isolation' {
+    $agentPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\ClipboardSyncAgent.ps1'))
+    Assert-Case ([IO.File]::Exists($agentPath))
+    $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile($agentPath, [ref]$null, [ref]$parseErrors)
+    Assert-Case ($parseErrors.Count -eq 0)
+    $raw = [IO.File]::ReadAllText($agentPath, [Text.UTF8Encoding]::new($false))
+    Assert-Case ($raw.Contains('CF_UNICODETEXT = 13'))
+    Assert-Case ($raw.Contains('CF_HDROP = 15'))
+    Assert-Case ($raw.Contains('IsClipboardFormatAvailable(CF_HDROP)'))
+    Assert-Case ($raw.Contains('AddClipboardFormatListener'))
+    Assert-Case ($raw.Contains('GetClipboardSequenceNumber'))
+    Assert-Case ($raw.Contains('CLDCLP01'))
+    Assert-Case ($raw.Contains('a42e7cda-d03f-480c-9cc2-a4de20abb878'))
+    Assert-Case ($raw.Contains('[IO.File]::Delete($bootstrapFile)'))
+}
+
+Check 'hyperv-worker-clipboard-service-path-verifies-task-scoped-element-name' {
+    $workerPath = Join-Path $PSScriptRoot '..\ClaudeSetup\Guest\HyperVWorker.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($workerPath, [ref]$null, [ref]$null)
+    $clipFn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Clipboard-ServicePath' }, $true) | Select-Object -First 1
+    Assert-Case ($null -ne $clipFn)
+    . ([scriptblock]::Create($clipFn.Extent.Text))
+    $savedO = $script:o
+    try {
+        $script:o = [pscustomobject]@{ WorkspaceId = 'ws-clip-123' }
+        $good = Clipboard-ServicePath ([pscustomobject]@{ workspaceId = 'ws-clip-123'; clipboardServiceId = '11111111-2222-3333-4444-555555555555' })
+        Assert-Case ($good.EndsWith('\11111111-2222-3333-4444-555555555555'))
+        $threwScope = $false
+        try { $null = Clipboard-ServicePath ([pscustomobject]@{ workspaceId = 'other-ws'; clipboardServiceId = '11111111-2222-3333-4444-555555555555' }) }
+        catch { $threwScope = ($_.Exception.Message -eq 'VM_SCOPE') }
+        Assert-Case $threwScope
+    } finally {
+        $script:o = $savedO
+    }
+}
+
 # Call the real .NET file API directly; the mock registry provider remains scoped
 # to this test process, not the user's PowerShell session or machine.
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null
